@@ -9,6 +9,9 @@ contract MillionairesProblem {
     uint256 public constant N = 10;
     InstanceCommitment[N] public instanceCommitments;
 
+    uint256 public m;
+    uint256[] public sOpen;
+
     struct Deadlines {
         uint256 deposit;        // Phase 1: Alice & Bob must lock funds
         uint256 commit;        // Phase 2: Alice must submit GC
@@ -112,5 +115,48 @@ contract MillionairesProblem {
         // Optional: Send a small amount to address(0)
 
         currentStage = Stage.Closed;
+    }
+
+    /**
+     * @dev Phase 3: Bob chooses which instance to evaluate.
+     */
+    function choose(uint256 _m) external {
+        require(currentStage == Stage.Choose, "Wrong stage");
+        require(msg.sender == bob, "Only Evaluator");
+        require(block.timestamp <= deadlines.choose, "Choice deadline missed");
+        require(_m < N, "Index out of bounds");
+
+        m = _m;
+        for (uint256 i = 0; i < N; i++) {
+            if (i != m) { sOpen.push(i); }
+        }
+
+        currentStage = Stage.Open;
+        deadlines.open = block.timestamp + 1 hours;
+    }
+
+    /**
+     * @dev Phase 3 Timeout: If Bob fails to choose index m by the deadline.
+     * Alice can call this to reclaim her funds and Bob's collateral.
+     */
+    function abortPhase3() external {
+        require(currentStage == Stage.Choose, "Not in choose stage");
+        require(block.timestamp > deadlines.choose, "Bob is not late yet");
+        require(msg.sender == alice, "Only Alice can trigger this abort");
+
+        uint256 amountAlice = vault[alice];
+        uint256 amountBob = vault[bob];
+
+        vault[alice] = 0;
+        vault[bob] = 0;
+        uint256 totalPayout = amountAlice + amountBob;
+
+        (bool success, ) = payable(alice).call{value: totalPayout}("");
+        require(success, "Refund to Alice failed");
+        currentStage = Stage.Closed;
+    }
+
+    function getSOpenLength() external view returns (uint256) {
+        return sOpen.length;
     }
 }

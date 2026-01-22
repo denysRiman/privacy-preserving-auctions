@@ -126,4 +126,43 @@ contract MillionairesTest is Test {
         vm.expectRevert("Commitment deadline missed");
         mp.submitCommitments(commits);
     }
+
+    function test_BobChoice() public {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+        vm.prank(alice);
+        mp.submitCommitments(commits);
+
+        vm.prank(bob);
+        mp.choose(5);
+
+        assertEq(mp.m(), 5);
+        assertEq(uint(mp.currentStage()), 3);
+
+        assertEq(mp.getSOpenLength(), 9);
+    }
+
+    function test_AbortPhase3_AlicePenalty() public {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+        vm.prank(alice);
+        mp.submitCommitments(commits);
+
+        vm.warp(block.timestamp + 1 hours + 1 seconds);
+
+        uint256 aliceBalanceBefore = alice.balance;
+        vm.prank(alice);
+        mp.abortPhase3();
+
+        assertEq(alice.balance, aliceBalanceBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), 6); // Stage.Closed
+    }
 }
