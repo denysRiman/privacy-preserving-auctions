@@ -26,7 +26,7 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
         assertEq(mp.vault(bob), 1 ether);
 
-        assertEq(uint(mp.currentStage()), 2);
+        assertEq(uint(mp.currentStage()), 1);
     }
 
     function test_Fail_DoubleDeposit() public {
@@ -67,5 +67,63 @@ contract MillionairesTest is Test {
 
         assertEq(alice.balance, balanceBefore + 1 ether);
         assertEq(mp.vault(alice), 0);
+    }
+
+    function test_SubmitCommitments() public {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        // 2. Prepare mock commitments for N=10 instances
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+        for (uint256 i = 0; i < 10; i++) {
+            commits[i] = MillionairesProblem.InstanceCommitment({
+                comSeed: keccak256(abi.encode(i, "seed")),
+                rootGC: keccak256(abi.encode(i, "gc")),
+                rootXG: keccak256(abi.encode(i, "xg")),
+                rootOT: keccak256(abi.encode(i, "ot")),
+                h0: keccak256(abi.encode(i, "h0")),
+                h1: keccak256(abi.encode(i, "h1"))
+            });
+        }
+
+        // 3. Alice submits commitments
+        vm.prank(alice);
+        mp.submitCommitments(commits);
+
+        // 4. Verify stage transition to Choose
+        assertEq(uint(mp.currentStage()), 2);
+    }
+
+    function test_AbortPhase2_BobPenalty() public {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        vm.warp(block.timestamp + 1 hours + 1 seconds);
+
+        uint256 bobBalanceBefore = bob.balance;
+        vm.prank(bob);
+        mp.abortPhase2();
+
+        // Bob should have his 1 ETH back + Alice's 1 ETH penalty
+        assertEq(bob.balance, bobBalanceBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), 6); // Stage.Closed (index 6)
+    }
+
+    function test_Fail_AliceLateCommitment() public {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        vm.warp(block.timestamp + 1 hours + 1 seconds);
+
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+        vm.prank(alice);
+        vm.expectRevert("Commitment deadline missed");
+        mp.submitCommitments(commits);
     }
 }
