@@ -17,6 +17,7 @@ contract MillionairesProblem {
         uint256 commit;        // Phase 2: Alice must submit GC
         uint256 choose;       // Phase 3: Bob must pick index m
         uint256 open;        // Phase 4: Alice must reveal n-1 seeds
+        uint256 dispute;    // Phase 5: Off-chain verification + Dispute window
         uint256 settle;
     }
 
@@ -37,6 +38,9 @@ contract MillionairesProblem {
 
     mapping(address => uint256) public vault;
     Deadlines public deadlines;
+
+    // Mapping to store revealed seeds for verification (index => seed)
+    mapping(uint256 => bytes32) public revealedSeeds;
 
     constructor(address _bob) {
         alice = msg.sender;
@@ -153,6 +157,58 @@ contract MillionairesProblem {
 
         (bool success, ) = payable(alice).call{value: totalPayout}("");
         require(success, "Refund to Alice failed");
+        currentStage = Stage.Closed;
+    }
+
+    /**
+     * @dev Phase 4: Alice reveals seeds for n-1 instances.
+     * @param _indices Array of indices being opened (must match sOpen).
+     * @param _seeds Array of seeds corresponding to those indices.
+     */
+    function revealOpenings(uint256[] calldata _indices, bytes32[] calldata _seeds) external {
+        require(currentStage == Stage.Open, "Wrong stage");
+        require(msg.sender == alice, "Only Garbler");
+        require(block.timestamp <= deadlines.open, "Reveal deadline missed");
+        require(_indices.length == N - 1, "Must reveal N-1 seeds");
+
+        for (uint256 i = 0; i < _indices.length; i++) {
+            uint256 idx = _indices[i];
+
+            require(idx != m, "Cannot reveal evaluation index");
+
+            // Verify the seed matches the commitment from Phase 2
+            // H(seed) == instanceCommitments[idx].comSeed
+            require(
+                keccak256(abi.encodePacked(_seeds[i])) == instanceCommitments[idx].comSeed,
+                "Invalid seed reveal"
+            );
+
+            revealedSeeds[idx] = _seeds[i];
+        }
+
+        currentStage = Stage.Dispute;
+        deadlines.dispute = block.timestamp + 1 hours;
+    }
+
+    /**
+     * @dev Phase 4 Timeout: If Alice fails to reveal seeds by the deadline.
+     * Bob can claim the penalty.
+     */
+    function abortPhase4() external {
+        require(currentStage == Stage.Open, "Not in open stage");
+        require(block.timestamp > deadlines.open, "Alice is not late yet");
+        require(msg.sender == bob, "Only Bob can trigger this");
+
+        uint256 amountAlice = vault[alice];
+        uint256 amountBob = vault[bob];
+
+        vault[alice] = 0;
+        vault[bob] = 0;
+
+        // Bob gets everything as compensation
+        (bool success, ) = payable(bob).call{value: amountAlice + amountBob}("");
+        require(success, "Penalty transfer failed");
+
         currentStage = Stage.Closed;
     }
 

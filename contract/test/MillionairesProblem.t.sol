@@ -165,4 +165,71 @@ contract MillionairesTest is Test {
         assertEq(alice.balance, aliceBalanceBefore + 2 ether);
         assertEq(uint(mp.currentStage()), 6); // Stage.Closed
     }
+
+    function test_RevealOpenings_Success() public {
+        // --- Phase 1: Deposits ---
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        // --- Phase 2: Commitments ---
+        // Generate specific seeds to verify them later
+        bytes32[] memory realSeeds = new bytes32[](10);
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+
+        for (uint256 i = 0; i < 10; i++) {
+            realSeeds[i] = keccak256(abi.encodePacked("secret_seed_", i));
+            commits[i] = MillionairesProblem.InstanceCommitment({
+                comSeed: keccak256(abi.encodePacked(realSeeds[i])),
+                rootGC: bytes32(0),
+                rootXG: bytes32(0),
+                rootOT: bytes32(0),
+                h0: bytes32(0),
+                h1: bytes32(0)
+            });
+        }
+        vm.prank(alice);
+        mp.submitCommitments(commits);
+
+        // --- Phase 3: Choose ---
+        uint256 chosenM = 5;
+        vm.prank(bob);
+        mp.choose(chosenM);
+
+        // --- Phase 4: Reveal ---
+        // Prepare arrays for 9 instances (N-1)
+        uint256[] memory indices = new uint256[](9);
+        bytes32[] memory seedsToReveal = new bytes32[](9);
+        uint256 counter = 0;
+
+        for (uint256 i = 0; i < 10; i++) {
+            if (i != chosenM) {
+                indices[counter] = i;
+                seedsToReveal[counter] = realSeeds[i];
+                counter++;
+            }
+        }
+
+        vm.prank(alice);
+        mp.revealOpenings(indices, seedsToReveal);
+
+        assertEq(uint(mp.currentStage()), 4); // Stage.Dispute
+        assertEq(mp.revealedSeeds(0), realSeeds[0]);
+        assertEq(mp.revealedSeeds(chosenM), bytes32(0)); // Evaluation seed must remain hidden
+    }
+
+    function test_AbortPhase4_AlicePenalty() public {
+        // Setup to Stage.Open
+        test_BobChoice();
+        vm.warp(block.timestamp + 1 hours + 1 seconds);
+
+        uint256 bobBalanceBefore = bob.balance;
+        vm.prank(bob);
+        mp.abortPhase4();
+
+        // Bob gets both deposits (2 ETH) for Alice's silence
+        assertEq(bob.balance, bobBalanceBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), 6);
+    }
 }
