@@ -41,4 +41,20 @@ contract MillionairesProblem {
             currentStage = Stage.Commitments;
         }
     }
+
+    /**
+     * @dev Timeout logic for Phase 1.
+     * Allows refund if the other party fails to deposit by the deadline.
+     */
+    function refund() external {
+        require(currentStage == Stage.Deposits, "Too late for refund");
+        require(block.timestamp > deadlines.commit, "Deadline not reached");
+        require(vault[msg.sender] > 0, "Nothing to refund");
+
+        uint256 amount = vault[msg.sender];
+        vault[msg.sender] = 0;
+
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        require(success, "Transfer failed");
+    }
 }

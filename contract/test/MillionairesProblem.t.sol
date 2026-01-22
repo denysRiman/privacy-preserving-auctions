@@ -6,8 +6,8 @@ import "../src/MillionairesProblem.sol";
 
 contract MillionairesTest is Test {
     MillionairesProblem mp;
-    address alice = address(0x1);
-    address bob = address(0x2);
+    address alice = makeAddr("alice");
+    address bob = makeAddr("bob");
 
     function setUp() public {
         vm.prank(alice);
@@ -47,11 +47,25 @@ contract MillionairesTest is Test {
     }
 
     function test_Fail_Unauthorized() public {
-        address hacker = address(0x666);
+        address hacker = makeAddr("hacker");
         vm.deal(hacker, 1 ether);
 
         vm.prank(hacker);
         vm.expectRevert("Not authorized");
         mp.deposit{value: 1 ether}();
+    }
+
+    function test_RefundAfterTimeout() public {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+
+        vm.warp(block.timestamp + 1 hours + 1);
+
+        uint256 balanceBefore = alice.balance;
+        vm.prank(alice);
+        mp.refund();
+
+        assertEq(alice.balance, balanceBefore + 1 ether);
+        assertEq(mp.vault(alice), 0);
     }
 }
