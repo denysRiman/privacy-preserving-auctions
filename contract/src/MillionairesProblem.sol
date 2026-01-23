@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 contract MillionairesProblem {
     address public alice; //Garbler
     address public bob; //Evaluator
+    bool public result;
 
     // Number of instances for Cut-and-Choose
     uint256 public constant N = 10;
@@ -245,6 +246,65 @@ contract MillionairesProblem {
 
         (bool success, ) = payable(bob).call{value: total}("");
         require(success, "Penalty transfer failed");
+
+        currentStage = Stage.Closed;
+    }
+
+    /**
+     * @dev Phase 6: Bob (Evaluator) submits the final output label.
+     * The contract verifies it against Alice's anchors (h0, h1).
+     * @param _outputLabel The label resulting from Ev(F, X).
+     */
+    function settle(bytes32 _outputLabel) external {
+        require(currentStage == Stage.Settle, "Wrong stage");
+        require(msg.sender == bob, "Only Evaluator");
+        require(block.timestamp <= deadlines.settle, "Settlement deadline missed");
+
+        InstanceCommitment storage evalInstance = instanceCommitments[m];
+
+        uint256 payoutAlice;
+        uint256 payoutBob;
+
+        // Verify if the label matches H(Lout0) or H(Lout1)
+        if (keccak256(abi.encodePacked(_outputLabel)) == evalInstance.h0) {
+            payoutAlice = vault[alice] + vault[bob];
+            result = true;
+        } else if (keccak256(abi.encodePacked(_outputLabel)) == evalInstance.h1) {
+            payoutBob = vault[alice] + vault[bob];
+            result = false;
+        } else {
+            revert("Invalid output label");
+        }
+
+        vault[alice] = 0;
+        vault[bob] = 0;
+        if (payoutAlice > 0) {
+            (bool s1, ) = payable(alice).call{value: payoutAlice}("");
+            require(s1, "Payout to Alice failed");
+        }
+        if (payoutBob > 0) {
+            (bool s2, ) = payable(bob).call{value: payoutBob}("");
+            require(s2, "Payout to Bob failed");
+        }
+
+        currentStage = Stage.Closed;
+    }
+
+    /**
+     * @dev Phase 6 Timeout: If Bob fails to settle the result.
+     * Alice can claim the funds after the deadline.
+     */
+    function abortPhase6() external {
+        require(currentStage == Stage.Settle, "Not in settle stage");
+        require(block.timestamp > deadlines.settle, "Bob is not late yet");
+        require(msg.sender == alice, "Only Alice can trigger this");
+
+        uint256 total = vault[alice] + vault[bob];
+        vault[alice] = 0;
+        vault[bob] = 0;
+
+        (bool success, ) = payable(alice).call{value: total}("");
+        require(success, "Refund to Alice failed");
 
         currentStage = Stage.Closed;
     }
