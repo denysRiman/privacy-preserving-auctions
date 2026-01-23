@@ -232,4 +232,31 @@ contract MillionairesTest is Test {
         assertEq(bob.balance, bobBalanceBefore + 2 ether);
         assertEq(uint(mp.currentStage()), 6);
     }
+
+    function test_RevealGarblerLabels_Success() public {
+        test_RevealOpenings_Success();
+
+        bytes32[] memory mockLabels = new bytes32[](32);
+        for(uint i = 0; i < 32; i++) {
+            mockLabels[i] = keccak256(abi.encodePacked("alice_label_", i));
+        }
+
+        vm.prank(alice);
+        mp.revealGarblerLabels(mockLabels);
+
+        assertEq(uint(mp.currentStage()), 5); // Stage.Settle
+    }
+
+    function test_AbortPhase5_AlicePenalty() public {
+        test_RevealOpenings_Success();
+
+        vm.warp(block.timestamp + 1 hours + 1 seconds);
+
+        uint256 bobBalanceBefore = bob.balance;
+        vm.prank(bob);
+        mp.abortPhase5();
+
+        assertEq(bob.balance, bobBalanceBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), 6); // Stage.Closed
+    }
 }

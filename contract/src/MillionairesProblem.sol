@@ -12,13 +12,15 @@ contract MillionairesProblem {
     uint256 public m;
     uint256[] public sOpen;
 
+    bytes32[] public garblerLabels;
+
     struct Deadlines {
-        uint256 deposit;        // Phase 1: Alice & Bob must lock funds
-        uint256 commit;        // Phase 2: Alice must submit GC
-        uint256 choose;       // Phase 3: Bob must pick index m
-        uint256 open;        // Phase 4: Alice must reveal n-1 seeds
-        uint256 dispute;    // Phase 5: Off-chain verification + Dispute window
-        uint256 settle;
+        uint256 deposit;          // Phase 1: Alice & Bob must lock funds
+        uint256 commit;          // Phase 2: Alice must submit GC
+        uint256 choose;         // Phase 3: Bob must pick index m
+        uint256 open;          // Phase 4: Alice must reveal n-1 seeds
+        uint256 dispute;      // Phase 5: Off-chain verification + Dispute window
+        uint256 settle;      // Phase 6 (Final result)
     }
 
     struct InstanceCommitment {
@@ -207,6 +209,41 @@ contract MillionairesProblem {
 
         // Bob gets everything as compensation
         (bool success, ) = payable(bob).call{value: amountAlice + amountBob}("");
+        require(success, "Penalty transfer failed");
+
+        currentStage = Stage.Closed;
+    }
+
+    /**
+     * @dev Phase 5: Alice reveals her input labels for the evaluation circuit m.
+     * These labels correspond to her private input x.
+     * @param _labels The set of wire labels for Alice's input.
+     */
+    function revealGarblerLabels(bytes32[] calldata _labels) external {
+        require(currentStage == Stage.Dispute, "Wrong stage");
+        require(msg.sender == alice, "Only Garbler");
+        require(block.timestamp <= deadlines.dispute, "Label reveal deadline missed");
+
+        garblerLabels = _labels;
+
+        currentStage = Stage.Settle;
+        deadlines.settle = block.timestamp + 1 hours;
+    }
+
+    /**
+     * @dev Phase 5 Timeout: If Alice fails to provide her input labels.
+     * Bob claims the penalty because he cannot evaluate the circuit.
+     */
+    function abortPhase5() external {
+        require(currentStage == Stage.Dispute, "Not in dispute stage");
+        require(block.timestamp > deadlines.dispute, "Alice is not late yet");
+        require(msg.sender == bob, "Only Bob can trigger this");
+
+        uint256 total = vault[alice] + vault[bob];
+        vault[alice] = 0;
+        vault[bob] = 0;
+
+        (bool success, ) = payable(bob).call{value: total}("");
         require(success, "Penalty transfer failed");
 
         currentStage = Stage.Closed;
