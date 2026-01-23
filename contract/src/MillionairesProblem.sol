@@ -225,6 +225,17 @@ contract MillionairesProblem {
         require(msg.sender == alice, "Only Garbler");
         require(block.timestamp <= deadlines.dispute, "Label reveal deadline missed");
 
+        bytes32 bHash = blobhash(0);
+
+        // test network only
+        if (block.chainid != 31337) {
+            require(bHash != bytes32(0), "Garbled Table Blob missing");
+            require(bHash == instanceCommitments[m].rootGC, "Blob does not match Phase 2 commitment");
+        } else {
+            bHash = instanceCommitments[m].rootGC;
+        }
+
+        evaluationTableBlobHash = bHash;
         garblerLabels = _labels;
 
         currentStage = Stage.Settle;
