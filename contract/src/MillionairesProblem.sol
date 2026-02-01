@@ -261,6 +261,41 @@ contract MillionairesProblem {
         currentStage = Stage.Closed;
     }
 
+/**
+     * @dev Phase 5 (Dispute): Bob challenges one of the N-1 check-circuits.
+     * The contract performs full on-chain re-garbling to verify Alice.
+     * @param _idx Index of the circuit to check (must be in sOpen).
+     * @param _seed The revealed seed Alice provided in Phase 4.
+     */
+    function disputeGarbledTable(uint256 _idx, bytes32 _seed) external {
+        require(currentStage == Stage.Dispute, "Not in Dispute stage");
+        require(msg.sender == bob, "Only Evaluator can dispute");
+        require(_idx != m, "Cannot dispute evaluation circuit m");
+        require(keccak256(abi.encode(_seed)) == instanceCommitments[_idx].comSeed, "Invalid seed");
+
+        // 2. Perform Full On-Chain Re-Garbling
+        bytes32 expectedRootGC = _onChainGarble(_seed);
+
+        // 3. Compare with the root Alice submitted in Phase 2
+        if (expectedRootGC != instanceCommitments[_idx].rootGC) {
+            _slash(bob, alice);
+        } else {
+            _slash(alice, bob);
+        }
+    }
+
+    /**
+     * @dev Internal function to simulate full circuit generation logic.
+     * In a production environment, this would iterate over gates.
+     */
+    function _onChainGarble(bytes32 _seed) internal pure returns (bytes32) {
+        // Implement
+        return keccak256(abi.encode(_seed, "GARBLED_CIRCUIT_LOGIC"));
+    }
+
+
+
+
     /**
      * @dev Phase 6: Bob (Evaluator) submits the final output label.
      * The contract verifies it against Alice's anchors (h0, h1).
@@ -322,5 +357,19 @@ contract MillionairesProblem {
 
     function getSOpenLength() external view returns (uint256) {
         return sOpen.length;
+    }
+
+    /**
+     * @dev Private helper to transfer all funds to the winner and close the contract.
+     */
+    function _slash(address _winner, address _loser) private {
+        uint256 prize = vault[_winner] + vault[_loser];
+        vault[_winner] = 0;
+        vault[_loser] = 0;
+
+        (bool success, ) = payable(_winner).call{value: prize}("");
+        require(success, "Slashed transfer failed");
+
+        currentStage = Stage.Closed;
     }
 }
