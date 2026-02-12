@@ -1,5 +1,6 @@
-// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
+
+import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 contract MillionairesProblem {
     address public alice; //Garbler
@@ -13,6 +14,9 @@ contract MillionairesProblem {
     uint256 public m;
     uint256[] public sOpen;
 
+    bytes32 public evaluationTableBlobHash;
+    bytes32 public circuitLayoutRoot;
+
     bytes32[] public garblerLabels;
 
     struct Deadlines {
@@ -21,7 +25,8 @@ contract MillionairesProblem {
         uint256 choose;         // Phase 3: Bob must pick index m
         uint256 open;          // Phase 4: Alice must reveal n-1 seeds
         uint256 dispute;      // Phase 5: Off-chain verification + Dispute window
-        uint256 settle;      // Phase 6 (Final result)
+        uint256 labels;       // Phase 6: Alice must reveal garbler input labels
+        uint256 settle;       // Phase 7: Bob must submit final output label (Final result)
     }
 
     struct InstanceCommitment {
@@ -33,7 +38,7 @@ contract MillionairesProblem {
         bytes32 h1;        // Result anchor for output 1: H(Lout1)
     }
 
-    enum Stage { Deposits, Commitments, Choose, Open, Dispute, Settle, Closed }
+    enum Stage { Deposits, Commitments, Choose, Open, Dispute, Labels, Settle, Closed }
     Stage public currentStage;
 
     uint256 public constant DEPOSIT_GARBLER = 1 ether;
@@ -45,9 +50,11 @@ contract MillionairesProblem {
     // Mapping to store revealed seeds for verification (index => seed)
     mapping(uint256 => bytes32) public revealedSeeds;
 
-    constructor(address _bob) {
+    constructor(address _bob, bytes32 _circuitId, bytes32 _circuitLayoutRoot) {
         alice = msg.sender;
         bob = _bob;
+        circuitId = _circuitId;
+        circuitLayoutRoot = _circuitLayoutRoot;
 
         currentStage = Stage.Deposits;
         deadlines.deposit = block.timestamp + 1 hours;
@@ -191,6 +198,7 @@ contract MillionairesProblem {
 
         currentStage = Stage.Dispute;
         deadlines.dispute = block.timestamp + 1 hours;
+        deadlines.labels  = deadlines.dispute + 1 hours;
     }
 
     /**
@@ -221,9 +229,9 @@ contract MillionairesProblem {
      * @param _labels The set of wire labels for Alice's input.
      */
     function revealGarblerLabels(bytes32[] calldata _labels) external {
-        require(currentStage == Stage.Dispute, "Wrong stage");
+        require(currentStage == Stage.Labels, "Wrong stage");
         require(msg.sender == alice, "Only Garbler");
-        require(block.timestamp <= deadlines.dispute, "Label reveal deadline missed");
+        require(block.timestamp <= deadlines.labels, "Label reveal deadline missed");
 
         bytes32 bHash = blobhash(0);
 
@@ -247,8 +255,8 @@ contract MillionairesProblem {
      * Bob claims the penalty because he cannot evaluate the circuit.
      */
     function abortPhase5() external {
-        require(currentStage == Stage.Dispute, "Not in dispute stage");
-        require(block.timestamp > deadlines.dispute, "Alice is not late yet");
+        require(currentStage == Stage.Labels, "Not in labels stage");
+        require(block.timestamp > deadlines.labels, "Alice is not late yet");
         require(msg.sender == bob, "Only Bob can trigger this");
 
         uint256 total = vault[alice] + vault[bob];
@@ -372,4 +380,240 @@ contract MillionairesProblem {
 
         currentStage = Stage.Closed;
     }
+
+    function closeDispute() external {
+        require(currentStage == Stage.Dispute, "Wrong stage");
+
+        // Bob can close anytime (early close)
+        if (msg.sender == bob) {
+            currentStage = Stage.Labels;
+            return;
+        }
+
+        require(msg.sender == alice, "Only Alice can close after deadline");
+        require(block.timestamp > deadlines.dispute, "Dispute window still open");
+        currentStage = Stage.Labels;
+    }
+
+    // ------ GC part ------
+    //  Spec primitives
+
+    // setting primitives
+    uint256 private constant LABEL_BYTES = 16;
+    bytes32 public circuitId;
+
+    function computeWireFlipBit(bytes32 seed, uint256 instanceId, uint16 wireId) internal view returns (uint8) {
+        // Returns 0/1. Used to define point and permute bits for this wire.
+        bytes32 h = keccak256(abi.encodePacked("P", circuitId, instanceId, wireId, seed));
+        return uint8(h[31]) & 1;
+    }
+
+    function setFirstByteLsb(bytes16 value, uint8 bit) internal pure returns (bytes16) {
+        // Sets the LSB of the first byte to bit (0/1).
+        bytes memory tmp = abi.encodePacked(value);
+        tmp[0] = bytes1((uint8(tmp[0]) & 0xFE) | (bit & 1));
+
+        bytes16 out;
+        assembly {
+            out := mload(add(tmp, 32))
+        }
+        return out;
+    }
+
+    function deriveWireLabel(bytes32 seed, uint256 instanceId, uint16 wireId, uint8 semanticBit)
+    internal view returns (bytes16) {
+        // Deterministically derives label(wireId, semanticBit) from seed.
+        bytes32 h = keccak256(abi.encodePacked("L", circuitId, instanceId, wireId, semanticBit, seed));
+        bytes16 label = bytes16(h);
+
+        // Point-and-permute bit: p = flipBit XOR semanticBit
+        uint8 flipBit = computeWireFlipBit(seed, instanceId, wireId);
+        uint8 permuteBit = flipBit ^ (semanticBit & 1);
+
+        return setFirstByteLsb(label, permuteBit);
+    }
+
+    function getPermutationBit(bytes16 label) internal pure returns (uint8) {
+        // Reads the point-and-permute bit (LSB of first byte).
+        return uint8(label[0]) & 1;
+    }
+
+    function xorLabel(bytes16 a, bytes16 b) internal pure returns (bytes16) {
+        // XOR for 16-byte labels/pads.
+        return bytes16(uint128(a) ^ uint128(b));
+    }
+
+    function expandPad(bytes32 rowKey) internal pure returns (bytes16) {
+        // Expands a 32-byte key into a 16-byte pad.
+        return bytes16(keccak256(abi.encodePacked("PAD", rowKey)));
+    }
+
+    function computeRowKey(bytes16 labelA, bytes16 labelB, uint256 instanceId,
+        uint256 gateIndex, uint8 permA, uint8 permB) internal view returns (bytes32) {
+        // Row key bound to circuitId, instance, gate, row selector bits, and input labels.
+        return keccak256(abi.encodePacked("K", circuitId, instanceId, gateIndex, permA, permB, labelA, labelB));
+    }
+
+    // Gate description + per-gate leaf recomputation
+
+    enum GateType { AND, XOR, NOT }
+
+    struct GateDesc {
+        GateType gateType;
+        uint16 wireA;
+        uint16 wireB; // for NOT can be 0
+        uint16 wireC;
+    }
+
+    function recomputeGateLeafBytes(bytes32 seed, uint256 instanceId, uint256 gateIndex, GateDesc memory g) internal view returns (bytes memory leafBytes) {
+        // Leaf encoding:
+        // gateType (1 byte) || wireA (2) || wireB (2) || wireC (2) || row0(16) || row1(16) || row2(16) || row3(16)
+
+        bytes16 row0;
+        bytes16 row1;
+        bytes16 row2;
+        bytes16 row3;
+
+        if (g.gateType == GateType.NOT) {
+            // Canonical: NOT has no garbled table (rows = 0). Semantics handled by circuit layout.
+            // Keep rows zeroed.
+        } else {
+            // Wire flip bits (point-and-permute seeds)
+            uint8 flipA = computeWireFlipBit(seed, instanceId, g.wireA);
+            uint8 flipB = computeWireFlipBit(seed, instanceId, g.wireB);
+
+            // Iterate over permutation-bit pairs (permA, permB) in {0,1}x{0,1}
+            for (uint8 permA = 0; permA <= 1; permA++) {
+                for (uint8 permB = 0; permB <= 1; permB++) {
+                    // Map permutation bits back to semantic bits:
+                    // permBit = flipBit XOR semanticBit  => semanticBit = permBit XOR flipBit
+                    uint8 bitA = permA ^ flipA;
+                    uint8 bitB = permB ^ flipB;
+
+                    uint8 outBit;
+                    if (g.gateType == GateType.AND) {
+                        outBit = bitA & bitB;
+                    } else {
+                        // XOR
+                        outBit = bitA ^ bitB;
+                    }
+
+                    // Input wire labels for this semantic choice
+                    bytes16 labelA = deriveWireLabel(seed, instanceId, g.wireA, bitA);
+                    bytes16 labelB = deriveWireLabel(seed, instanceId, g.wireB, bitB);
+
+                    // Output wire label
+                    bytes16 outLabel = deriveWireLabel(seed, instanceId, g.wireC, outBit);
+
+                    // Row encryption: ct = outLabel XOR pad(rowKey(...))
+                    bytes32 rowKey = computeRowKey(labelA, labelB, instanceId, gateIndex, permA, permB);
+                    bytes16 pad = expandPad(rowKey);
+                    bytes16 ct = xorLabel(outLabel, pad);
+
+                    uint8 rowIndex = uint8(2 * permA + permB);
+                    if (rowIndex == 0) row0 = ct;
+                    else if (rowIndex == 1) row1 = ct;
+                    else if (rowIndex == 2) row2 = ct;
+                    else row3 = ct;
+                }
+            }
+        }
+
+        leafBytes = abi.encodePacked(
+            uint8(g.gateType),
+            g.wireA,
+            g.wireB,
+            g.wireC,
+            row0,
+            row1,
+            row2,
+            row3
+        );
+    }
+
+    // ===== Step 3: Merkle proof + dispute =====
+
+
+        /**
+     * @dev Leaf encoding length for abi.encodePacked:
+     * - gateType (uint8):  1 byte
+     * - wireA    (uint16): 2 bytes
+     * - wireB    (uint16): 2 bytes
+     * - wireC    (uint16): 2 bytes
+     * - row0-3 (bytes16): 64 bytes (4 * 16)
+     * Total: 71 bytes
+     */
+    uint256 private constant LEAF_BYTES_LEN = 71;
+
+    event GateLeafChallenged(uint256 indexed instanceId, uint256 indexed gateIndex, bool mismatch);
+    event CheaterSlashed(address indexed cheater, address indexed beneficiary);
+
+    function _isOpenInstance(uint256 instanceId) internal view returns (bool) {
+        if (instanceId == m) return false;
+
+        for (uint256 i = 0; i < sOpen.length; i++) {
+            if (sOpen[i] == instanceId) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Dispute a single gate leaf for an opened instance.
+     *
+     * Inputs:
+     * - instanceId: must be in S_open (i != m)
+     * - gateIndex: index in circuit layout (off-chain agreed)
+     * - g: gate description (type + wires)
+     * - leafBytes: committed gate leaf bytes (gate header + 4 rows)
+     * - merkleProof: proves keccak256(leafBytes) is included in rootGC[instanceId]
+     *
+     * Outcome:
+     * - If mismatch => Alice cheated => slash Alice to Bob
+     * - If match    => false challenge => slash Bob to Alice (optional but recommended)
+     */
+    function challengeGateLeaf(uint256 instanceId, uint256 gateIndex, GateDesc calldata g, bytes calldata leafBytes,
+        bytes32[] calldata merkleProof, bytes32[] calldata layoutProof) external {
+        require(currentStage == Stage.Dispute, "Wrong stage");
+        require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
+        require(msg.sender == bob, "Only Bob for MVP");
+
+        // Verify GateDesc is the real circuit gate at gateIndex
+        bytes32 layoutLeaf = _layoutLeafHash(gateIndex, g);
+        require(
+            MerkleProof.verify(layoutProof, circuitLayoutRoot, layoutLeaf),
+            "Bad circuit layout proof"
+        );
+
+        require(_isOpenInstance(instanceId), "Not an opened instance");
+        bytes32 seed = revealedSeeds[instanceId];
+        require(seed != bytes32(0), "Seed not revealed");
+
+        require(leafBytes.length == LEAF_BYTES_LEN, "Bad leaf length");
+
+        // 1) Verify inclusion: leafHash ∈ RootGC[instanceId]
+        bytes32 leafHash = keccak256(leafBytes);
+        bytes32 root = instanceCommitments[instanceId].rootGC;
+        require(MerkleProof.verify(merkleProof, root, leafHash), "Bad Merkle proof");
+
+        // 2) Recompute expected leaf from seed here
+        bytes memory expected = recomputeGateLeafBytes(seed, instanceId, gateIndex, g);
+        bool matchLeaf = (keccak256(expected) == leafHash);
+
+        // 3) Slash depending on result
+        if (!matchLeaf) {
+            emit GateLeafChallenged(instanceId, gateIndex, true);
+            emit CheaterSlashed(alice, bob);
+            _slash(bob, alice);
+        } else {
+            emit GateLeafChallenged(instanceId, gateIndex, false);
+            emit CheaterSlashed(bob, alice);
+            _slash(alice, bob);
+        }
+    }
+
+    // leaf = H(gateIndex || gateType || wireA || wireB || wireC)
+    function _layoutLeafHash(uint256 gateIndex, GateDesc calldata g) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(gateIndex, uint8(g.gateType), g.wireA, g.wireB, g.wireC));
+    }
+    // ------ gc part end ------
 }

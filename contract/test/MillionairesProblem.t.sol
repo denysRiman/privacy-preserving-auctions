@@ -4,14 +4,34 @@ pragma solidity ^0.8.20;
 import "forge-std/Test.sol";
 import "../src/MillionairesProblem.sol";
 
+contract MillionairesProblemHarness is MillionairesProblem {
+    constructor(address _bob, bytes32 _circuitId, bytes32 _circuitLayoutRoot)
+    MillionairesProblem(_bob, _circuitId, _circuitLayoutRoot)
+    {}
+
+    function computeLeaf(bytes32 seed, uint256 instanceId, uint256 gateIndex, GateDesc calldata g)
+    external view returns (bytes memory)
+    {
+        return recomputeGateLeafBytes(seed, instanceId, gateIndex, g);
+    }
+}
+
 contract MillionairesTest is Test {
-    MillionairesProblem mp;
+    MillionairesProblemHarness mp;
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
 
     function setUp() public {
+        bytes32 layoutLeaf = keccak256(abi.encodePacked(
+            uint256(0), // gateIndex
+            uint8(0),    // GateType.AND
+            uint16(1),   // wireA
+            uint16(2),   // wireB
+            uint16(3)    // wireC
+        ));
+
         vm.prank(alice);
-        mp = new MillionairesProblem(bob);
+        mp = new MillionairesProblemHarness(bob, keccak256("millionaires-yao-v1"), layoutLeaf);
 
         vm.deal(alice, 10 ether);
         vm.deal(bob, 10 ether);
@@ -110,7 +130,7 @@ contract MillionairesTest is Test {
 
         // Bob should have his 1 ETH back + Alice's 1 ETH penalty
         assertEq(bob.balance, bobBalanceBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), 6); // Stage.Closed (index 6)
+        assertEq(uint(mp.currentStage()), 7); // Stage.Closed (index 7)
     }
 
     function test_Fail_AliceLateCommitment() public {
@@ -163,7 +183,7 @@ contract MillionairesTest is Test {
         mp.abortPhase3();
 
         assertEq(alice.balance, aliceBalanceBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), 6); // Stage.Closed
+        assertEq(uint(mp.currentStage()), 7); // Stage.Closed
     }
 
     function test_RevealOpenings_Success() public {
@@ -228,13 +248,15 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.abortPhase4();
 
-        // Bob gets both deposits (2 ETH) for Alice's silence
         assertEq(bob.balance, bobBalanceBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), 6);
+        assertEq(uint(mp.currentStage()), 7);
     }
 
     function test_RevealGarblerLabels_Success() public {
         test_RevealOpenings_Success();
+
+        vm.prank(bob);
+        mp.closeDispute();
 
         bytes32[] memory mockLabels = new bytes32[](32);
         for(uint i = 0; i < 32; i++) {
@@ -244,20 +266,23 @@ contract MillionairesTest is Test {
         vm.prank(alice);
         mp.revealGarblerLabels(mockLabels);
 
-        assertEq(uint(mp.currentStage()), 5); // Stage.Settle
+        assertEq(uint(mp.currentStage()), 6); // Stage.Settle
     }
 
     function test_AbortPhase5_AlicePenalty() public {
         test_RevealOpenings_Success();
 
-        vm.warp(block.timestamp + 1 hours + 1 seconds);
+        vm.prank(bob);
+        mp.closeDispute();
+
+        vm.warp(block.timestamp + 2 hours + 1 seconds);
 
         uint256 bobBalanceBefore = bob.balance;
         vm.prank(bob);
         mp.abortPhase5();
 
         assertEq(bob.balance, bobBalanceBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), 6); // Stage.Closed
+        assertEq(uint(mp.currentStage()), 7); // Stage.Closed
     }
 
     function test_FinalSettlement_AliceWins() public {
@@ -297,6 +322,9 @@ contract MillionairesTest is Test {
         vm.prank(alice);
         mp.revealOpenings(indices, seeds);
 
+        vm.prank(bob);
+        mp.closeDispute();
+
         // --- Phase 5: Reveal Garbler Labels ---
         bytes32[] memory mockLabels = new bytes32[](32);
         vm.prank(alice);
@@ -309,7 +337,136 @@ contract MillionairesTest is Test {
 
         // --- Assertions ---
         assertEq(alice.balance, aliceBalanceBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), 6); // Stage.Closed
-        assertTrue(mp.result()); // Alice wins
+        assertEq(uint(mp.currentStage()), 7); // Stage.Closed
+        assertTrue(mp.result());
+    }
+
+    function test_ChallengeGateLeaf_FalseChallenge_SlashesBob() public {
+        bytes32 seed = keccak256("seed");
+        uint256 instanceId = 0;
+        uint256 gateIndex = 0;
+
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType.AND,
+            wireA: 1,
+            wireB: 2,
+            wireC: 3
+        });
+
+        // leafBytes that contract itself would recompute
+        bytes memory leaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
+
+        // 1-leaf Merkle tree
+        bytes32 root = keccak256(leaf);
+        _toDisputeWithRoot(seed, root, 9);
+
+        bytes32[] memory proof = new bytes32[](0);
+        bytes32[] memory layoutProof = new bytes32[](0);
+
+        uint256 aliceBefore = alice.balance;
+
+        vm.prank(bob);
+        mp.challengeGateLeaf(instanceId, gateIndex, g, leaf, proof, layoutProof);
+
+        // Bob loses, Alice receives both deposits
+        assertEq(alice.balance, aliceBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), 7); // Closed
+    }
+
+    function test_ChallengeGateLeaf_DetectCheat_SlashesAlice() public {
+        bytes32 seed = keccak256("seed");
+        uint256 instanceId = 0;
+        uint256 gateIndex = 0;
+
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType.AND,
+            wireA: 1,
+            wireB: 2,
+            wireC: 3
+        });
+
+        bytes memory expectedLeaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
+
+        // Make committed leaf wrong (mutate one byte)
+        bytes memory fakeLeaf = new bytes(expectedLeaf.length);
+        for (uint256 i = 0; i < expectedLeaf.length; i++) fakeLeaf[i] = expectedLeaf[i];
+        fakeLeaf[0] = bytes1(uint8(fakeLeaf[0]) ^ 1);
+
+        bytes32 root = keccak256(fakeLeaf);
+        _toDisputeWithRoot(seed, root, 9);
+
+        bytes32[] memory proof = new bytes32[](0);
+        bytes32[] memory layoutProof = new bytes32[](0);
+        uint256 bobBefore = bob.balance;
+
+        vm.prank(bob);
+        mp.challengeGateLeaf(instanceId, gateIndex, g, fakeLeaf, proof, layoutProof);
+
+        assertEq(bob.balance, bobBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), 7);
+    }
+
+    function test_ChallengeGateLeaf_BadMerkleProof_Reverts() public {
+        bytes32 seed = keccak256("seed");
+
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType.AND,
+            wireA: 1,
+            wireB: 2,
+            wireC: 3
+        });
+
+        bytes memory leaf = mp.computeLeaf(seed, 0, 0, g);
+
+        // Commit wrong root
+        bytes32 wrongRoot = keccak256("wrong");
+        _toDisputeWithRoot(seed, wrongRoot, 9);
+
+        bytes32[] memory proof = new bytes32[](0);
+        bytes32[] memory layoutProof = new bytes32[](0);
+
+        vm.prank(bob);
+        vm.expectRevert("Bad Merkle proof");
+        mp.challengeGateLeaf(0, 0, g, leaf, proof, layoutProof);
+    }
+
+    function _toDisputeWithRoot(bytes32 seed, bytes32 rootGC0, uint256 mChoice) internal {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        // Commitments
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+        bytes32 com = keccak256(abi.encodePacked(seed));
+        for (uint256 i = 0; i < 10; i++) {
+            commits[i] = MillionairesProblem.InstanceCommitment({
+                comSeed: com,
+                rootGC: (i == 0) ? rootGC0 : bytes32(0),
+                rootXG: bytes32(0),
+                rootOT: bytes32(0),
+                h0: bytes32(0),
+                h1: bytes32(0)
+            });
+        }
+        vm.prank(alice);
+        mp.submitCommitments(commits);
+
+        vm.prank(bob);
+        mp.choose(mChoice);
+
+        uint256[] memory indices = new uint256[](9);
+        bytes32[] memory seeds = new bytes32[](9);
+        uint256 p = 0;
+
+        for (uint256 i = 0; i < 10; i++) {
+            if (i == mChoice) continue;
+            indices[p] = i;
+            seeds[p] = seed;
+            p++;
+        }
+
+        vm.prank(alice);
+        mp.revealOpenings(indices, seeds);
     }
 }
