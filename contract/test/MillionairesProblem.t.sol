@@ -450,8 +450,94 @@ contract MillionairesTest is Test {
         mp.challengeGateLeaf(0, 0, g, leaf, proof, layoutProof);
     }
 
+    function test_DisputeGarbledTable_DelegatesToChallenge_SlashesBobOnMatch() public {
+        bytes32 seed = keccak256("seed");
+        uint256 instanceId = 0;
+        uint256 gateIndex = 0;
+
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType.AND,
+            wireA: 1,
+            wireB: 2,
+            wireC: 3
+        });
+
+        // Correct committed leaf.
+        bytes memory leaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
+        bytes32 root = keccak256(leaf);
+        _toDisputeWithRoot(seed, root, 9);
+
+        bytes32[] memory proof = new bytes32[](0);
+        bytes32[] memory layoutProof = new bytes32[](0);
+
+        uint256 aliceBefore = alice.balance;
+
+        vm.prank(bob);
+        mp.disputeGarbledTable(instanceId, seed, gateIndex, g, leaf, proof, layoutProof);
+
+        // Same result as challengeGateLeaf on matching leaf: Bob false-challenged.
+        assertEq(alice.balance, aliceBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), 7);
+    }
+
+    function test_DisputeGarbledTable_DelegatesToChallenge_SlashesAliceOnMismatch() public {
+        bytes32 seed = keccak256("seed");
+        uint256 instanceId = 0;
+        uint256 gateIndex = 0;
+
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType.AND,
+            wireA: 1,
+            wireB: 2,
+            wireC: 3
+        });
+
+        bytes memory expectedLeaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
+        bytes memory fakeLeaf = new bytes(expectedLeaf.length);
+        for (uint256 i = 0; i < expectedLeaf.length; i++) fakeLeaf[i] = expectedLeaf[i];
+        fakeLeaf[0] = bytes1(uint8(fakeLeaf[0]) ^ 1);
+
+        bytes32 root = keccak256(fakeLeaf);
+        _toDisputeWithRoot(seed, root, 9);
+
+        bytes32[] memory proof = new bytes32[](0);
+        bytes32[] memory layoutProof = new bytes32[](0);
+        uint256 bobBefore = bob.balance;
+
+        vm.prank(bob);
+        mp.disputeGarbledTable(instanceId, seed, gateIndex, g, fakeLeaf, proof, layoutProof);
+
+        // Same result as challengeGateLeaf on mismatch: Alice cheated.
+        assertEq(bob.balance, bobBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), 7);
+    }
+
+    function test_DisputeGarbledTable_InvalidSeed_Reverts() public {
+        bytes32 seed = keccak256("seed");
+        bytes32 wrongSeed = keccak256("wrong-seed");
+
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType.AND,
+            wireA: 1,
+            wireB: 2,
+            wireC: 3
+        });
+
+        bytes memory leaf = mp.computeLeaf(seed, 0, 0, g);
+        bytes32 root = keccak256(leaf);
+        _toDisputeWithRoot(seed, root, 9);
+
+        bytes32[] memory proof = new bytes32[](0);
+        bytes32[] memory layoutProof = new bytes32[](0);
+
+        vm.prank(bob);
+        vm.expectRevert("Invalid seed");
+        mp.disputeGarbledTable(0, wrongSeed, 0, g, leaf, proof, layoutProof);
+    }
+
+    //Main test for checking if the implementation on Rust works
     function test_ChallengeGateLeaf_RustVector_Editable() public {
-        RustGateChallengeVector memory v = _rustVectorDefaultAndGate3();
+        RustGateChallengeVector memory v = _rustVectorDefaultAndGate();
 
         // Deploy fresh contract with Rust vector identifiers.
         vm.prank(alice);
@@ -579,7 +665,7 @@ contract MillionairesTest is Test {
     }
 
     // Edit this single function to paste values from `cargo run` output.
-    function _rustVectorDefaultAndGate3() internal pure returns (RustGateChallengeVector memory v) {
+    function _rustVectorDefaultAndGate() internal pure returns (RustGateChallengeVector memory v) {
         v.circuitId = hex"7d054ebfd92394e7d8b68c457a833f9083147ac4e616619c23cfa544159e8797";
         v.circuitLayoutRoot = hex"07f4a5ca9dea030d4dc113f2d52a09349808e157fc5095d654c1485f6db3f287";
 

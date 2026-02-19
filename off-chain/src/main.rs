@@ -2,7 +2,7 @@ use off_chain::consensus::{keccak256, layout_leaf_hash};
 use off_chain::garble::garble_circuit;
 use off_chain::merkle::{leaf_hash, merkle_proof_from_hashes, merkle_root_from_hashes, verify_proof};
 use off_chain::scenario::{build_millionaires_layout, com_seed, derive_instance_seed, CUT_AND_CHOOSE_N};
-use off_chain::types::{CircuitLayout, GateDesc};
+use off_chain::types::{CircuitLayout, GateDesc, GateType};
 
 /// Per-instance artifacts used to print Solidity-ready challenge data.
 #[derive(Debug)]
@@ -44,6 +44,20 @@ fn hex_prefixed(bytes: &[u8]) -> String {
     out
 }
 
+/// Hex-encodes bytes without a prefix.
+fn hex_plain(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// Formats bytes as Solidity literal: `hex"..."`.
+fn solidity_hex_literal(bytes: &[u8]) -> String {
+    format!("hex\"{}\"", hex_plain(bytes))
+}
+
 /// Hex-encodes a `bytes32`.
 fn hex32(value: [u8; 32]) -> String {
     hex_prefixed(&value)
@@ -53,6 +67,15 @@ fn hex32(value: [u8; 32]) -> String {
 fn hex_bytes32_vec(values: &[[u8; 32]]) -> String {
     let parts = values.iter().map(|v| hex32(*v)).collect::<Vec<_>>();
     format!("[{}]", parts.join(", "))
+}
+
+/// Solidity-friendly gate-type label used in generated snippet name/comments.
+fn gate_type_label(g: GateType) -> &'static str {
+    match g {
+        GateType::And => "And",
+        GateType::Xor => "Xor",
+        GateType::Not => "Not",
+    }
 }
 
 /// CLI entrypoint that generates:
@@ -194,4 +217,76 @@ async fn main() {
     println!("=== Proof Sanity ===");
     println!("gcProofValid = {}", proof_ok);
     println!("layoutProofValid = {}", layout_proof_ok);
+
+    // Direct copy-paste helper for Solidity tests.
+    let fn_name = format!("_rustVectorDefault{}Gate{}", gate_type_label(gate.gate_type), gate_index);
+    println!();
+    println!("=== Solidity Paste Snippet ===");
+    println!("function {}() internal pure returns (RustGateChallengeVector memory v) {{", fn_name);
+    println!("    v.circuitId = {};", solidity_hex_literal(&circuit_id));
+    println!("    v.circuitLayoutRoot = {};", solidity_hex_literal(&circuit_layout_root));
+    println!();
+    println!("    v.mChoice = {};", m);
+    println!("    v.challengeInstanceId = {};", challenge_instance);
+    println!("    v.gateIndex = {};", gate_index);
+    println!(
+        "    v.gateType = {}; // {}",
+        gate.gate_type as u8,
+        gate_type_label(gate.gate_type).to_uppercase()
+    );
+    println!("    v.wireA = {};", gate.wire_a);
+    println!("    v.wireB = {};", gate.wire_b);
+    println!("    v.wireC = {};", gate.wire_c);
+    println!("    v.expectMatch = true;");
+    println!();
+    println!("    v.leafBytes = {};", solidity_hex_literal(&leaf));
+    println!();
+
+    println!("    v.comSeeds = new bytes32[]({});", instances.len());
+    for a in &instances {
+        println!(
+            "    v.comSeeds[{}] = {};",
+            a.instance_id,
+            solidity_hex_literal(&a.com_seed)
+        );
+    }
+    println!();
+
+    println!("    v.rootGCs = new bytes32[]({});", instances.len());
+    for a in &instances {
+        println!(
+            "    v.rootGCs[{}] = {};",
+            a.instance_id,
+            solidity_hex_literal(&a.root_gc)
+        );
+    }
+    println!();
+
+    println!("    v.openIndices = new uint256[]({});", open_indices.len());
+    for (i, idx) in open_indices.iter().enumerate() {
+        println!("    v.openIndices[{}] = {};", i, idx);
+    }
+    println!();
+
+    println!("    v.openSeeds = new bytes32[]({});", open_indices.len());
+    for (i, idx) in open_indices.iter().enumerate() {
+        println!(
+            "    v.openSeeds[{}] = {};",
+            i,
+            solidity_hex_literal(&instances[*idx].seed)
+        );
+    }
+    println!();
+
+    println!("    v.merkleProof = new bytes32[]({});", merkle_proof.len());
+    for (i, hash) in merkle_proof.iter().enumerate() {
+        println!("    v.merkleProof[{}] = {};", i, solidity_hex_literal(hash));
+    }
+    println!();
+
+    println!("    v.layoutProof = new bytes32[]({});", layout_proof.len());
+    for (i, hash) in layout_proof.iter().enumerate() {
+        println!("    v.layoutProof[{}] = {};", i, solidity_hex_literal(hash));
+    }
+    println!("}}");
 }

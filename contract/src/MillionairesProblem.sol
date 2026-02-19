@@ -1,4 +1,4 @@
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.24;
 
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
@@ -270,35 +270,25 @@ contract MillionairesProblem {
     }
 
 /**
-     * @dev Phase 5 (Dispute): Bob challenges one of the N-1 check-circuits.
-     * The contract performs full on-chain re-garbling to verify Alice.
-     * @param _idx Index of the circuit to check (must be in sOpen).
-     * @param _seed The revealed seed Alice provided in Phase 4.
+     * @dev Phase 5 (Dispute): Bob challenges one gate from one opened check-circuit.
+     * Delegates to `challengeGateLeaf` after explicit seed checks.
+     * @param _idx Index of the opened circuit to challenge (must be in sOpen).
+     * @param _seed Revealed seed for `_idx`, must match commitment.
+     * @param gateIndex Gate index in circuit layout.
+     * @param g Gate descriptor (type + wires) for `gateIndex`.
+     * @param leafBytes Claimed gate leaf bytes.
+     * @param merkleProof Proof that `keccak256(leafBytes)` is in `rootGC[_idx]`.
+     * @param layoutProof Proof that `(gateIndex, g)` is in `circuitLayoutRoot`.
      */
-    function disputeGarbledTable(uint256 _idx, bytes32 _seed) external {
+    function disputeGarbledTable(uint256 _idx, bytes32 _seed, uint256 gateIndex, GateDesc calldata g, bytes calldata leafBytes,
+        bytes32[] calldata merkleProof, bytes32[] calldata layoutProof) external {
         require(currentStage == Stage.Dispute, "Not in Dispute stage");
         require(msg.sender == bob, "Only Evaluator can dispute");
         require(_idx != m, "Cannot dispute evaluation circuit m");
-        require(keccak256(abi.encode(_seed)) == instanceCommitments[_idx].comSeed, "Invalid seed");
+        require(keccak256(abi.encodePacked(_seed)) == instanceCommitments[_idx].comSeed, "Invalid seed");
+        require(revealedSeeds[_idx] == _seed, "Seed mismatch");
 
-        // 2. Perform Full On-Chain Re-Garbling
-        bytes32 expectedRootGC = _onChainGarble(_seed);
-
-        // 3. Compare with the root Alice submitted in Phase 2
-        if (expectedRootGC != instanceCommitments[_idx].rootGC) {
-            _slash(bob, alice);
-        } else {
-            _slash(alice, bob);
-        }
-    }
-
-    /**
-     * @dev Internal function to simulate full circuit generation logic.
-     * In a production environment, this would iterate over gates.
-     */
-    function _onChainGarble(bytes32 _seed) internal pure returns (bytes32) {
-        // Implement
-        return keccak256(abi.encode(_seed, "GARBLED_CIRCUIT_LOGIC"));
+        challengeGateLeaf(_idx, gateIndex, g, leafBytes, merkleProof, layoutProof);
     }
 
 
@@ -572,7 +562,7 @@ contract MillionairesProblem {
      * - If match    => false challenge => slash Bob to Alice (optional but recommended)
      */
     function challengeGateLeaf(uint256 instanceId, uint256 gateIndex, GateDesc calldata g, bytes calldata leafBytes,
-        bytes32[] calldata merkleProof, bytes32[] calldata layoutProof) external {
+        bytes32[] calldata merkleProof, bytes32[] calldata layoutProof) public {
         require(currentStage == Stage.Dispute, "Wrong stage");
         require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
         require(msg.sender == bob, "Only Bob for MVP");
