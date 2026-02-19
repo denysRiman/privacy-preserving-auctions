@@ -1,8 +1,8 @@
-use off_chain::consensus::{keccak256, layout_leaf_hash};
-use off_chain::garble::garble_circuit;
-use off_chain::merkle::{leaf_hash, merkle_proof_from_hashes, merkle_root_from_hashes, verify_proof};
-use off_chain::scenario::{build_millionaires_layout, com_seed, derive_instance_seed, CUT_AND_CHOOSE_N};
-use off_chain::types::{CircuitLayout, GateDesc, GateType};
+use off_chain_test::consensus::{keccak256, layout_leaf_hash};
+use off_chain_test::garble::garble_circuit;
+use off_chain_test::merkle::{leaf_hash, merkle_proof_from_hashes, merkle_root_from_hashes, verify_proof};
+use off_chain_test::scenario::{build_millionaires_layout, com_seed, derive_instance_seed, CUT_AND_CHOOSE_N};
+use off_chain_test::types::{CircuitLayout, GateDesc, GateType};
 
 /// Per-instance artifacts used to print Solidity-ready challenge data.
 #[derive(Debug)]
