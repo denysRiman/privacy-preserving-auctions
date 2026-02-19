@@ -61,6 +61,7 @@ fn hex_bytes32_vec(values: &[[u8; 32]]) -> String {
 /// - one `challengeGateLeaf` packet (leaf + proofs) for a selected gate.
 #[tokio::main]
 async fn main() {
+    // CLI knobs for reproducible vector generation.
     let args: Vec<String> = std::env::args().collect();
     let bit_width = parse_usize_arg(&args, "--bits", 8);
     let m = parse_usize_arg(&args, "--m", 7);
@@ -72,6 +73,7 @@ async fn main() {
 
     let circuit_id = keccak256(&[b"millionaires-yao-v1"]);
     let master_seed = keccak256(&[b"master-seed-v1"]);
+    // Deterministic layout so Solidity/Rust vectors are stable across runs.
     let gates = build_millionaires_layout(bit_width);
     assert!(
         gate_index < gates.len(),
@@ -80,6 +82,7 @@ async fn main() {
         gates.len()
     );
 
+    // Build layout commitment and inclusion proof for the challenged gate.
     let layout_leaf_hashes: Vec<[u8; 32]> = gates
         .iter()
         .enumerate()
@@ -96,6 +99,7 @@ async fn main() {
                 instance_id: instance_id as u64,
                 gates: gates.clone(),
             };
+            // One full GC table (all leaves) per instance.
             let leaves = garble_circuit(seed, &layout);
             let leaf_hashes: Vec<[u8; 32]> = leaves.iter().map(|leaf| leaf_hash(leaf)).collect();
             let root_gc = merkle_root_from_hashes(&leaf_hashes);
@@ -110,8 +114,10 @@ async fn main() {
         })
         .collect();
 
+    // Open set is all indices except evaluation instance m.
     let open_indices: Vec<usize> = (0..n).filter(|idx| *idx != m).collect();
     let challenge_instance = if challenge_instance_arg == usize::MAX {
+        // Default to first opened instance for challenge packet.
         open_indices[0]
     } else {
         challenge_instance_arg
@@ -129,6 +135,7 @@ async fn main() {
     let merkle_proof = merkle_proof_from_hashes(&inst.leaf_hashes, gate_index);
     let layout_leaf = layout_leaf_hash(gate_index as u64, gate);
 
+    // Quick local verification before user copies values to Solidity tests.
     let proof_ok = verify_proof(leaf_hash_value, &merkle_proof, inst.root_gc);
     let layout_proof_ok = verify_proof(layout_leaf, &layout_proof, circuit_layout_root);
 
@@ -158,6 +165,7 @@ async fn main() {
             hex32(zero32)
         );
     }
+    // `rootXG`, `rootOT`, `h0`, `h1` are placeholders in this MVP printer.
     println!();
 
     println!("=== Phase-4 Openings (revealOpenings) ===");

@@ -7,6 +7,7 @@ pub fn leaf_hash(leaf: &[u8]) -> [u8; 32] {
 
 /// OpenZeppelin-compatible node hash: sort the pair, then `keccak256(left || right)`.
 pub fn commutative_node_hash(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
+    // OpenZeppelin hashes sorted pair (min, max), not positional left/right.
     if a <= b {
         keccak256(&[&a, &b])
     } else {
@@ -27,6 +28,7 @@ pub fn merkle_root_from_hashes(hashes: &[[u8; 32]]) -> [u8; 32] {
         let mut i = 0usize;
         while i < level.len() {
             let left = level[i];
+            // Duplicate the last node when level width is odd.
             let right = if i + 1 < level.len() {
                 level[i + 1]
             } else {
@@ -58,6 +60,7 @@ pub fn merkle_proof_from_hashes(hashes: &[[u8; 32]], index: usize) -> Vec<[u8; 3
     let mut level: Vec<[u8; 32]> = hashes.to_vec();
 
     while level.len() > 1 {
+        // Capture sibling hash for current level.
         let sibling = if idx % 2 == 0 {
             if idx + 1 < level.len() {
                 level[idx + 1]
@@ -82,6 +85,7 @@ pub fn merkle_proof_from_hashes(hashes: &[[u8; 32]], index: usize) -> Vec<[u8; 3
             i += 2;
         }
 
+        // Move to parent position in next level.
         idx /= 2;
         level = next;
     }
