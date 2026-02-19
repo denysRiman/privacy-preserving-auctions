@@ -2,8 +2,10 @@ use sha3::{Digest, Keccak256};
 
 use crate::types::{GateDesc, GateType};
 
+/// Packed gate-leaf length used by Solidity (`1 + 2 + 2 + 2 + 4*16`).
 pub const LEAF_BYTES_LEN: usize = 71;
 
+/// Computes `keccak256` over concatenated byte slices, equivalent to `abi.encodePacked(...)`.
 pub fn keccak256(parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Keccak256::new();
     for part in parts {
@@ -14,12 +16,15 @@ pub fn keccak256(parts: &[&[u8]]) -> [u8; 32] {
     out
 }
 
+/// Encodes a Rust `u64` into Solidity `uint256` big-endian bytes.
 pub fn uint256_from_u64(value: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[24..].copy_from_slice(&value.to_be_bytes());
     out
 }
 
+/// Mirrors Solidity `computeWireFlipBit`:
+/// `keccak256("P", circuitId, instanceId, wireId, seed) & 1`.
 pub fn derive_wire_flip_bit(
     circuit_id: [u8; 32],
     instance_id: u64,
@@ -31,6 +36,8 @@ pub fn derive_wire_flip_bit(
     h[31] & 1
 }
 
+/// Mirrors Solidity `deriveWireLabel`:
+/// first 16 bytes of `keccak256("L", ...)` with first-byte LSB rewritten to `flip XOR semantic`.
 pub fn derive_wire_label(
     circuit_id: [u8; 32],
     instance_id: u64,
@@ -58,6 +65,8 @@ pub fn derive_wire_label(
     label
 }
 
+/// Mirrors Solidity `computeRowKey`:
+/// `keccak256("K", circuitId, instanceId, gateIndex, permA, permB, labelA, labelB)`.
 pub fn compute_row_key(
     circuit_id: [u8; 32],
     instance_id: u64,
@@ -83,6 +92,7 @@ pub fn compute_row_key(
     ])
 }
 
+/// Mirrors Solidity `expandPad`: first 16 bytes of `keccak256("PAD", rowKey)`.
 pub fn expand_pad(row_key: [u8; 32]) -> [u8; 16] {
     let h = keccak256(&[b"PAD", &row_key]);
     let mut out = [0u8; 16];
@@ -90,6 +100,7 @@ pub fn expand_pad(row_key: [u8; 32]) -> [u8; 16] {
     out
 }
 
+/// XOR helper for 16-byte labels/pads.
 pub fn xor16(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
     let mut out = [0u8; 16];
     for i in 0..16 {
@@ -98,6 +109,8 @@ pub fn xor16(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
     out
 }
 
+/// Encodes a gate leaf exactly as Solidity expects:
+/// `gateType || wireA || wireB || wireC || row0 || row1 || row2 || row3`.
 pub fn encode_leaf(gate: GateDesc, rows: [[u8; 16]; 4]) -> [u8; LEAF_BYTES_LEN] {
     let mut out = [0u8; LEAF_BYTES_LEN];
     out[0] = gate.gate_type as u8;
@@ -113,6 +126,8 @@ pub fn encode_leaf(gate: GateDesc, rows: [[u8; 16]; 4]) -> [u8; LEAF_BYTES_LEN] 
     out
 }
 
+/// Mirrors Solidity `_layoutLeafHash`:
+/// `keccak256(gateIndex, gateType, wireA, wireB, wireC)`.
 pub fn layout_leaf_hash(gate_index: u64, gate: GateDesc) -> [u8; 32] {
     let gate_idx = uint256_from_u64(gate_index);
     let t = [gate.gate_type as u8];
@@ -125,6 +140,8 @@ pub fn layout_leaf_hash(gate_index: u64, gate: GateDesc) -> [u8; 32] {
     ])
 }
 
+/// Gate truth table used during row generation.
+/// `Not` returns `0` because NOT rows are canonicalized to zero in this flow.
 pub fn truth_table(gate_type: GateType, a: u8, b: u8) -> u8 {
     match gate_type {
         GateType::And => (a & b) & 1,

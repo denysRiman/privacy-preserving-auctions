@@ -1,9 +1,11 @@
 use crate::consensus::keccak256;
 
+/// Hashes a raw 71-byte gate leaf into a Merkle leaf hash.
 pub fn leaf_hash(leaf: &[u8]) -> [u8; 32] {
     keccak256(&[leaf])
 }
 
+/// OpenZeppelin-compatible node hash: sort the pair, then `keccak256(left || right)`.
 pub fn commutative_node_hash(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
     if a <= b {
         keccak256(&[&a, &b])
@@ -12,6 +14,8 @@ pub fn commutative_node_hash(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
     }
 }
 
+/// Builds Merkle root from pre-hashed leaves using commutative node hashing.
+/// On odd levels, the last node is duplicated.
 pub fn merkle_root_from_hashes(hashes: &[[u8; 32]]) -> [u8; 32] {
     if hashes.is_empty() {
         return [0u8; 32];
@@ -37,11 +41,14 @@ pub fn merkle_root_from_hashes(hashes: &[[u8; 32]]) -> [u8; 32] {
     level[0]
 }
 
+/// Convenience root builder from raw gate leaves.
 pub fn merkle_root(leaves: &[[u8; 71]]) -> [u8; 32] {
     let hashes: Vec<[u8; 32]> = leaves.iter().map(|leaf| leaf_hash(leaf)).collect();
     merkle_root_from_hashes(&hashes)
 }
 
+/// Builds a single Merkle inclusion proof for `hashes[index]`.
+/// The proof format is directly usable with OpenZeppelin `MerkleProof.verify`.
 pub fn merkle_proof_from_hashes(hashes: &[[u8; 32]], index: usize) -> Vec<[u8; 32]> {
     assert!(!hashes.is_empty(), "cannot build proof for empty tree");
     assert!(index < hashes.len(), "proof index out of range");
@@ -82,6 +89,7 @@ pub fn merkle_proof_from_hashes(hashes: &[[u8; 32]], index: usize) -> Vec<[u8; 3
     proof
 }
 
+/// Local proof verifier equivalent to OpenZeppelin commutative verification.
 pub fn verify_proof(leaf: [u8; 32], proof: &[[u8; 32]], root: [u8; 32]) -> bool {
     let mut computed = leaf;
     for sibling in proof {

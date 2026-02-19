@@ -4,6 +4,7 @@ use off_chain::merkle::{leaf_hash, merkle_proof_from_hashes, merkle_root_from_ha
 use off_chain::scenario::{build_millionaires_layout, com_seed, derive_instance_seed, CUT_AND_CHOOSE_N};
 use off_chain::types::{CircuitLayout, GateDesc};
 
+/// Per-instance artifacts used to print Solidity-ready challenge data.
 #[derive(Debug)]
 struct InstanceArtifacts {
     instance_id: usize,
@@ -14,6 +15,7 @@ struct InstanceArtifacts {
     leaf_hashes: Vec<[u8; 32]>,
 }
 
+/// Parses `--flag value` or `--flag=value` as `usize`, falling back to `default`.
 fn parse_usize_arg(args: &[String], flag: &str, default: usize) -> usize {
     let key_eq = format!("{flag}=");
     let mut idx = 0usize;
@@ -32,6 +34,7 @@ fn parse_usize_arg(args: &[String], flag: &str, default: usize) -> usize {
     default
 }
 
+/// Hex-encodes bytes as `0x...`.
 fn hex_prefixed(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(2 + bytes.len() * 2);
     out.push_str("0x");
@@ -41,15 +44,21 @@ fn hex_prefixed(bytes: &[u8]) -> String {
     out
 }
 
+/// Hex-encodes a `bytes32`.
 fn hex32(value: [u8; 32]) -> String {
     hex_prefixed(&value)
 }
 
+/// Formats `bytes32[]` for direct copy-paste into Solidity tests.
 fn hex_bytes32_vec(values: &[[u8; 32]]) -> String {
     let parts = values.iter().map(|v| hex32(*v)).collect::<Vec<_>>();
     format!("[{}]", parts.join(", "))
 }
 
+/// CLI entrypoint that generates:
+/// - phase-2 commitments for `N=10`,
+/// - phase-4 openings (`N-1` seeds),
+/// - one `challengeGateLeaf` packet (leaf + proofs) for a selected gate.
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();

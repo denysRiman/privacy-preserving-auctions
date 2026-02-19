@@ -4,6 +4,10 @@ use crate::consensus::{
 };
 use crate::types::{CircuitLayout, GateDesc, GateType};
 
+/// Recomputes one 71-byte gate leaf from `(seed, instance, gateIndex, gateDesc)`.
+/// This mirrors Solidity `recomputeGateLeafBytes`, including:
+/// - row ordering `rowIndex = 2*permA + permB`
+/// - canonical NOT gate rows of zero.
 pub fn recompute_gate_leaf(
     seed: [u8; 32],
     circuit_id: [u8; 32],
@@ -49,6 +53,7 @@ pub fn recompute_gate_leaf(
     encode_leaf(gate, rows)
 }
 
+/// Garbles a full circuit in gate-index order and returns all gate leaves.
 pub fn garble_circuit(seed: [u8; 32], layout: &CircuitLayout) -> Vec<[u8; 71]> {
     layout
         .gates
