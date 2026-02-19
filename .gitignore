@@ -1,0 +1,13 @@
+# OS
+.DS_Store
+
+# IDE (JetBrains)
+.idea/
+*.iml
+
+# Rust
+**/target/
+
+# Env/local overrides
+.env
+.env.*
