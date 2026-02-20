@@ -7,3 +7,4 @@ This is a Proof of Concept for a decentralized, private auction.
 - `off-chain-test/`: Shared Rust playground/prototype for garbling, Merkle proofs, and parity vectors.
 - `off-chain-alice/`: Rust backend app skeleton for Alice-side off-chain flow.
 - `off-chain-bob/`: Rust backend app skeleton for Bob-side off-chain flow.
+- `scripts/`: Local helper scripts to start Anvil, run deploy + Bob deposit flow, and check balances.
