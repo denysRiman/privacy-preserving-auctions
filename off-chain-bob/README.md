@@ -2,7 +2,7 @@
 
 Bob backend CLI for the protocol flow:
 - on-chain actions (`deposit`, `choose`, `dispute`)
-- off-chain dispute packet preparation (`prepare-dispute`) using `off-chain-test` consensus logic
+- off-chain dispute packet preparation (`prepare-dispute`) using `off-chain-common` consensus logic
 
 ## Required environment variables (for on-chain commands)
 - `CONTRACT_ADDRESS`: deployed `MillionairesProblem` address

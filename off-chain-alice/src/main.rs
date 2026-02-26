@@ -1,8 +1,8 @@
-use off_chain_test::consensus::keccak256;
-use off_chain_test::garble::garble_circuit;
-use off_chain_test::ih::{gc_block_hash, incremental_root_from_hashes};
-use off_chain_test::scenario::{CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed};
-use off_chain_test::types::CircuitLayout;
+use off_chain_common::consensus::keccak256;
+use off_chain_common::garble::garble_circuit;
+use off_chain_common::ih::{gc_block_hash, incremental_root_from_hashes};
+use off_chain_common::scenario::{CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed};
+use off_chain_common::types::CircuitLayout;
 use std::env;
 use std::error::Error;
 use std::fs;

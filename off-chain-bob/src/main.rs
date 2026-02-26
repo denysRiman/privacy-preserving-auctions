@@ -1,9 +1,9 @@
-use off_chain_test::consensus::{keccak256, layout_leaf_hash};
-use off_chain_test::garble::garble_circuit;
-use off_chain_test::ih::{gc_block_hash, ih_proof_from_hashes, incremental_root_from_hashes};
-use off_chain_test::merkle::{merkle_proof_from_hashes, merkle_root_from_hashes};
-use off_chain_test::scenario::build_millionaires_layout;
-use off_chain_test::types::{CircuitLayout, GateDesc};
+use off_chain_common::consensus::{keccak256, layout_leaf_hash};
+use off_chain_common::garble::garble_circuit;
+use off_chain_common::ih::{gc_block_hash, ih_proof_from_hashes, incremental_root_from_hashes};
+use off_chain_common::merkle::{merkle_proof_from_hashes, merkle_root_from_hashes};
+use off_chain_common::scenario::build_millionaires_layout;
+use off_chain_common::types::{CircuitLayout, GateDesc};
 use std::env;
 use std::error::Error;
 use std::fs;

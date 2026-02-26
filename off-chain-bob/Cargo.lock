@@ -69,11 +69,11 @@ checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 name = "off-chain-bob"
 version = "0.1.0"
 dependencies = [
- "off-chain-test",
+ "off-chain-common",
 ]
 
 [[package]]
-name = "off-chain-test"
+name = "off-chain-common"
 version = "0.1.0"
 dependencies = [
  "sha3",
