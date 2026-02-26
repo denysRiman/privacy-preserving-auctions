@@ -31,7 +31,7 @@ contract MillionairesProblem {
 
     struct InstanceCommitment {
         bytes32 comSeed;   // H(seedG[i])
-        bytes32 rootGC;    // Merkle root over garbled artifacts
+        bytes32 rootGC;    // Terminal incremental-hash state over garbled artifacts
         bytes32 rootXG;    // Merkle root over G's input labels
         bytes32 rootOT;    // Merkle root over OT transcript
         bytes32 h0;        // Result anchor for output 0: H(Lout0)
@@ -277,18 +277,18 @@ contract MillionairesProblem {
      * @param gateIndex Gate index in circuit layout.
      * @param g Gate descriptor (type + wires) for `gateIndex`.
      * @param leafBytes Claimed gate leaf bytes.
-     * @param merkleProof Proof that `keccak256(leafBytes)` is in `rootGC[_idx]`.
+     * @param ihProof Incremental-hash proof path for the challenged gate block.
      * @param layoutProof Proof that `(gateIndex, g)` is in `circuitLayoutRoot`.
      */
     function disputeGarbledTable(uint256 _idx, bytes32 _seed, uint256 gateIndex, GateDesc calldata g, bytes calldata leafBytes,
-        bytes32[] calldata merkleProof, bytes32[] calldata layoutProof) external {
+        bytes32[] calldata ihProof, bytes32[] calldata layoutProof) external {
         require(currentStage == Stage.Dispute, "Not in Dispute stage");
         require(msg.sender == bob, "Only Evaluator can dispute");
         require(_idx != m, "Cannot dispute evaluation circuit m");
         require(keccak256(abi.encodePacked(_seed)) == instanceCommitments[_idx].comSeed, "Invalid seed");
         require(revealedSeeds[_idx] == _seed, "Seed mismatch");
 
-        challengeGateLeaf(_idx, gateIndex, g, leafBytes, merkleProof, layoutProof);
+        challengeGateLeaf(_idx, gateIndex, g, leafBytes, ihProof, layoutProof);
     }
 
 
@@ -555,14 +555,14 @@ contract MillionairesProblem {
      * - gateIndex: index in circuit layout (off-chain agreed)
      * - g: gate description (type + wires)
      * - leafBytes: committed gate leaf bytes (gate header + 4 rows)
-     * - merkleProof: proves keccak256(leafBytes) is included in rootGC[instanceId]
+     * - ihProof: incremental-hash proof path for the challenged gate block
      *
      * Outcome:
      * - If mismatch => Alice cheated => slash Alice to Bob
      * - If match    => false challenge => slash Bob to Alice (optional but recommended)
      */
     function challengeGateLeaf(uint256 instanceId, uint256 gateIndex, GateDesc calldata g, bytes calldata leafBytes,
-        bytes32[] calldata merkleProof, bytes32[] calldata layoutProof) public {
+        bytes32[] calldata ihProof, bytes32[] calldata layoutProof) public {
         require(currentStage == Stage.Dispute, "Wrong stage");
         require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
         require(msg.sender == bob, "Only Bob for MVP");
@@ -580,14 +580,14 @@ contract MillionairesProblem {
 
         require(leafBytes.length == LEAF_BYTES_LEN, "Bad leaf length");
 
-        // 1) Verify inclusion: leafHash ∈ RootGC[instanceId]
-        bytes32 leafHash = keccak256(leafBytes);
+        // 1) Verify index-bound leaf inclusion via section-5.2-style incremental hashing.
+        bytes32 leafHash = keccak256(abi.encodePacked(gateIndex, leafBytes));
         bytes32 root = instanceCommitments[instanceId].rootGC;
-        require(MerkleProof.verify(merkleProof, root, leafHash), "Bad Merkle proof");
+        require(_processIncrementalProof(leafHash, ihProof) == root, "Bad IH proof");
 
         // 2) Recompute expected leaf from seed here
         bytes memory expected = recomputeGateLeafBytes(seed, instanceId, gateIndex, g);
-        bool matchLeaf = (keccak256(expected) == leafHash);
+        bool matchLeaf = (keccak256(abi.encodePacked(gateIndex, expected)) == leafHash);
 
         // 3) Slash depending on result
         if (!matchLeaf) {
@@ -604,6 +604,26 @@ contract MillionairesProblem {
     // leaf = H(gateIndex || gateType || wireA || wireB || wireC)
     function _layoutLeafHash(uint256 gateIndex, GateDesc calldata g) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(gateIndex, uint8(g.gateType), g.wireA, g.wireB, g.wireC));
+    }
+
+    // Proof format:
+    // - ihProof[0] (optional): IH_{i-1} prefix state before challenged gate i.
+    // - ihProof[1..]: ordered suffix block hashes after challenged gate i.
+    // - empty proof means single-block chain rooted at H(0x00..00 || leafHash).
+    function _processIncrementalProof(bytes32 leafHash, bytes32[] calldata ihProof) internal pure returns (bytes32) {
+        bytes32 state;
+        uint256 i;
+
+        if (ihProof.length == 0) {
+            state = keccak256(abi.encodePacked(bytes32(0), leafHash));
+            return state;
+        }
+
+        state = keccak256(abi.encodePacked(ihProof[0], leafHash));
+        for (i = 1; i < ihProof.length; i++) {
+            state = keccak256(abi.encodePacked(state, ihProof[i]));
+        }
+        return state;
     }
     // ------ gc part end ------
 }

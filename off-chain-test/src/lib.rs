@@ -3,6 +3,7 @@
 
 pub mod consensus;
 pub mod garble;
+pub mod ih;
 pub mod labels;
 pub mod merkle;
 pub mod scenario;

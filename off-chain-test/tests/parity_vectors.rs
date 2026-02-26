@@ -6,8 +6,8 @@ use off_chain_test::consensus::{
     layout_leaf_hash,
 };
 use off_chain_test::garble::{garble_circuit, recompute_gate_leaf};
+use off_chain_test::ih::{gc_block_hash, ih_proof_from_hashes, incremental_root, verify_ih_proof};
 use off_chain_test::labels::get_permutation_bit;
-use off_chain_test::merkle::{leaf_hash, merkle_proof_from_hashes, merkle_root, verify_proof};
 use off_chain_test::types::{CircuitLayout, GateDesc, GateType};
 
 fn base_inputs() -> ([u8; 32], [u8; 32], u64) {
@@ -54,11 +54,11 @@ fn gate_leaf_matches_deterministic_vector() {
     let gate = GateDesc::new(GateType::And, 7, 8, 9);
     let leaf = recompute_gate_leaf(seed, circuit_id, instance_id, 9, gate);
 
-    // Leaf encoding and hash must remain byte-stable.
+    // Leaf encoding and index-bound block hash must remain byte-stable.
     assert_eq!(leaf.len(), LEAF_BYTES_LEN);
     assert_eq!(
-        hex::encode(leaf_hash(&leaf)),
-        "2263f120cabdc45978360aa10c31a4e2bdba53aa5a54dfefd538e44c295a1dbe"
+        hex::encode(gc_block_hash(9, &leaf)),
+        "a300af318eda049428eb239539c1f40283d72dc07b6dfc33795294dceacc15a0"
     );
     assert_eq!(
         hex::encode(layout_leaf_hash(9, gate)),
@@ -78,7 +78,7 @@ fn not_gate_rows_are_zero() {
 }
 
 #[test]
-fn whole_circuit_and_merkle_root_are_stable() {
+fn whole_circuit_and_incremental_root_are_stable() {
     let (circuit_id, seed, instance_id) = base_inputs();
     let layout = CircuitLayout {
         circuit_id,
@@ -94,16 +94,16 @@ fn whole_circuit_and_merkle_root_are_stable() {
     assert_eq!(leaves.len(), 3);
     assert!(leaves.iter().all(|l| l.len() == LEAF_BYTES_LEN));
 
-    // Root is pinned against current commutative Merkle construction.
-    let root = merkle_root(&leaves);
+    // Root is pinned against current section-5.2 incremental construction.
+    let root = incremental_root(&leaves);
     assert_eq!(
         hex::encode(root),
-        "3df4ebbafe7fb5be3b831f4b42797bd54fddf1fec06d861fbe1613f3d2dbffca"
+        "73a30bddec1ceb66e2680dd54321f734ac92b0388ee232009ed0b45edb7a3fe8"
     );
 }
 
 #[test]
-fn merkle_proof_roundtrip_matches_openzeppelin_style_hashing() {
+fn ih_proof_roundtrip_matches_contract_style_hashing() {
     let (circuit_id, seed, instance_id) = base_inputs();
     let layout = CircuitLayout {
         circuit_id,
@@ -117,13 +117,17 @@ fn merkle_proof_roundtrip_matches_openzeppelin_style_hashing() {
     };
 
     let leaves = garble_circuit(seed, &layout);
-    let hashes: Vec<[u8; 32]> = leaves.iter().map(|leaf| leaf_hash(leaf)).collect();
-    let root = merkle_root(&leaves);
+    let block_hashes: Vec<[u8; 32]> = leaves
+        .iter()
+        .enumerate()
+        .map(|(idx, leaf)| gc_block_hash(idx as u64, leaf))
+        .collect();
+    let root = incremental_root(&leaves);
 
     let idx = 2usize;
-    let proof = merkle_proof_from_hashes(&hashes, idx);
-    // Local verifier must accept the generated inclusion proof.
-    assert!(verify_proof(hashes[idx], &proof, root));
+    let proof = ih_proof_from_hashes(&block_hashes, idx);
+    // Local verifier must accept the generated incremental proof.
+    assert!(verify_ih_proof(block_hashes[idx], &proof, root));
 }
 
 #[tokio::test]

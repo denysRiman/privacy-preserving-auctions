@@ -1,6 +1,9 @@
 use off_chain_test::consensus::{keccak256, layout_leaf_hash};
 use off_chain_test::garble::garble_circuit;
-use off_chain_test::merkle::{leaf_hash, merkle_proof_from_hashes, merkle_root_from_hashes, verify_proof};
+use off_chain_test::ih::{
+    gc_block_hash, ih_proof_from_hashes, incremental_root_from_hashes, verify_ih_proof,
+};
+use off_chain_test::merkle::{merkle_proof_from_hashes, merkle_root_from_hashes, verify_proof};
 use off_chain_test::scenario::{build_millionaires_layout, com_seed, derive_instance_seed, CUT_AND_CHOOSE_N};
 use off_chain_test::types::{CircuitLayout, GateDesc, GateType};
 
@@ -12,7 +15,7 @@ struct InstanceArtifacts {
     com_seed: [u8; 32],
     root_gc: [u8; 32],
     leaves: Vec<[u8; 71]>,
-    leaf_hashes: Vec<[u8; 32]>,
+    block_hashes: Vec<[u8; 32]>,
 }
 
 /// Parses `--flag value` or `--flag=value` as `usize`, falling back to `default`.
@@ -124,15 +127,19 @@ async fn main() {
             };
             // One full GC table (all leaves) per instance.
             let leaves = garble_circuit(seed, &layout);
-            let leaf_hashes: Vec<[u8; 32]> = leaves.iter().map(|leaf| leaf_hash(leaf)).collect();
-            let root_gc = merkle_root_from_hashes(&leaf_hashes);
+            let block_hashes: Vec<[u8; 32]> = leaves
+                .iter()
+                .enumerate()
+                .map(|(gate_idx, leaf)| gc_block_hash(gate_idx as u64, leaf))
+                .collect();
+            let root_gc = incremental_root_from_hashes(&block_hashes);
             InstanceArtifacts {
                 instance_id,
                 seed,
                 com_seed: com_seed(seed),
                 root_gc,
                 leaves,
-                leaf_hashes,
+                block_hashes,
             }
         })
         .collect();
@@ -154,12 +161,12 @@ async fn main() {
     let inst = &instances[challenge_instance];
     let gate: GateDesc = gates[gate_index];
     let leaf = inst.leaves[gate_index];
-    let leaf_hash_value = inst.leaf_hashes[gate_index];
-    let merkle_proof = merkle_proof_from_hashes(&inst.leaf_hashes, gate_index);
+    let block_hash_value = inst.block_hashes[gate_index];
+    let ih_proof = ih_proof_from_hashes(&inst.block_hashes, gate_index);
     let layout_leaf = layout_leaf_hash(gate_index as u64, gate);
 
     // Quick local verification before user copies values to Solidity tests.
-    let proof_ok = verify_proof(leaf_hash_value, &merkle_proof, inst.root_gc);
+    let proof_ok = verify_ih_proof(block_hash_value, &ih_proof, inst.root_gc);
     let layout_proof_ok = verify_proof(layout_leaf, &layout_proof, circuit_layout_root);
 
     println!("=== Cut-and-Choose Snapshot ===");
@@ -206,16 +213,16 @@ async fn main() {
     println!("g.wireB = {}", gate.wire_b);
     println!("g.wireC = {}", gate.wire_c);
     println!("leafBytes = {}", hex_prefixed(&leaf));
-    println!("leafHash = {}", hex32(leaf_hash_value));
+    println!("leafHash = {}", hex32(block_hash_value));
     println!("rootGC[instanceId] = {}", hex32(inst.root_gc));
-    println!("merkleProof = {}", hex_bytes32_vec(&merkle_proof));
+    println!("ihProof = {}", hex_bytes32_vec(&ih_proof));
     println!("layoutLeaf = {}", hex32(layout_leaf));
     println!("layoutProof = {}", hex_bytes32_vec(&layout_proof));
     println!("circuitLayoutRoot = {}", hex32(circuit_layout_root));
     println!();
 
     println!("=== Proof Sanity ===");
-    println!("gcProofValid = {}", proof_ok);
+    println!("gcIhProofValid = {}", proof_ok);
     println!("layoutProofValid = {}", layout_proof_ok);
 
     // Direct copy-paste helper for Solidity tests.
@@ -278,9 +285,9 @@ async fn main() {
     }
     println!();
 
-    println!("    v.merkleProof = new bytes32[]({});", merkle_proof.len());
-    for (i, hash) in merkle_proof.iter().enumerate() {
-        println!("    v.merkleProof[{}] = {};", i, solidity_hex_literal(hash));
+    println!("    v.ihProof = new bytes32[]({});", ih_proof.len());
+    for (i, hash) in ih_proof.iter().enumerate() {
+        println!("    v.ihProof[{}] = {};", i, solidity_hex_literal(hash));
     }
     println!();
 

@@ -36,7 +36,7 @@ contract MillionairesTest is Test {
         bytes32[] rootGCs;
         uint256[] openIndices;
         bytes32[] openSeeds;
-        bytes32[] merkleProof;
+        bytes32[] ihProof;
         bytes32[] layoutProof;
         bool expectMatch;
     }
@@ -376,11 +376,11 @@ contract MillionairesTest is Test {
         // leafBytes that contract itself would recompute
         bytes memory leaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
 
-        // 1-leaf Merkle tree
-        bytes32 root = keccak256(leaf);
+        bytes32[] memory proof = new bytes32[](0);
+        // Single-block incremental chain root: IH_1 = H(0 || block_1).
+        bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, leaf), proof);
         _toDisputeWithRoot(seed, root, 9);
 
-        bytes32[] memory proof = new bytes32[](0);
         bytes32[] memory layoutProof = new bytes32[](0);
 
         uint256 aliceBefore = alice.balance;
@@ -412,10 +412,10 @@ contract MillionairesTest is Test {
         for (uint256 i = 0; i < expectedLeaf.length; i++) fakeLeaf[i] = expectedLeaf[i];
         fakeLeaf[0] = bytes1(uint8(fakeLeaf[0]) ^ 1);
 
-        bytes32 root = keccak256(fakeLeaf);
+        bytes32[] memory proof = new bytes32[](0);
+        bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, fakeLeaf), proof);
         _toDisputeWithRoot(seed, root, 9);
 
-        bytes32[] memory proof = new bytes32[](0);
         bytes32[] memory layoutProof = new bytes32[](0);
         uint256 bobBefore = bob.balance;
 
@@ -426,7 +426,7 @@ contract MillionairesTest is Test {
         assertEq(uint(mp.currentStage()), 7);
     }
 
-    function test_ChallengeGateLeaf_BadMerkleProof_Reverts() public {
+    function test_ChallengeGateLeaf_BadIHProof_Reverts() public {
         bytes32 seed = keccak256("seed");
 
         MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
@@ -446,7 +446,7 @@ contract MillionairesTest is Test {
         bytes32[] memory layoutProof = new bytes32[](0);
 
         vm.prank(bob);
-        vm.expectRevert("Bad Merkle proof");
+        vm.expectRevert("Bad IH proof");
         mp.challengeGateLeaf(0, 0, g, leaf, proof, layoutProof);
     }
 
@@ -462,12 +462,12 @@ contract MillionairesTest is Test {
             wireC: 3
         });
 
+        bytes32[] memory proof = new bytes32[](0);
         // Correct committed leaf.
         bytes memory leaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
-        bytes32 root = keccak256(leaf);
+        bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, leaf), proof);
         _toDisputeWithRoot(seed, root, 9);
 
-        bytes32[] memory proof = new bytes32[](0);
         bytes32[] memory layoutProof = new bytes32[](0);
 
         uint256 aliceBefore = alice.balance;
@@ -497,10 +497,10 @@ contract MillionairesTest is Test {
         for (uint256 i = 0; i < expectedLeaf.length; i++) fakeLeaf[i] = expectedLeaf[i];
         fakeLeaf[0] = bytes1(uint8(fakeLeaf[0]) ^ 1);
 
-        bytes32 root = keccak256(fakeLeaf);
+        bytes32[] memory proof = new bytes32[](0);
+        bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, fakeLeaf), proof);
         _toDisputeWithRoot(seed, root, 9);
 
-        bytes32[] memory proof = new bytes32[](0);
         bytes32[] memory layoutProof = new bytes32[](0);
         uint256 bobBefore = bob.balance;
 
@@ -523,11 +523,11 @@ contract MillionairesTest is Test {
             wireC: 3
         });
 
+        bytes32[] memory proof = new bytes32[](0);
         bytes memory leaf = mp.computeLeaf(seed, 0, 0, g);
-        bytes32 root = keccak256(leaf);
+        bytes32 root = _processIncrementalProof(_gateLeafHash(0, leaf), proof);
         _toDisputeWithRoot(seed, root, 9);
 
-        bytes32[] memory proof = new bytes32[](0);
         bytes32[] memory layoutProof = new bytes32[](0);
 
         vm.prank(bob);
@@ -538,6 +538,9 @@ contract MillionairesTest is Test {
     //Main test for checking if the implementation on Rust works
     function test_ChallengeGateLeaf_RustVector_Editable() public {
         RustGateChallengeVector memory v = _rustVectorDefaultAndGate();
+        // Section-5.2 update: rootGC is the terminal state of an incremental-hash chain.
+        v.rootGCs[v.challengeInstanceId] =
+            _processIncrementalProof(_gateLeafHash(v.gateIndex, v.leafBytes), v.ihProof);
 
         // Deploy fresh contract with Rust vector identifiers.
         vm.prank(alice);
@@ -607,7 +610,7 @@ contract MillionairesTest is Test {
             v.gateIndex,
             g,
             v.leafBytes,
-            v.merkleProof,
+            v.ihProof,
             v.layoutProof
         );
 
@@ -622,6 +625,22 @@ contract MillionairesTest is Test {
         }
 
         assertEq(uint(mp.currentStage()), 7); // Closed
+    }
+
+    function _gateLeafHash(uint256 gateIndex, bytes memory leafBytes) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(gateIndex, leafBytes));
+    }
+
+    function _processIncrementalProof(bytes32 leafHash, bytes32[] memory ihProof) internal pure returns (bytes32) {
+        if (ihProof.length == 0) {
+            return keccak256(abi.encodePacked(bytes32(0), leafHash));
+        }
+
+        bytes32 state = keccak256(abi.encodePacked(ihProof[0], leafHash));
+        for (uint256 i = 1; i < ihProof.length; i++) {
+            state = keccak256(abi.encodePacked(state, ihProof[i]));
+        }
+        return state;
     }
 
     function _toDisputeWithRoot(bytes32 seed, bytes32 rootGC0, uint256 mChoice) internal {
@@ -726,14 +745,14 @@ contract MillionairesTest is Test {
         v.openSeeds[7] = hex"b316a2db450aad027d2d79f56b5734aed75832704589c453c82e86e49e3c2059";
         v.openSeeds[8] = hex"399f75c7055ddcf78a4977eaad6ae17abe2905146f7f2d81d4640b41396910ab";
 
-        v.merkleProof = new bytes32[](7);
-        v.merkleProof[0] = hex"9953ddc764ebe6b87385bf84f53d619b9370bcc6e2a3fa5fba7c7d66b4e639d8";
-        v.merkleProof[1] = hex"c9d11e214c587a040cdf2a9f48cdb3d609b51390465b3dd84c153e048bcb168a";
-        v.merkleProof[2] = hex"894320ad446936475b1cc138f2370a04c65ca7b5a7a984b0c33036501e442394";
-        v.merkleProof[3] = hex"e5237e952203a3515cfe4a35a7e0ea25a64a647fa059a462a8e063068e719ddb";
-        v.merkleProof[4] = hex"a589be25467e22c2d205ff339de2b02ff1b880746cf97e34ca86cd7fc4aa7a9d";
-        v.merkleProof[5] = hex"6fe99c05e51cb1b607d0526b158605acf65a038455fe839038db38c703ea732a";
-        v.merkleProof[6] = hex"5c22aa67adf3cb1afa395aff96bc41c1e27abd5c90a6b0f0ea61977d18c07c7c";
+        v.ihProof = new bytes32[](7);
+        v.ihProof[0] = hex"9953ddc764ebe6b87385bf84f53d619b9370bcc6e2a3fa5fba7c7d66b4e639d8";
+        v.ihProof[1] = hex"c9d11e214c587a040cdf2a9f48cdb3d609b51390465b3dd84c153e048bcb168a";
+        v.ihProof[2] = hex"894320ad446936475b1cc138f2370a04c65ca7b5a7a984b0c33036501e442394";
+        v.ihProof[3] = hex"e5237e952203a3515cfe4a35a7e0ea25a64a647fa059a462a8e063068e719ddb";
+        v.ihProof[4] = hex"a589be25467e22c2d205ff339de2b02ff1b880746cf97e34ca86cd7fc4aa7a9d";
+        v.ihProof[5] = hex"6fe99c05e51cb1b607d0526b158605acf65a038455fe839038db38c703ea732a";
+        v.ihProof[6] = hex"5c22aa67adf3cb1afa395aff96bc41c1e27abd5c90a6b0f0ea61977d18c07c7c";
 
         v.layoutProof = new bytes32[](7);
         v.layoutProof[0] = hex"4af035fa923878895db2ebdbd69dd9f28a7d3ca9704fa907614b8a301fdf8cc7";

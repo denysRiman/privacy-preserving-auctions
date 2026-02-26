@@ -3,7 +3,8 @@
 
 use off_chain_test::consensus::{keccak256, layout_leaf_hash};
 use off_chain_test::garble::garble_circuit;
-use off_chain_test::merkle::{leaf_hash, merkle_proof_from_hashes, merkle_root_from_hashes, verify_proof};
+use off_chain_test::ih::{gc_block_hash, ih_proof_from_hashes, incremental_root_from_hashes, verify_ih_proof};
+use off_chain_test::merkle::{merkle_proof_from_hashes, merkle_root_from_hashes, verify_proof};
 use off_chain_test::scenario::{build_millionaires_layout, com_seed, derive_instance_seed, CUT_AND_CHOOSE_N};
 use off_chain_test::types::CircuitLayout;
 
@@ -46,16 +47,20 @@ fn generates_10_instances_and_valid_gate_proofs() {
             gates: gates.clone(),
         };
         let leaves = garble_circuit(seed, &layout);
-        let hashes: Vec<[u8; 32]> = leaves.iter().map(|leaf| leaf_hash(leaf)).collect();
-        let root_gc = merkle_root_from_hashes(&hashes);
+        let block_hashes: Vec<[u8; 32]> = leaves
+            .iter()
+            .enumerate()
+            .map(|(idx, leaf)| gc_block_hash(idx as u64, leaf))
+            .collect();
+        let root_gc = incremental_root_from_hashes(&block_hashes);
         assert_ne!(root_gc, [0u8; 32]);
         root_count += 1;
 
         if instance_id == challenge_instance {
             // Prove challenged gate exists in instance root.
-            let proof_gc = merkle_proof_from_hashes(&hashes, gate_index);
-            let leaf = hashes[gate_index];
-            assert!(verify_proof(leaf, &proof_gc, root_gc));
+            let proof_gc = ih_proof_from_hashes(&block_hashes, gate_index);
+            let block_hash = block_hashes[gate_index];
+            assert!(verify_ih_proof(block_hash, &proof_gc, root_gc));
 
             // Prove gate descriptor exists in layout commitment.
             let layout_leaf = layout_leaf_hash(gate_index as u64, gates[gate_index]);
