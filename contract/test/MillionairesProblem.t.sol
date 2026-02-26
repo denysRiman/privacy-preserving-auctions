@@ -57,6 +57,23 @@ contract MillionairesTest is Test {
         vm.deal(bob, 10 ether);
     }
 
+    function _defaultAndGate() internal pure returns (MillionairesProblem.GateDesc memory) {
+        return MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType.AND,
+            wireA: 1,
+            wireB: 2,
+            wireC: 3
+        });
+    }
+
+    function _mutateFirstByte(bytes memory value) internal pure returns (bytes memory mutated) {
+        mutated = new bytes(value.length);
+        for (uint256 i = 0; i < value.length; i++) {
+            mutated[i] = value[i];
+        }
+        mutated[0] = bytes1(uint8(mutated[0]) ^ 1);
+    }
+
     function test_SuccessfulDeposits() public {
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
@@ -366,12 +383,7 @@ contract MillionairesTest is Test {
         uint256 instanceId = 0;
         uint256 gateIndex = 0;
 
-        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
-            gateType: MillionairesProblem.GateType.AND,
-            wireA: 1,
-            wireB: 2,
-            wireC: 3
-        });
+        MillionairesProblem.GateDesc memory g = _defaultAndGate();
 
         // leafBytes that contract itself would recompute
         bytes memory leaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
@@ -398,19 +410,10 @@ contract MillionairesTest is Test {
         uint256 instanceId = 0;
         uint256 gateIndex = 0;
 
-        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
-            gateType: MillionairesProblem.GateType.AND,
-            wireA: 1,
-            wireB: 2,
-            wireC: 3
-        });
+        MillionairesProblem.GateDesc memory g = _defaultAndGate();
 
         bytes memory expectedLeaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
-
-        // Make committed leaf wrong (mutate one byte)
-        bytes memory fakeLeaf = new bytes(expectedLeaf.length);
-        for (uint256 i = 0; i < expectedLeaf.length; i++) fakeLeaf[i] = expectedLeaf[i];
-        fakeLeaf[0] = bytes1(uint8(fakeLeaf[0]) ^ 1);
+        bytes memory fakeLeaf = _mutateFirstByte(expectedLeaf);
 
         bytes32[] memory proof = new bytes32[](0);
         bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, fakeLeaf), proof);
@@ -428,13 +431,7 @@ contract MillionairesTest is Test {
 
     function test_ChallengeGateLeaf_BadIHProof_Reverts() public {
         bytes32 seed = keccak256("seed");
-
-        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
-            gateType: MillionairesProblem.GateType.AND,
-            wireA: 1,
-            wireB: 2,
-            wireC: 3
-        });
+        MillionairesProblem.GateDesc memory g = _defaultAndGate();
 
         bytes memory leaf = mp.computeLeaf(seed, 0, 0, g);
 
@@ -450,17 +447,32 @@ contract MillionairesTest is Test {
         mp.challengeGateLeaf(0, 0, g, leaf, proof, layoutProof);
     }
 
+    function test_ChallengeGateLeaf_BadLayoutProof_Reverts() public {
+        bytes32 seed = keccak256("seed");
+        uint256 instanceId = 0;
+        uint256 gateIndex = 0;
+
+        MillionairesProblem.GateDesc memory g = _defaultAndGate();
+        bytes memory leaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
+
+        bytes32[] memory proof = new bytes32[](0);
+        bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, leaf), proof);
+        _toDisputeWithRoot(seed, root, 9);
+
+        bytes32[] memory badLayoutProof = new bytes32[](1);
+        badLayoutProof[0] = keccak256("bad-layout-proof");
+
+        vm.prank(bob);
+        vm.expectRevert("Bad circuit layout proof");
+        mp.challengeGateLeaf(instanceId, gateIndex, g, leaf, proof, badLayoutProof);
+    }
+
     function test_DisputeGarbledTable_DelegatesToChallenge_SlashesBobOnMatch() public {
         bytes32 seed = keccak256("seed");
         uint256 instanceId = 0;
         uint256 gateIndex = 0;
 
-        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
-            gateType: MillionairesProblem.GateType.AND,
-            wireA: 1,
-            wireB: 2,
-            wireC: 3
-        });
+        MillionairesProblem.GateDesc memory g = _defaultAndGate();
 
         bytes32[] memory proof = new bytes32[](0);
         // Correct committed leaf.
@@ -485,17 +497,10 @@ contract MillionairesTest is Test {
         uint256 instanceId = 0;
         uint256 gateIndex = 0;
 
-        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
-            gateType: MillionairesProblem.GateType.AND,
-            wireA: 1,
-            wireB: 2,
-            wireC: 3
-        });
+        MillionairesProblem.GateDesc memory g = _defaultAndGate();
 
         bytes memory expectedLeaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
-        bytes memory fakeLeaf = new bytes(expectedLeaf.length);
-        for (uint256 i = 0; i < expectedLeaf.length; i++) fakeLeaf[i] = expectedLeaf[i];
-        fakeLeaf[0] = bytes1(uint8(fakeLeaf[0]) ^ 1);
+        bytes memory fakeLeaf = _mutateFirstByte(expectedLeaf);
 
         bytes32[] memory proof = new bytes32[](0);
         bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, fakeLeaf), proof);
@@ -516,12 +521,7 @@ contract MillionairesTest is Test {
         bytes32 seed = keccak256("seed");
         bytes32 wrongSeed = keccak256("wrong-seed");
 
-        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
-            gateType: MillionairesProblem.GateType.AND,
-            wireA: 1,
-            wireB: 2,
-            wireC: 3
-        });
+        MillionairesProblem.GateDesc memory g = _defaultAndGate();
 
         bytes32[] memory proof = new bytes32[](0);
         bytes memory leaf = mp.computeLeaf(seed, 0, 0, g);

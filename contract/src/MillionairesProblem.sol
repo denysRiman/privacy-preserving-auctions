@@ -547,6 +547,28 @@ contract MillionairesProblem {
         return false;
     }
 
+    function _assertValidLayoutProof(
+        uint256 gateIndex,
+        GateDesc calldata g,
+        bytes32[] calldata layoutProof
+    ) internal view {
+        bytes32 layoutLeaf = _layoutLeafHash(gateIndex, g);
+        require(
+            MerkleProof.verify(layoutProof, circuitLayoutRoot, layoutLeaf),
+            "Bad circuit layout proof"
+        );
+    }
+
+    function _requireRevealedSeedForOpenedInstance(uint256 instanceId) internal view returns (bytes32 seed) {
+        require(_isOpenInstance(instanceId), "Not an opened instance");
+        seed = revealedSeeds[instanceId];
+        require(seed != bytes32(0), "Seed not revealed");
+    }
+
+    function _gateLeafHash(uint256 gateIndex, bytes memory leafBytes) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(gateIndex, leafBytes));
+    }
+
     /**
      * Dispute a single gate leaf for an opened instance.
      *
@@ -567,27 +589,19 @@ contract MillionairesProblem {
         require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
         require(msg.sender == bob, "Only Bob for MVP");
 
-        // Verify GateDesc is the real circuit gate at gateIndex
-        bytes32 layoutLeaf = _layoutLeafHash(gateIndex, g);
-        require(
-            MerkleProof.verify(layoutProof, circuitLayoutRoot, layoutLeaf),
-            "Bad circuit layout proof"
-        );
-
-        require(_isOpenInstance(instanceId), "Not an opened instance");
-        bytes32 seed = revealedSeeds[instanceId];
-        require(seed != bytes32(0), "Seed not revealed");
+        _assertValidLayoutProof(gateIndex, g, layoutProof);
+        bytes32 seed = _requireRevealedSeedForOpenedInstance(instanceId);
 
         require(leafBytes.length == LEAF_BYTES_LEN, "Bad leaf length");
 
         // 1) Verify index-bound leaf inclusion via section-5.2-style incremental hashing.
-        bytes32 leafHash = keccak256(abi.encodePacked(gateIndex, leafBytes));
+        bytes32 leafHash = _gateLeafHash(gateIndex, leafBytes);
         bytes32 root = instanceCommitments[instanceId].rootGC;
         require(_processIncrementalProof(leafHash, ihProof) == root, "Bad IH proof");
 
         // 2) Recompute expected leaf from seed here
         bytes memory expected = recomputeGateLeafBytes(seed, instanceId, gateIndex, g);
-        bool matchLeaf = (keccak256(abi.encodePacked(gateIndex, expected)) == leafHash);
+        bool matchLeaf = (_gateLeafHash(gateIndex, expected) == leafHash);
 
         // 3) Slash depending on result
         if (!matchLeaf) {
