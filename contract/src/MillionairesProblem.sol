@@ -31,7 +31,8 @@ contract MillionairesProblem {
 
     struct InstanceCommitment {
         bytes32 comSeed;   // H(seedG[i])
-        bytes32 rootGC;    // Terminal incremental-hash state over garbled artifacts
+        bytes32 rootGC;    // Terminal incremental-hash state over garbling artifacts for disputes
+        bytes32 blobHashGC; // EIP-4844 versioned hash for evaluation payload blob (instance i)
         bytes32 rootXG;    // Merkle root over G's input labels
         bytes32 rootOT;    // Merkle root over OT transcript
         bytes32 h0;        // Result anchor for output 0: H(Lout0)
@@ -238,9 +239,9 @@ contract MillionairesProblem {
         // test network only
         if (block.chainid != 31337) {
             require(bHash != bytes32(0), "Garbled Table Blob missing");
-            require(bHash == instanceCommitments[m].rootGC, "Blob does not match Phase 2 commitment");
+            require(bHash == instanceCommitments[m].blobHashGC, "Blob does not match Phase 2 commitment");
         } else {
-            bHash = instanceCommitments[m].rootGC;
+            bHash = instanceCommitments[m].blobHashGC;
         }
 
         evaluationTableBlobHash = bHash;
