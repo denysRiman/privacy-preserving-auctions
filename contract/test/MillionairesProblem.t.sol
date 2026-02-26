@@ -367,7 +367,7 @@ contract MillionairesTest is Test {
         assertEq(uint(mp.currentStage()), 7); // Stage.Closed
     }
 
-    function test_FinalSettlement_AliceWins() public {
+    function test_FinalSettlement_AliceWins_RefundsBothDeposits() public {
         // --- Phase 1: Deposits ---
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
@@ -415,13 +415,74 @@ contract MillionairesTest is Test {
 
         // --- Phase 6: Settle ---
         uint256 aliceBalanceBefore = alice.balance;
+        uint256 bobBalanceBefore = bob.balance;
         vm.prank(bob);
         mp.settle(aliceWinningLabel);
 
         // --- Assertions ---
-        assertEq(alice.balance, aliceBalanceBefore + 2 ether);
+        assertEq(alice.balance, aliceBalanceBefore + 1 ether);
+        assertEq(bob.balance, bobBalanceBefore + 1 ether);
         assertEq(uint(mp.currentStage()), 7); // Stage.Closed
         assertTrue(mp.result());
+    }
+
+    function test_FinalSettlement_BobWins_RefundsBothDeposits() public {
+        // --- Phase 1: Deposits ---
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        // --- Phase 2: Commitments ---
+        bytes32 bobWinningLabel = keccak256(abi.encodePacked("bob_wins_label"));
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+
+        for (uint256 i = 0; i < 10; i++) {
+            commits[i] = MillionairesProblem.InstanceCommitment({
+                comSeed: keccak256(abi.encodePacked(keccak256(abi.encodePacked("seed", i)))),
+                rootGC: bytes32(0),
+                blobHashGC: bytes32(0),
+                rootXG: bytes32(0),
+                rootOT: bytes32(0),
+                h0: keccak256(abi.encodePacked("alice_wins_label")),
+                h1: keccak256(abi.encodePacked(bobWinningLabel))
+            });
+        }
+        vm.prank(alice);
+        mp.submitCommitments(commits);
+
+        // --- Phase 3 & 4: Choose & Reveal ---
+        vm.prank(bob);
+        mp.choose(0);
+
+        uint256[] memory indices = new uint256[](9);
+        bytes32[] memory seeds = new bytes32[](9);
+        for (uint256 i = 1; i < 10; i++) {
+            indices[i - 1] = i;
+            seeds[i - 1] = keccak256(abi.encodePacked("seed", i));
+        }
+        vm.prank(alice);
+        mp.revealOpenings(indices, seeds);
+
+        vm.prank(bob);
+        mp.closeDispute();
+
+        // --- Phase 5: Reveal Garbler Labels ---
+        bytes32[] memory mockLabels = new bytes32[](32);
+        vm.prank(alice);
+        mp.revealGarblerLabels(mockLabels);
+
+        // --- Phase 6: Settle ---
+        uint256 aliceBalanceBefore = alice.balance;
+        uint256 bobBalanceBefore = bob.balance;
+        vm.prank(bob);
+        mp.settle(bobWinningLabel);
+
+        // --- Assertions ---
+        assertEq(alice.balance, aliceBalanceBefore + 1 ether);
+        assertEq(bob.balance, bobBalanceBefore + 1 ether);
+        assertEq(uint(mp.currentStage()), 7); // Stage.Closed
+        assertFalse(mp.result());
     }
 
     function test_ChallengeGateLeaf_FalseChallenge_SlashesBob() public {

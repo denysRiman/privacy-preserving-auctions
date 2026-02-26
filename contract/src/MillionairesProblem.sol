@@ -307,30 +307,23 @@ contract MillionairesProblem {
 
         InstanceCommitment storage evalInstance = instanceCommitments[m];
 
-        uint256 payoutAlice;
-        uint256 payoutBob;
-
         // Verify if the label matches H(Lout0) or H(Lout1)
         if (keccak256(abi.encodePacked(_outputLabel)) == evalInstance.h0) {
-            payoutAlice = vault[alice] + vault[bob];
             result = true;
         } else if (keccak256(abi.encodePacked(_outputLabel)) == evalInstance.h1) {
-            payoutBob = vault[alice] + vault[bob];
             result = false;
         } else {
             revert("Invalid output label");
         }
 
+        uint256 payoutAlice = vault[alice];
+        uint256 payoutBob = vault[bob];
         vault[alice] = 0;
         vault[bob] = 0;
-        if (payoutAlice > 0) {
-            (bool s1, ) = payable(alice).call{value: payoutAlice}("");
-            require(s1, "Payout to Alice failed");
-        }
-        if (payoutBob > 0) {
-            (bool s2, ) = payable(bob).call{value: payoutBob}("");
-            require(s2, "Payout to Bob failed");
-        }
+        (bool s1, ) = payable(alice).call{value: payoutAlice}("");
+        require(s1, "Payout to Alice failed");
+        (bool s2, ) = payable(bob).call{value: payoutBob}("");
+        require(s2, "Payout to Bob failed");
 
         currentStage = Stage.Closed;
     }
