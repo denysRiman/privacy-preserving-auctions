@@ -1,4 +1,12 @@
-use off_chain_common::consensus::keccak256;
+use off_chain_common::cli::{
+    hex16, hex32, hex_prefixed, parse_bytes32, parse_bytes32_list_csv, parse_flag_value, parse_u64,
+    print_tx_summary, required_env, required_env_any, required_flag_value, rpc_url, run_cast,
+};
+use off_chain_common::consensus::{derive_wire_label, keccak256};
+use off_chain_common::evaluation::{
+    derive_alice_input_labels, derive_bob_label_offers, derive_not_gate_hints, derive_output_labels,
+    label16_to_bytes32, millionaires_gt_output_wire,
+};
 use off_chain_common::garble::garble_circuit;
 use off_chain_common::ih::{gc_block_hash, incremental_root_from_hashes};
 use off_chain_common::scenario::{CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed};
@@ -7,7 +15,6 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -25,205 +32,6 @@ struct InstanceArtifacts {
     com_seed: [u8; 32],
     root_gc: [u8; 32],
     leaves: Vec<[u8; 71]>,
-}
-
-fn required_env(name: &str) -> AppResult<String> {
-    env::var(name).map_err(|_| format!("Missing required env var: {name}").into())
-}
-
-fn required_env_any(names: &[&str]) -> AppResult<String> {
-    for name in names {
-        if let Ok(value) = env::var(name) {
-            if !value.trim().is_empty() {
-                return Ok(value);
-            }
-        }
-    }
-    Err(format!("Missing required env vars: {}", names.join(" or ")).into())
-}
-
-fn rpc_url() -> String {
-    env::var("RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8545".to_string())
-}
-
-fn env_truthy(name: &str) -> bool {
-    match env::var(name) {
-        Ok(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        }
-        Err(_) => false,
-    }
-}
-
-fn cast_args_with_tx_overrides(args: &[String]) -> Vec<String> {
-    let mut out = args.to_vec();
-    if out.first().map(String::as_str) != Some("send") {
-        return out;
-    }
-
-    if env_truthy("TX_LEGACY") && !out.iter().any(|arg| arg == "--legacy") {
-        out.push("--legacy".to_string());
-    }
-
-    if !out.iter().any(|arg| arg == "--gas-price") {
-        if let Ok(gas_price_wei) = env::var("TX_GAS_PRICE_WEI") {
-            let trimmed = gas_price_wei.trim();
-            if !trimmed.is_empty() {
-                out.push("--gas-price".to_string());
-                out.push(trimmed.to_string());
-            }
-        }
-    }
-
-    out
-}
-
-fn run_cast(args: &[String]) -> AppResult<String> {
-    let final_args = cast_args_with_tx_overrides(args);
-    let output = Command::new("cast").args(&final_args).output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("cast {} failed: {}", final_args.join(" "), stderr.trim()).into());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn cast_output_field(output: &str, key: &str) -> Option<String> {
-    for line in output.lines() {
-        let mut parts = line.split_whitespace();
-        if let Some(found_key) = parts.next() {
-            if found_key == key {
-                if let Some(value) = parts.next() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn print_tx_summary(label: &str, output: &str) {
-    if let Some(tx_hash) = cast_output_field(output, "transactionHash") {
-        println!("{label}_tx_hash={tx_hash}");
-        return;
-    }
-    if let Some(status) = cast_output_field(output, "status") {
-        println!("{label}_status={status}");
-        return;
-    }
-
-    if let Some(first_line) = output.lines().next() {
-        println!("{label}_tx={first_line}");
-    } else {
-        println!("{label}_tx=submitted");
-    }
-}
-
-fn hex_nibble(value: u8) -> AppResult<u8> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(10 + value - b'a'),
-        b'A'..=b'F' => Ok(10 + value - b'A'),
-        _ => Err(format!("invalid hex character: {}", value as char).into()),
-    }
-}
-
-fn strip_0x(value: &str) -> &str {
-    value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .unwrap_or(value)
-}
-
-fn decode_hex(value: &str) -> AppResult<Vec<u8>> {
-    let raw = strip_0x(value.trim());
-    if raw.len() % 2 != 0 {
-        return Err(format!("hex length must be even: {value}").into());
-    }
-
-    let bytes = raw.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let hi = hex_nibble(bytes[i])?;
-        let lo = hex_nibble(bytes[i + 1])?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Ok(out)
-}
-
-fn parse_bytes32(value: &str) -> AppResult<[u8; 32]> {
-    let decoded = decode_hex(value)?;
-    if decoded.len() != 32 {
-        return Err(format!("expected 32 bytes, got {}", decoded.len()).into());
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&decoded);
-    Ok(out)
-}
-
-fn parse_u64(value: &str, name: &str) -> AppResult<u64> {
-    value
-        .parse::<u64>()
-        .map_err(|_| format!("Invalid {name}: {value}").into())
-}
-
-fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
-    let key_eq = format!("{flag}=");
-    let mut idx = 0usize;
-    while idx < args.len() {
-        if args[idx] == flag {
-            if idx + 1 < args.len() {
-                return Some(args[idx + 1].clone());
-            }
-            return None;
-        }
-        if let Some(raw) = args[idx].strip_prefix(&key_eq) {
-            return Some(raw.to_string());
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn required_flag_value(args: &[String], flag: &str) -> AppResult<String> {
-    parse_flag_value(args, flag)
-        .ok_or_else(|| format!("Missing required argument: {flag}").into())
-}
-
-fn parse_bytes32_list_csv(value: &str) -> AppResult<Vec<[u8; 32]>> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let normalized = trimmed
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim();
-    if normalized.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    normalized
-        .split(',')
-        .map(|part| parse_bytes32(part.trim()))
-        .collect()
-}
-
-fn hex_prefixed(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(2 + bytes.len() * 2);
-    out.push_str("0x");
-    for b in bytes {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
-}
-
-fn hex32(value: [u8; 32]) -> String {
-    hex_prefixed(&value)
 }
 
 fn bytes32_vec_literal(values: &[[u8; 32]]) -> String {
@@ -404,6 +212,177 @@ fn write_instance_files(out_dir: &Path, instances: &[InstanceArtifacts]) -> AppR
     }
 
     fs::write(out_dir.join("manifest.txt"), manifest)?;
+    Ok(())
+}
+
+fn ensure_value_fits_bits(value: u64, bit_width: usize, name: &str) -> AppResult<()> {
+    if bit_width >= 64 {
+        return Ok(());
+    }
+    if value >= (1u64 << bit_width) {
+        return Err(format!(
+            "{name}={} does not fit bit-width {} (max={})",
+            value,
+            bit_width,
+            (1u64 << bit_width) - 1
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn hash_output_label(label16: [u8; 16]) -> [u8; 32] {
+    let as_bytes32 = label16_to_bytes32(label16);
+    keccak256(&[&as_bytes32])
+}
+
+fn derive_anchor_lists(config: &SessionConfig) -> AppResult<(Vec<[u8; 32]>, Vec<[u8; 32]>)> {
+    let gates = build_millionaires_layout(config.bit_width);
+    let out_wire = millionaires_gt_output_wire(&gates, config.bit_width)
+        .map_err(|e| format!("failed to resolve millionaire output wire: {e}"))?;
+
+    let mut h0 = Vec::with_capacity(CUT_AND_CHOOSE_N);
+    let mut h1 = Vec::with_capacity(CUT_AND_CHOOSE_N);
+    for instance_id in 0..CUT_AND_CHOOSE_N {
+        let seed = derive_instance_seed(config.master_seed, config.circuit_id, instance_id as u64);
+        // Contract `result=true` on h0 match. Map h0 to semantic true (x > y = 1) for readability.
+        let l_true = derive_wire_label(config.circuit_id, instance_id as u64, out_wire, 1, seed);
+        let l_false = derive_wire_label(config.circuit_id, instance_id as u64, out_wire, 0, seed);
+        h0.push(hash_output_label(l_true));
+        h1.push(hash_output_label(l_false));
+    }
+    Ok((h0, h1))
+}
+
+fn cmd_derive_anchors(args: &[String]) -> AppResult<()> {
+    let config = parse_session_config(args)?;
+    let (h0, h1) = derive_anchor_lists(&config)?;
+
+    println!("bit_width={}", config.bit_width);
+    println!("circuit_id={}", hex32(config.circuit_id));
+    println!("h0_list={}", bytes32_vec_literal(&h0));
+    println!("h1_list={}", bytes32_vec_literal(&h1));
+    Ok(())
+}
+
+fn cmd_prepare_eval(args: &[String]) -> AppResult<()> {
+    let config = parse_session_config(args)?;
+    let m = parse_u64(&required_flag_value(args, "--m")?, "m")? as usize;
+    let x_value = parse_u64(&required_flag_value(args, "--x")?, "x")?;
+    let out_dir = PathBuf::from(required_flag_value(args, "--out-dir")?);
+
+    ensure_value_fits_bits(x_value, config.bit_width, "x")?;
+    if m >= CUT_AND_CHOOSE_N {
+        return Err(format!("m={} out of range [0, {})", m, CUT_AND_CHOOSE_N).into());
+    }
+
+    let instances = build_instances(&config);
+    let inst = &instances[m];
+    let gates = build_millionaires_layout(config.bit_width);
+    let layout = CircuitLayout {
+        circuit_id: config.circuit_id,
+        instance_id: m as u64,
+        gates: gates.clone(),
+    };
+
+    let out_wire = millionaires_gt_output_wire(&gates, config.bit_width)
+        .map_err(|e| format!("failed to resolve millionaire output wire: {e}"))?;
+    let (l0, l1) = derive_output_labels(inst.seed, &layout, out_wire)
+        .map_err(|e| format!("failed to derive output labels: {e}"))?;
+    let l_true_32 = label16_to_bytes32(l1);
+    let l_false_32 = label16_to_bytes32(l0);
+    let h0 = keccak256(&[&l_true_32]);
+    let h1 = keccak256(&[&l_false_32]);
+
+    let alice_labels16 = derive_alice_input_labels(
+        inst.seed,
+        config.circuit_id,
+        m as u64,
+        config.bit_width,
+        x_value,
+    );
+    let alice_labels32 = alice_labels16
+        .iter()
+        .map(|label| label16_to_bytes32(*label))
+        .collect::<Vec<_>>();
+
+    let y_offers = derive_bob_label_offers(inst.seed, config.circuit_id, m as u64, config.bit_width);
+    let not_hints = derive_not_gate_hints(inst.seed, &layout);
+
+    fs::create_dir_all(&out_dir)?;
+
+    let leaves_file = out_dir.join("gc-m-leaves.txt");
+    let mut leaves_raw = String::new();
+    for leaf in &inst.leaves {
+        leaves_raw.push_str(&hex_prefixed(leaf));
+        leaves_raw.push('\n');
+    }
+    fs::write(&leaves_file, leaves_raw)?;
+
+    let x16_file = out_dir.join("alice-x-labels16.txt");
+    let mut x16_raw = String::new();
+    for label in &alice_labels16 {
+        x16_raw.push_str(&hex16(*label));
+        x16_raw.push('\n');
+    }
+    fs::write(&x16_file, x16_raw)?;
+
+    let x32_file = out_dir.join("alice-x-labels32.txt");
+    let mut x32_raw = String::new();
+    for label in &alice_labels32 {
+        x32_raw.push_str(&hex32(*label));
+        x32_raw.push('\n');
+    }
+    fs::write(&x32_file, x32_raw)?;
+
+    let offers_file = out_dir.join("bob-y-offers.txt");
+    let mut offers_raw = String::new();
+    for (idx, (l0, l1)) in y_offers.iter().enumerate() {
+        let wire_id = config.bit_width + idx;
+        offers_raw.push_str(&format!("{wire_id},{},{}\n", hex16(*l0), hex16(*l1)));
+    }
+    fs::write(&offers_file, offers_raw)?;
+
+    let hints_file = out_dir.join("not-hints.txt");
+    let mut hints_raw = String::new();
+    for hint in &not_hints {
+        hints_raw.push_str(&format!(
+            "{},{},{},{},{}\n",
+            hint.gate_index,
+            hex16(hint.in_label0),
+            hex16(hint.out_if_in0),
+            hex16(hint.in_label1),
+            hex16(hint.out_if_in1)
+        ));
+    }
+    fs::write(&hints_file, hints_raw)?;
+
+    let meta_file = out_dir.join("eval-meta.txt");
+    let meta = format!(
+        "bit_width={}\ncircuit_id={}\ninstance_id={}\noutput_wire={}\nh0={}\nh1={}\nlout_true={}\nlout_false={}\n",
+        config.bit_width,
+        hex32(config.circuit_id),
+        m,
+        out_wire,
+        hex32(h0),
+        hex32(h1),
+        hex32(l_true_32),
+        hex32(l_false_32)
+    );
+    fs::write(&meta_file, meta)?;
+
+    println!("status=prepared_eval");
+    println!("eval_dir={}", out_dir.display());
+    println!("instance_id={m}");
+    println!("x_value={x_value}");
+    println!("output_wire={out_wire}");
+    println!("h0={}", hex32(h0));
+    println!("h1={}", hex32(h1));
+    println!("lout_true={}", hex32(l_true_32));
+    println!("lout_false={}", hex32(l_false_32));
+    println!("x_labels_count={}", alice_labels32.len());
+    println!("y_offer_count={}", y_offers.len());
+    println!("not_hint_count={}", not_hints.len());
     Ok(())
 }
 
@@ -682,8 +661,10 @@ fn cmd_reveal_labels(args: &[String]) -> AppResult<()> {
 fn print_help() {
     println!("off-chain-alice commands:");
     println!("  deposit");
+    println!("  derive-anchors [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]");
     println!("  submit-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]");
     println!("  export-artifacts --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]");
+    println!("  prepare-eval --m <index> --x <u64> --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]");
     println!("  reveal-openings --m <index> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]");
     println!("  reveal-labels (--labels <0x..,0x..> | --labels-file <path>)");
     println!();
@@ -697,8 +678,10 @@ fn main() -> AppResult<()> {
 
     match command {
         "deposit" => cmd_deposit(),
+        "derive-anchors" => cmd_derive_anchors(tail),
         "submit-commitments" => cmd_submit_commitments(tail),
         "export-artifacts" => cmd_export_artifacts(tail),
+        "prepare-eval" => cmd_prepare_eval(tail),
         "reveal-openings" => cmd_reveal_openings(tail),
         "reveal-labels" => cmd_reveal_labels(tail),
         "-h" | "--help" | "help" => {

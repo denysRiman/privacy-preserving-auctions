@@ -1,4 +1,10 @@
+use off_chain_common::cli::{
+    bytes32_vec_literal, hex32, hex_prefixed, parse_bytes16, parse_bytes32, parse_bytes32_list_csv,
+    parse_flag_value, parse_leaf71, parse_u16, parse_u64, parse_u8, print_tx_summary, required_env,
+    required_flag_value, rpc_url, run_cast,
+};
 use off_chain_common::consensus::{keccak256, layout_leaf_hash};
+use off_chain_common::evaluation::{evaluate_garbled_circuit, label16_to_bytes32, u64_to_bits_le, NotGateHint};
 use off_chain_common::garble::garble_circuit;
 use off_chain_common::ih::{gc_block_hash, ih_proof_from_hashes, incremental_root_from_hashes};
 use off_chain_common::merkle::{merkle_proof_from_hashes, merkle_root_from_hashes};
@@ -8,7 +14,6 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -35,224 +40,6 @@ struct PreparedDispute {
     layout_root: [u8; 32],
     ih_proof: Vec<[u8; 32]>,
     layout_proof: Vec<[u8; 32]>,
-}
-
-fn required_env(name: &str) -> AppResult<String> {
-    env::var(name).map_err(|_| format!("Missing required env var: {name}").into())
-}
-
-fn env_truthy(name: &str) -> bool {
-    match env::var(name) {
-        Ok(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        }
-        Err(_) => false,
-    }
-}
-
-fn cast_args_with_tx_overrides(args: &[String]) -> Vec<String> {
-    let mut out = args.to_vec();
-    if out.first().map(String::as_str) != Some("send") {
-        return out;
-    }
-
-    if env_truthy("TX_LEGACY") && !out.iter().any(|arg| arg == "--legacy") {
-        out.push("--legacy".to_string());
-    }
-
-    if !out.iter().any(|arg| arg == "--gas-price") {
-        if let Ok(gas_price_wei) = env::var("TX_GAS_PRICE_WEI") {
-            let trimmed = gas_price_wei.trim();
-            if !trimmed.is_empty() {
-                out.push("--gas-price".to_string());
-                out.push(trimmed.to_string());
-            }
-        }
-    }
-
-    out
-}
-
-fn run_cast(args: &[String]) -> AppResult<String> {
-    let final_args = cast_args_with_tx_overrides(args);
-    let output = Command::new("cast").args(&final_args).output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("cast {} failed: {}", final_args.join(" "), stderr.trim()).into());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn cast_output_field(output: &str, key: &str) -> Option<String> {
-    for line in output.lines() {
-        let mut parts = line.split_whitespace();
-        if let Some(found_key) = parts.next() {
-            if found_key == key {
-                if let Some(value) = parts.next() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn print_tx_summary(label: &str, output: &str) {
-    if let Some(tx_hash) = cast_output_field(output, "transactionHash") {
-        println!("{label}_tx_hash={tx_hash}");
-        return;
-    }
-    if let Some(status) = cast_output_field(output, "status") {
-        println!("{label}_status={status}");
-        return;
-    }
-
-    if let Some(first_line) = output.lines().next() {
-        println!("{label}_tx={first_line}");
-    } else {
-        println!("{label}_tx=submitted");
-    }
-}
-
-fn rpc_url() -> String {
-    env::var("RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8545".to_string())
-}
-
-fn hex_nibble(value: u8) -> AppResult<u8> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(10 + value - b'a'),
-        b'A'..=b'F' => Ok(10 + value - b'A'),
-        _ => Err(format!("invalid hex character: {}", value as char).into()),
-    }
-}
-
-fn strip_0x(value: &str) -> &str {
-    value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .unwrap_or(value)
-}
-
-fn decode_hex(value: &str) -> AppResult<Vec<u8>> {
-    let raw = strip_0x(value.trim());
-    if raw.len() % 2 != 0 {
-        return Err(format!("hex length must be even: {value}").into());
-    }
-
-    let bytes = raw.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let hi = hex_nibble(bytes[i])?;
-        let lo = hex_nibble(bytes[i + 1])?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Ok(out)
-}
-
-fn parse_bytes32(value: &str) -> AppResult<[u8; 32]> {
-    let decoded = decode_hex(value)?;
-    if decoded.len() != 32 {
-        return Err(format!("expected 32 bytes, got {}", decoded.len()).into());
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&decoded);
-    Ok(out)
-}
-
-fn parse_leaf71(value: &str) -> AppResult<[u8; 71]> {
-    let decoded = decode_hex(value)?;
-    if decoded.len() != 71 {
-        return Err(format!("expected 71-byte leaf, got {}", decoded.len()).into());
-    }
-    let mut out = [0u8; 71];
-    out.copy_from_slice(&decoded);
-    Ok(out)
-}
-
-fn hex_prefixed(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(2 + bytes.len() * 2);
-    out.push_str("0x");
-    for b in bytes {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
-}
-
-fn hex32(value: [u8; 32]) -> String {
-    hex_prefixed(&value)
-}
-
-fn bytes32_vec_literal(values: &[[u8; 32]]) -> String {
-    if values.is_empty() {
-        return "[]".to_string();
-    }
-    let parts = values.iter().map(|v| hex32(*v)).collect::<Vec<_>>();
-    format!("[{}]", parts.join(","))
-}
-
-fn parse_bytes32_list_csv(value: &str) -> AppResult<Vec<[u8; 32]>> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let normalized = trimmed
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim();
-    if normalized.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    normalized
-        .split(',')
-        .map(|part| parse_bytes32(part.trim()))
-        .collect()
-}
-
-fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
-    let key_eq = format!("{flag}=");
-    let mut idx = 0usize;
-    while idx < args.len() {
-        if args[idx] == flag {
-            if idx + 1 < args.len() {
-                return Some(args[idx + 1].clone());
-            }
-            return None;
-        }
-        if let Some(raw) = args[idx].strip_prefix(&key_eq) {
-            return Some(raw.to_string());
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn required_flag_value(args: &[String], flag: &str) -> AppResult<String> {
-    parse_flag_value(args, flag)
-        .ok_or_else(|| format!("Missing required argument: {flag}").into())
-}
-
-fn parse_u64(value: &str, name: &str) -> AppResult<u64> {
-    value
-        .parse::<u64>()
-        .map_err(|_| format!("Invalid {name}: {value}").into())
-}
-
-fn parse_u16(value: &str, name: &str) -> AppResult<u16> {
-    value
-        .parse::<u16>()
-        .map_err(|_| format!("Invalid {name}: {value}").into())
-}
-
-fn parse_u8(value: &str, name: &str) -> AppResult<u8> {
-    value
-        .parse::<u8>()
-        .map_err(|_| format!("Invalid {name}: {value}").into())
 }
 
 fn read_claimed_leaves_file(path: &Path) -> AppResult<Vec<[u8; 71]>> {
@@ -295,6 +82,170 @@ fn read_claimed_leaves_file(path: &Path) -> AppResult<Vec<[u8; 71]>> {
         return Err(format!("No claimed leaves found in {}", path.display()).into());
     }
     Ok(leaves)
+}
+
+#[derive(Debug, Clone)]
+struct EvalMeta {
+    bit_width: usize,
+    circuit_id: [u8; 32],
+    instance_id: u64,
+    output_wire: u16,
+    h0: [u8; 32],
+    h1: [u8; 32],
+    lout_true: [u8; 32],
+    lout_false: [u8; 32],
+}
+
+fn parse_key_value_file(path: &Path) -> AppResult<Vec<(String, String)>> {
+    let raw = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for (line_idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = trimmed.split_once('=') else {
+            return Err(format!("invalid key=value at {}:{}", path.display(), line_idx + 1).into());
+        };
+        out.push((k.trim().to_string(), v.trim().to_string()));
+    }
+    Ok(out)
+}
+
+fn key_value_get<'a>(entries: &'a [(String, String)], key: &str) -> AppResult<&'a str> {
+    entries
+        .iter()
+        .find_map(|(k, v)| if k == key { Some(v.as_str()) } else { None })
+        .ok_or_else(|| format!("missing key '{key}'").into())
+}
+
+fn read_eval_meta(path: &Path) -> AppResult<EvalMeta> {
+    let entries = parse_key_value_file(path)?;
+
+    let bit_width = parse_u64(key_value_get(&entries, "bit_width")?, "bit_width")? as usize;
+    let circuit_id = parse_bytes32(key_value_get(&entries, "circuit_id")?)?;
+    let instance_id = parse_u64(key_value_get(&entries, "instance_id")?, "instance_id")?;
+    let output_wire = parse_u16(key_value_get(&entries, "output_wire")?, "output_wire")?;
+    let h0 = parse_bytes32(key_value_get(&entries, "h0")?)?;
+    let h1 = parse_bytes32(key_value_get(&entries, "h1")?)?;
+    let lout_true = parse_bytes32(key_value_get(&entries, "lout_true")?)?;
+    let lout_false = parse_bytes32(key_value_get(&entries, "lout_false")?)?;
+
+    Ok(EvalMeta {
+        bit_width,
+        circuit_id,
+        instance_id,
+        output_wire,
+        h0,
+        h1,
+        lout_true,
+        lout_false,
+    })
+}
+
+fn read_label16_lines(path: &Path) -> AppResult<Vec<[u8; 16]>> {
+    let raw = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for (line_idx, line) in raw.lines().enumerate() {
+        let value = line
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_end_matches(',')
+            .trim()
+            .trim_matches('"')
+            .trim();
+        if value.is_empty() {
+            continue;
+        }
+        let parsed = parse_bytes16(value).map_err(|e| {
+            format!(
+                "invalid 16-byte label at {}:{}: {}",
+                path.display(),
+                line_idx + 1,
+                e
+            )
+        })?;
+        out.push(parsed);
+    }
+    if out.is_empty() {
+        return Err(format!("No 16-byte labels found in {}", path.display()).into());
+    }
+    Ok(out)
+}
+
+fn read_leaf71_lines(path: &Path) -> AppResult<Vec<[u8; 71]>> {
+    read_claimed_leaves_file(path)
+}
+
+fn read_y_offers(path: &Path, bit_width: usize) -> AppResult<Vec<([u8; 16], [u8; 16])>> {
+    let raw = fs::read_to_string(path)?;
+    let mut out = vec![None::<([u8; 16], [u8; 16])>; bit_width];
+
+    for (line_idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts = trimmed.split(',').map(|s| s.trim()).collect::<Vec<_>>();
+        if parts.len() != 3 {
+            return Err(format!(
+                "invalid offer row at {}:{} (expected wire,label0,label1)",
+                path.display(),
+                line_idx + 1
+            )
+            .into());
+        }
+        let wire_id = parse_u64(parts[0], "wire_id")? as usize;
+        if wire_id < bit_width || wire_id >= 2 * bit_width {
+            return Err(format!(
+                "offer wire_id {} out of expected y range [{}, {})",
+                wire_id,
+                bit_width,
+                2 * bit_width
+            )
+            .into());
+        }
+        let idx = wire_id - bit_width;
+        out[idx] = Some((parse_bytes16(parts[1])?, parse_bytes16(parts[2])?));
+    }
+
+    out.into_iter()
+        .enumerate()
+        .map(|(idx, maybe)| maybe.ok_or_else(|| format!("missing offer for y-bit {idx}").into()))
+        .collect()
+}
+
+fn read_not_hints(path: &Path) -> AppResult<Vec<NotGateHint>> {
+    let raw = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+
+    for (line_idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts = trimmed.split(',').map(|s| s.trim()).collect::<Vec<_>>();
+        if parts.len() != 5 {
+            return Err(format!(
+                "invalid NOT hint at {}:{} (expected gate,in0,out0,in1,out1)",
+                path.display(),
+                line_idx + 1
+            )
+            .into());
+        }
+
+        out.push(NotGateHint {
+            gate_index: parse_u64(parts[0], "gate_index")? as usize,
+            in_label0: parse_bytes16(parts[1])?,
+            out_if_in0: parse_bytes16(parts[2])?,
+            in_label1: parse_bytes16(parts[3])?,
+            out_if_in1: parse_bytes16(parts[4])?,
+        });
+    }
+
+    Ok(out)
 }
 
 fn prepare_dispute_packet(config: &PrepareDisputeConfig) -> AppResult<PreparedDispute> {
@@ -508,6 +459,89 @@ fn cmd_choose(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_evaluate_m(args: &[String]) -> AppResult<()> {
+    let eval_dir = Path::new(&required_flag_value(args, "--eval-dir")?).to_path_buf();
+    let y_value = parse_u64(&required_flag_value(args, "--y")?, "y")?;
+
+    let meta = read_eval_meta(&eval_dir.join("eval-meta.txt"))?;
+    if meta.bit_width < 64 && y_value >= (1u64 << meta.bit_width) {
+        return Err(format!(
+            "y={} does not fit bit-width {} (max={})",
+            y_value,
+            meta.bit_width,
+            (1u64 << meta.bit_width) - 1
+        )
+        .into());
+    }
+
+    let leaves = read_leaf71_lines(&eval_dir.join("gc-m-leaves.txt"))?;
+    let alice_labels = read_label16_lines(&eval_dir.join("alice-x-labels16.txt"))?;
+    let y_offers = read_y_offers(&eval_dir.join("bob-y-offers.txt"), meta.bit_width)?;
+    let not_hints = read_not_hints(&eval_dir.join("not-hints.txt"))?;
+
+    if alice_labels.len() != meta.bit_width {
+        return Err(format!(
+            "alice label count {} does not match bit-width {}",
+            alice_labels.len(),
+            meta.bit_width
+        )
+        .into());
+    }
+
+    let y_bits = u64_to_bits_le(y_value, meta.bit_width);
+    let bob_labels = y_bits
+        .iter()
+        .enumerate()
+        .map(|(idx, bit)| if *bit == 0 { y_offers[idx].0 } else { y_offers[idx].1 })
+        .collect::<Vec<_>>();
+
+    let gates = build_millionaires_layout(meta.bit_width);
+    let layout = CircuitLayout {
+        circuit_id: meta.circuit_id,
+        instance_id: meta.instance_id,
+        gates,
+    };
+
+    let evaluated_label16 = evaluate_garbled_circuit(
+        &layout,
+        &leaves,
+        &alice_labels,
+        &bob_labels,
+        &not_hints,
+        meta.output_wire,
+    )
+    .map_err(|e| format!("evaluate-m failed: {e}"))?;
+    let evaluated_label32 = label16_to_bytes32(evaluated_label16);
+
+    let decoded_bit = if evaluated_label32 == meta.lout_true {
+        Some(1u8)
+    } else if evaluated_label32 == meta.lout_false {
+        Some(0u8)
+    } else {
+        None
+    };
+
+    println!("status=evaluated");
+    println!("instance_id={}", meta.instance_id);
+    println!("bit_width={}", meta.bit_width);
+    println!("y_value={y_value}");
+    println!("selected_y_labels={}", bob_labels.len());
+    println!("not_hint_count={}", not_hints.len());
+    println!("output_wire={}", meta.output_wire);
+    println!("output_label={}", hex32(evaluated_label32));
+    println!("h0={}", hex32(meta.h0));
+    println!("h1={}", hex32(meta.h1));
+    println!("matches_h0={}", keccak256(&[&evaluated_label32]) == meta.h0);
+    println!("matches_h1={}", keccak256(&[&evaluated_label32]) == meta.h1);
+    if let Some(bit) = decoded_bit {
+        println!("decoded_bit={bit}");
+    } else {
+        println!("decoded_bit=unknown");
+    }
+
+    Ok(())
+}
+
 fn cmd_prepare_dispute(args: &[String]) -> AppResult<()> {
     let bit_width = parse_flag_value(args, "--bit-width")
         .as_deref()
@@ -647,6 +681,7 @@ fn print_help() {
     println!("off-chain-bob commands:");
     println!("  deposit");
     println!("  choose --m <index>");
+    println!("  evaluate-m --eval-dir <path> --y <u64>");
     println!("  prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]");
     println!("  dispute --instance-id <id> --seed <0x..32> --gate-index <k> --gate-type <0|1|2> --wire-a <u16> --wire-b <u16> --wire-c <u16> --leaf-bytes <0x..71> --ih-proof <0x..,0x..> --layout-proof <0x..,0x..>");
     println!();
@@ -661,6 +696,7 @@ fn main() -> AppResult<()> {
     match command {
         "deposit" => cmd_deposit(),
         "choose" => cmd_choose(tail),
+        "evaluate-m" => cmd_evaluate_m(tail),
         "prepare-dispute" => cmd_prepare_dispute(tail),
         "dispute" => cmd_dispute(tail),
         "-h" | "--help" | "help" => {

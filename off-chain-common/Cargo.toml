@@ -1,0 +1,11 @@
+[package]
+name = "off-chain-common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+sha3 = "0.10"
+
+[dev-dependencies]
+hex = "0.4"
