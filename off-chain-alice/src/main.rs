@@ -1,15 +1,18 @@
 use off_chain_common::cli::{
-    hex16, hex32, hex_prefixed, parse_bytes32, parse_bytes32_list_csv, parse_flag_value, parse_u64,
+    hex_prefixed, hex16, hex32, parse_bytes32, parse_bytes32_list_csv, parse_flag_value, parse_u64,
     print_tx_summary, required_env, required_env_any, required_flag_value, rpc_url, run_cast,
 };
 use off_chain_common::consensus::{derive_wire_label, keccak256};
 use off_chain_common::evaluation::{
-    derive_alice_input_labels, derive_bob_label_offers, derive_not_gate_hints, derive_output_labels,
-    label16_to_bytes32, millionaires_gt_output_wire,
+    derive_alice_input_labels, derive_bob_label_offers, derive_not_gate_hints,
+    derive_output_labels, label16_to_bytes32, millionaires_gt_output_wire,
 };
 use off_chain_common::garble::garble_circuit;
 use off_chain_common::ih::{gc_block_hash, incremental_root_from_hashes};
-use off_chain_common::scenario::{CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed};
+use off_chain_common::ot::{recompute_ot_payload_hashes, recompute_ot_root};
+use off_chain_common::scenario::{
+    CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed,
+};
 use off_chain_common::types::CircuitLayout;
 use std::env;
 use std::error::Error;
@@ -91,6 +94,13 @@ fn read_bytes32_lines_file(path: &Path) -> AppResult<Vec<[u8; 32]>> {
     Ok(out)
 }
 
+fn parse_optional_verifier_seed(args: &[String]) -> AppResult<Option<[u8; 32]>> {
+    parse_flag_value(args, "--verifier-seed")
+        .as_deref()
+        .map(parse_bytes32)
+        .transpose()
+}
+
 fn parse_session_config(args: &[String]) -> AppResult<SessionConfig> {
     let bit_width = parse_flag_value(args, "--bit-width")
         .as_deref()
@@ -120,11 +130,8 @@ fn build_instances(config: &SessionConfig) -> Vec<InstanceArtifacts> {
 
     (0..CUT_AND_CHOOSE_N)
         .map(|instance_id| {
-            let seed = derive_instance_seed(
-                config.master_seed,
-                config.circuit_id,
-                instance_id as u64,
-            );
+            let seed =
+                derive_instance_seed(config.master_seed, config.circuit_id, instance_id as u64);
             let layout = CircuitLayout {
                 circuit_id: config.circuit_id,
                 instance_id: instance_id as u64,
@@ -145,6 +152,50 @@ fn build_instances(config: &SessionConfig) -> Vec<InstanceArtifacts> {
                 root_gc,
                 leaves,
             }
+        })
+        .collect()
+}
+
+fn derive_ot_payload_hashes_for_instance(
+    config: &SessionConfig,
+    instance_id: usize,
+    garbler_seed: [u8; 32],
+    verifier_seed: [u8; 32],
+) -> AppResult<Vec<[u8; 32]>> {
+    recompute_ot_payload_hashes(
+        config.circuit_id,
+        config.bit_width,
+        garbler_seed,
+        verifier_seed,
+        instance_id as u64,
+    )
+    .map_err(|e| {
+        format!("failed to derive OT payload hashes for instance {instance_id}: {e}").into()
+    })
+}
+
+fn derive_ot_root_lists(
+    config: &SessionConfig,
+    instances: &[InstanceArtifacts],
+    verifier_seed: [u8; 32],
+) -> AppResult<Vec<[u8; 32]>> {
+    instances
+        .iter()
+        .map(|inst| {
+            recompute_ot_root(
+                config.circuit_id,
+                config.bit_width,
+                inst.seed,
+                verifier_seed,
+                inst.instance_id as u64,
+            )
+            .map_err(|e| {
+                format!(
+                    "failed to derive rootOT for instance {}: {e}",
+                    inst.instance_id
+                )
+                .into()
+            })
         })
         .collect()
 }
@@ -177,7 +228,12 @@ fn opened_indices_and_seeds(
     Ok((indices, seeds))
 }
 
-fn write_instance_files(out_dir: &Path, instances: &[InstanceArtifacts]) -> AppResult<()> {
+fn write_instance_files(
+    out_dir: &Path,
+    config: &SessionConfig,
+    instances: &[InstanceArtifacts],
+    verifier_seed: Option<[u8; 32]>,
+) -> AppResult<()> {
     fs::create_dir_all(out_dir)?;
 
     let mut manifest = String::new();
@@ -189,6 +245,8 @@ fn write_instance_files(out_dir: &Path, instances: &[InstanceArtifacts]) -> AppR
         let com_file = out_dir.join(format!("instance-{}-com-seed.txt", inst.instance_id));
         let root_file = out_dir.join(format!("instance-{}-root-gc.txt", inst.instance_id));
         let leaves_file = out_dir.join(format!("instance-{}-leaves.txt", inst.instance_id));
+        let mut root_ot_manifest = None::<String>;
+        let mut payloads_manifest = None::<String>;
 
         fs::write(&seed_file, format!("{}\n", hex32(inst.seed)))?;
         fs::write(&com_file, format!("{}\n", hex32(inst.com_seed)))?;
@@ -201,14 +259,56 @@ fn write_instance_files(out_dir: &Path, instances: &[InstanceArtifacts]) -> AppR
         }
         fs::write(&leaves_file, leaves_raw)?;
 
+        if let Some(verifier_seed) = verifier_seed {
+            let root_ot = recompute_ot_root(
+                config.circuit_id,
+                config.bit_width,
+                inst.seed,
+                verifier_seed,
+                inst.instance_id as u64,
+            )
+            .map_err(|e| {
+                format!(
+                    "failed to derive rootOT for instance {} while exporting artifacts: {e}",
+                    inst.instance_id
+                )
+            })?;
+            let payload_hashes = derive_ot_payload_hashes_for_instance(
+                config,
+                inst.instance_id,
+                inst.seed,
+                verifier_seed,
+            )?;
+
+            let root_ot_file = out_dir.join(format!("instance-{}-root-ot.txt", inst.instance_id));
+            let payloads_file =
+                out_dir.join(format!("instance-{}-ot-payloads.txt", inst.instance_id));
+            fs::write(&root_ot_file, format!("{}\n", hex32(root_ot)))?;
+
+            let mut payloads_raw = String::new();
+            for payload_hash in payload_hashes {
+                payloads_raw.push_str(&hex32(payload_hash));
+                payloads_raw.push('\n');
+            }
+            fs::write(&payloads_file, payloads_raw)?;
+            root_ot_manifest = Some(root_ot_file.display().to_string());
+            payloads_manifest = Some(payloads_file.display().to_string());
+        }
+
         manifest.push_str(&format!(
-            "instance {}:\n  seed={}\n  comSeed={}\n  rootGC={}\n  leaves={}\n\n",
+            "instance {}:\n  seed={}\n  comSeed={}\n  rootGC={}\n",
             inst.instance_id,
             seed_file.display(),
             com_file.display(),
-            root_file.display(),
-            leaves_file.display()
+            root_file.display()
         ));
+        if let Some(root_ot_file) = root_ot_manifest {
+            manifest.push_str(&format!("  rootOT={}\n", root_ot_file));
+        }
+        if let Some(payloads_file) = payloads_manifest {
+            manifest.push_str(&format!("  otPayloads={}\n", payloads_file));
+        }
+        manifest.push_str(&format!("  leaves={}\n\n", leaves_file.display()));
     }
 
     fs::write(out_dir.join("manifest.txt"), manifest)?;
@@ -270,6 +370,7 @@ fn cmd_prepare_eval(args: &[String]) -> AppResult<()> {
     let m = parse_u64(&required_flag_value(args, "--m")?, "m")? as usize;
     let x_value = parse_u64(&required_flag_value(args, "--x")?, "x")?;
     let out_dir = PathBuf::from(required_flag_value(args, "--out-dir")?);
+    let verifier_seed = parse_optional_verifier_seed(args)?;
 
     ensure_value_fits_bits(x_value, config.bit_width, "x")?;
     if m >= CUT_AND_CHOOSE_N {
@@ -306,7 +407,8 @@ fn cmd_prepare_eval(args: &[String]) -> AppResult<()> {
         .map(|label| label16_to_bytes32(*label))
         .collect::<Vec<_>>();
 
-    let y_offers = derive_bob_label_offers(inst.seed, config.circuit_id, m as u64, config.bit_width);
+    let y_offers =
+        derive_bob_label_offers(inst.seed, config.circuit_id, m as u64, config.bit_width);
     let not_hints = derive_not_gate_hints(inst.seed, &layout);
 
     fs::create_dir_all(&out_dir)?;
@@ -370,6 +472,29 @@ fn cmd_prepare_eval(args: &[String]) -> AppResult<()> {
         hex32(l_false_32)
     );
     fs::write(&meta_file, meta)?;
+
+    if let Some(verifier_seed) = verifier_seed {
+        let ot_root = recompute_ot_root(
+            config.circuit_id,
+            config.bit_width,
+            inst.seed,
+            verifier_seed,
+            m as u64,
+        )
+        .map_err(|e| format!("failed to derive OT root for eval instance {m}: {e}"))?;
+        let payload_hashes =
+            derive_ot_payload_hashes_for_instance(&config, m, inst.seed, verifier_seed)?;
+        let root_file = out_dir.join("ot-root.txt");
+        let payloads_file = out_dir.join("ot-payloads.txt");
+        fs::write(&root_file, format!("{}\n", hex32(ot_root)))?;
+
+        let mut payloads_raw = String::new();
+        for payload_hash in payload_hashes {
+            payloads_raw.push_str(&hex32(payload_hash));
+            payloads_raw.push('\n');
+        }
+        fs::write(&payloads_file, payloads_raw)?;
+    }
 
     println!("status=prepared_eval");
     println!("eval_dir={}", out_dir.display());
@@ -472,6 +597,14 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     let config = parse_session_config(args)?;
     let instances = build_instances(&config);
     let zero = [0u8; 32];
+    let verifier_seed = parse_optional_verifier_seed(args)?;
+    let derive_default_anchors =
+        parse_flag_value(args, "--h0").is_none() || parse_flag_value(args, "--h1").is_none();
+    let derived_anchors = if derive_default_anchors {
+        Some(derive_anchor_lists(&config)?)
+    } else {
+        None
+    };
 
     let root_gcs = if let Some(raw) = parse_flag_value(args, "--root-gcs") {
         let parsed = parse_bytes32_list_csv(&raw)?;
@@ -485,7 +618,10 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
         }
         parsed
     } else {
-        instances.iter().map(|inst| inst.root_gc).collect::<Vec<_>>()
+        instances
+            .iter()
+            .map(|inst| inst.root_gc)
+            .collect::<Vec<_>>()
     };
 
     let blob_hashes = if let Some(raw) = parse_flag_value(args, "--blob-hashes") {
@@ -503,6 +639,25 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
         vec![zero; CUT_AND_CHOOSE_N]
     };
 
+    let root_ots = if let Some(raw) = parse_flag_value(args, "--root-ots") {
+        let parsed = parse_bytes32_list_csv(&raw)?;
+        if parsed.len() != CUT_AND_CHOOSE_N {
+            return Err(format!(
+                "--root-ots must contain {} values, got {}",
+                CUT_AND_CHOOSE_N,
+                parsed.len()
+            )
+            .into());
+        }
+        parsed
+    } else if let Some(verifier_seed) = verifier_seed {
+        derive_ot_root_lists(&config, &instances, verifier_seed)?
+    } else {
+        return Err(
+            "Provide --verifier-seed or --root-ots so Alice can commit rootOT values".into(),
+        );
+    };
+
     let h0 = if let Some(raw) = parse_flag_value(args, "--h0") {
         let parsed = parse_bytes32_list_csv(&raw)?;
         if parsed.len() != CUT_AND_CHOOSE_N {
@@ -515,7 +670,11 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
         }
         parsed
     } else {
-        vec![zero; CUT_AND_CHOOSE_N]
+        derived_anchors
+            .as_ref()
+            .expect("derived anchors available when h0 override is absent")
+            .0
+            .clone()
     };
 
     let h1 = if let Some(raw) = parse_flag_value(args, "--h1") {
@@ -530,11 +689,15 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
         }
         parsed
     } else {
-        vec![zero; CUT_AND_CHOOSE_N]
+        derived_anchors
+            .as_ref()
+            .expect("derived anchors available when h1 override is absent")
+            .1
+            .clone()
     };
 
     if let Some(path) = parse_flag_value(args, "--export-dir") {
-        write_instance_files(Path::new(&path), &instances)?;
+        write_instance_files(Path::new(&path), &config, &instances, verifier_seed)?;
         println!("artifacts_exported={path}");
     }
 
@@ -547,7 +710,7 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
                 hex32(root_gcs[inst.instance_id]),
                 hex32(blob_hashes[inst.instance_id]),
                 hex32(zero),
-                hex32(zero),
+                hex32(root_ots[inst.instance_id]),
                 hex32(h0[inst.instance_id]),
                 hex32(h1[inst.instance_id])
             )
@@ -560,10 +723,11 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     println!("bit_width={}", config.bit_width);
     for inst in &instances {
         println!(
-            "instance={} comSeed={} rootGC={} blobHashGC={}",
+            "instance={} comSeed={} rootGC={} rootOT={} blobHashGC={}",
             inst.instance_id,
             hex32(inst.com_seed),
             hex32(root_gcs[inst.instance_id]),
+            hex32(root_ots[inst.instance_id]),
             hex32(blob_hashes[inst.instance_id])
         );
     }
@@ -588,12 +752,14 @@ fn cmd_export_artifacts(args: &[String]) -> AppResult<()> {
     let out_dir = required_flag_value(args, "--out-dir")?;
     let out_dir_path = PathBuf::from(out_dir);
     let instances = build_instances(&config);
-    write_instance_files(&out_dir_path, &instances)?;
+    let verifier_seed = parse_optional_verifier_seed(args)?;
+    write_instance_files(&out_dir_path, &config, &instances, verifier_seed)?;
 
     println!("status=exported");
     println!("circuit_id={}", hex32(config.circuit_id));
     println!("master_seed={}", hex32(config.master_seed));
     println!("bit_width={}", config.bit_width);
+    println!("ot_artifacts_exported={}", verifier_seed.is_some());
     println!("out_dir={}", out_dir_path.display());
     Ok(())
 }
@@ -661,11 +827,21 @@ fn cmd_reveal_labels(args: &[String]) -> AppResult<()> {
 fn print_help() {
     println!("off-chain-alice commands:");
     println!("  deposit");
-    println!("  derive-anchors [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]");
-    println!("  submit-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]");
-    println!("  export-artifacts --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]");
-    println!("  prepare-eval --m <index> --x <u64> --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]");
-    println!("  reveal-openings --m <index> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]");
+    println!(
+        "  derive-anchors [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]"
+    );
+    println!(
+        "  submit-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
+    );
+    println!(
+        "  export-artifacts --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32>]"
+    );
+    println!(
+        "  prepare-eval --m <index> --x <u64> --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32>]"
+    );
+    println!(
+        "  reveal-openings --m <index> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]"
+    );
     println!("  reveal-labels (--labels <0x..,0x..> | --labels-file <path>)");
     println!();
     println!("Default command with no args: deposit");
@@ -755,5 +931,44 @@ mod tests {
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn derives_root_ot_list_from_verifier_seed() {
+        let config = test_config();
+        let instances = build_instances(&config);
+        let verifier_seed = [0x42u8; 32];
+
+        let roots = derive_ot_root_lists(&config, &instances, verifier_seed).expect("root ots");
+        assert_eq!(roots.len(), CUT_AND_CHOOSE_N);
+        assert!(roots.iter().all(|root| *root != [0u8; 32]));
+    }
+
+    #[test]
+    fn exports_ot_artifacts_when_verifier_seed_is_present() {
+        let config = test_config();
+        let instances = build_instances(&config);
+        let verifier_seed = [0x24u8; 32];
+        let path = {
+            let millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_millis();
+            env::temp_dir().join(format!("alice-artifacts-{millis}"))
+        };
+
+        write_instance_files(&path, &config, &instances, Some(verifier_seed)).expect("export");
+        let root_ot_path = path.join("instance-0-root-ot.txt");
+        let payloads_path = path.join("instance-0-ot-payloads.txt");
+        assert!(root_ot_path.exists());
+        assert!(payloads_path.exists());
+
+        let root_ot = fs::read_to_string(&root_ot_path).expect("read rootOT");
+        assert!(root_ot.trim_start().starts_with("0x"));
+
+        let payloads = fs::read_to_string(&payloads_path).expect("read payloads");
+        assert_eq!(payloads.lines().count(), config.bit_width * 3);
+
+        let _ = fs::remove_dir_all(path);
     }
 }
