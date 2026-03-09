@@ -21,12 +21,13 @@ contract MillionairesProblem {
 
     struct Deadlines {
         uint256 deposit;          // Phase 1: Alice & Bob must lock funds
-        uint256 commit;          // Phase 2: Alice must submit GC
-        uint256 choose;         // Phase 3: Bob must pick index m
-        uint256 open;          // Phase 4: Alice must reveal n-1 seeds
-        uint256 dispute;      // Phase 5: Off-chain verification + Dispute window
-        uint256 labels;       // Phase 6: Alice must reveal garbler input labels
-        uint256 settle;       // Phase 7: Bob must submit final output label (Final result)
+        uint256 verifierSeed;    // Phase 2: Bob must commit verifier randomness for OT replay
+        uint256 commit;          // Phase 3: Alice must submit GC + transcript commitments
+        uint256 choose;          // Phase 4: Bob must pick index m
+        uint256 open;            // Phase 5: Alice must reveal n-1 seeds
+        uint256 dispute;         // Phase 6: Off-chain verification + Dispute window
+        uint256 labels;          // Phase 7: Alice must reveal garbler input labels
+        uint256 settle;          // Phase 8: Bob must submit final output label (Final result)
     }
 
     struct InstanceCommitment {
@@ -34,12 +35,12 @@ contract MillionairesProblem {
         bytes32 rootGC;    // Terminal incremental-hash state over garbling artifacts for disputes
         bytes32 blobHashGC; // EIP-4844 versioned hash for evaluation payload blob (instance i)
         bytes32 rootXG;    // Merkle root over G's input labels
-        bytes32 rootOT;    // Merkle root over OT transcript
+        bytes32 rootOT;    // Merkle root over public OT transcript leaves
         bytes32 h0;        // Result anchor for output 0: H(Lout0)
         bytes32 h1;        // Result anchor for output 1: H(Lout1)
     }
 
-    enum Stage { Deposits, Commitments, Choose, Open, Dispute, Labels, Settle, Closed }
+    enum Stage { Deposits, VerifierSeed, Commitments, Choose, Open, Dispute, Labels, Settle, Closed }
     Stage public currentStage;
 
     uint256 public constant DEPOSIT_GARBLER = 1 ether;
@@ -50,12 +51,16 @@ contract MillionairesProblem {
 
     // Mapping to store revealed seeds for verification (index => seed)
     mapping(uint256 => bytes32) public revealedSeeds;
+    bytes32 public verifierSeedCommitment;
+    uint16 public bitWidth;
 
-    constructor(address _bob, bytes32 _circuitId, bytes32 _circuitLayoutRoot) {
+    constructor(address _bob, bytes32 _circuitId, bytes32 _circuitLayoutRoot, uint16 _bitWidth) {
+        require(_bitWidth > 0, "bitWidth must be > 0");
         alice = msg.sender;
         bob = _bob;
         circuitId = _circuitId;
         circuitLayoutRoot = _circuitLayoutRoot;
+        bitWidth = _bitWidth;
 
         currentStage = Stage.Deposits;
         deadlines.deposit = block.timestamp + 1 hours;
@@ -71,8 +76,8 @@ contract MillionairesProblem {
 
         vault[msg.sender] += msg.value;
         if (vault[alice] == DEPOSIT_GARBLER && vault[bob] == DEPOSIT_EVALUATOR) {
-            currentStage = Stage.Commitments;
-            deadlines.commit = block.timestamp + 1 hours;
+            currentStage = Stage.VerifierSeed;
+            deadlines.verifierSeed = block.timestamp + 1 hours;
         }
     }
 
@@ -93,12 +98,13 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 2: Garbler submits commitments for all N instances.
+     * @dev Phase 3: Garbler submits commitments for all N instances.
      */
     function submitCommitments(InstanceCommitment[N] calldata _commitments) external {
         require(currentStage == Stage.Commitments, "Wrong stage");
         require(msg.sender == alice, "Only Garbler");
         require(block.timestamp <= deadlines.commit, "Commitment deadline missed");
+        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
 
         for (uint256 i = 0; i < N; i++) {
             instanceCommitments[i] = _commitments[i];
@@ -109,7 +115,34 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 2 Timeout: If Alice fails to submit GC by the deadline.
+     * @dev Phase 2: Bob commits to the randomness used for dummy-check OT executions.
+     * This explicit stage prevents Bob from choosing verifier randomness after seeing Alice's commitments.
+     */
+    function commitVerifierSeed(bytes32 _commitment) external {
+        require(currentStage == Stage.VerifierSeed, "Wrong stage");
+        require(msg.sender == bob, "Only Evaluator");
+        require(block.timestamp <= deadlines.verifierSeed, "Verifier seed deadline missed");
+        require(verifierSeedCommitment == bytes32(0), "Verifier seed already committed");
+        require(_commitment != bytes32(0), "Empty verifier seed commitment");
+
+        verifierSeedCommitment = _commitment;
+        currentStage = Stage.Commitments;
+        deadlines.commit = block.timestamp + 1 hours;
+    }
+
+    /**
+     * @dev Phase 2 Timeout: If Bob fails to commit verifier randomness, Alice can claim the penalty.
+     */
+    function abortVerifierSeedStage() external {
+        require(currentStage == Stage.VerifierSeed, "Not in verifier-seed stage");
+        require(block.timestamp > deadlines.verifierSeed, "Bob is not late yet");
+        require(msg.sender == alice, "Only Alice can trigger this abort");
+
+        _slash(alice, bob);
+    }
+
+    /**
+     * @dev Phase 3 Timeout: If Alice fails to submit GC by the deadline.
      * Bob can call this to reclaim his funds and Alice's collateral.
      */
     function abortPhase2() external {
@@ -133,7 +166,7 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 3: Bob chooses which instance to evaluate.
+     * @dev Phase 4: Bob chooses which instance to evaluate.
      */
     function choose(uint256 _m) external {
         require(currentStage == Stage.Choose, "Wrong stage");
@@ -151,7 +184,7 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 3 Timeout: If Bob fails to choose index m by the deadline.
+     * @dev Phase 4 Timeout: If Bob fails to choose index m by the deadline.
      * Alice can call this to reclaim her funds and Bob's collateral.
      */
     function abortPhase3() external {
@@ -172,7 +205,7 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 4: Alice reveals seeds for n-1 instances.
+     * @dev Phase 5: Alice reveals seeds for n-1 instances.
      * @param _indices Array of indices being opened (must match sOpen).
      * @param _seeds Array of seeds corresponding to those indices.
      */
@@ -203,7 +236,7 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 4 Timeout: If Alice fails to reveal seeds by the deadline.
+     * @dev Phase 5 Timeout: If Alice fails to reveal seeds by the deadline.
      * Bob can claim the penalty.
      */
     function abortPhase4() external {
@@ -225,7 +258,7 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 5: Alice reveals her input labels for the evaluation circuit m.
+     * @dev Phase 7: Alice reveals her input labels for the evaluation circuit m.
      * These labels correspond to her private input x.
      * @param _labels The set of wire labels for Alice's input.
      */
@@ -252,7 +285,7 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 5 Timeout: If Alice fails to provide her input labels.
+     * @dev Phase 7 Timeout: If Alice fails to provide her input labels.
      * Bob claims the penalty because he cannot evaluate the circuit.
      */
     function abortPhase5() external {
@@ -271,7 +304,7 @@ contract MillionairesProblem {
     }
 
 /**
-     * @dev Phase 5 (Dispute): Bob challenges one gate from one opened check-circuit.
+     * @dev Phase 6 (Dispute): Bob challenges one gate from one opened check-circuit.
      * Delegates to `challengeGateLeaf` after explicit seed checks.
      * @param _idx Index of the opened circuit to challenge (must be in sOpen).
      * @param _seed Revealed seed for `_idx`, must match commitment.
@@ -296,7 +329,7 @@ contract MillionairesProblem {
 
 
     /**
-     * @dev Phase 6: Bob (Evaluator) submits the final output label.
+     * @dev Phase 8: Bob (Evaluator) submits the final output label.
      * The contract verifies it against Alice's anchors (h0, h1).
      * @param _outputLabel The label resulting from Ev(F, X).
      */
@@ -329,7 +362,7 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 6 Timeout: If Bob fails to settle the result.
+     * @dev Phase 8 Timeout: If Bob fails to settle the result.
      * Alice can claim the funds after the deadline.
      */
     function abortPhase6() external {
@@ -530,6 +563,7 @@ contract MillionairesProblem {
     uint256 private constant LEAF_BYTES_LEN = 71;
 
     event GateLeafChallenged(uint256 indexed instanceId, uint256 indexed gateIndex, bool mismatch);
+    event OTLeafChallenged(uint256 indexed instanceId, uint16 indexed inputBit, uint8 indexed round, bool mismatch);
     event CheaterSlashed(address indexed cheater, address indexed beneficiary);
 
     function _isOpenInstance(uint256 instanceId) internal view returns (bool) {
@@ -609,6 +643,33 @@ contract MillionairesProblem {
         }
     }
 
+    /**
+     * @dev Phase 6 (Dispute): challenge one OT transcript leaf under `rootOT`.
+     * For opened check-circuits (`instanceId != m`) Bob uses dummy OT choices, so replay is deterministic.
+     * If the committed leaf differs from the replayed leaf, the transcript author is slashed.
+     * If the leaf matches, the challenger lied and is slashed.
+     */
+    function disputeObliviousTransfer(
+        uint256 instanceId,
+        bytes32 verifierSeed,
+        uint16 inputBit,
+        uint8 round,
+        bytes32 payloadHash,
+        bytes32[] calldata otProof
+    ) external {
+        require(currentStage == Stage.Dispute, "Wrong stage");
+        require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
+        require(msg.sender == alice || msg.sender == bob, "Only participants can dispute");
+        require(instanceId != m, "Cannot dispute evaluation circuit m");
+        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
+        require(
+            keccak256(abi.encodePacked(verifierSeed)) == verifierSeedCommitment,
+            "Invalid verifier seed"
+        );
+
+        challengeOtLeaf(instanceId, verifierSeed, inputBit, round, payloadHash, otProof);
+    }
+
     // leaf = H(gateIndex || gateType || wireA || wireB || wireC)
     function _layoutLeafHash(uint256 gateIndex, GateDesc calldata g) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(gateIndex, uint8(g.gateType), g.wireA, g.wireB, g.wireC));
@@ -632,6 +693,167 @@ contract MillionairesProblem {
             state = keccak256(abi.encodePacked(state, ihProof[i]));
         }
         return state;
+    }
+
+    uint8 private constant OT_ROUNDS_PER_INPUT = 3;
+    uint8 private constant OT_DUMMY_CHOICE = 0;
+
+    function _commutativeNodeHash(bytes32 a, bytes32 b) internal pure returns (bytes32) {
+        return a <= b
+            ? keccak256(abi.encodePacked(a, b))
+            : keccak256(abi.encodePacked(b, a));
+    }
+
+    function _otMessageAuthor(uint8 round) internal pure returns (uint8) {
+        require(round < OT_ROUNDS_PER_INPUT, "Bad OT round");
+        return round == 1 ? 1 : 0;
+    }
+
+    function _otTranscriptLeafHash(uint16 inputBit, uint8 round, uint8 author, bytes32 payloadHash)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encodePacked(inputBit, round, author, payloadHash));
+    }
+
+    function _evaluatorWireId(uint16 inputBit) internal view returns (uint16) {
+        require(inputBit < bitWidth, "OT input bit out of range");
+        return bitWidth + inputBit;
+    }
+
+    function _computeOtPayloadHash(bytes32 garblerSeed, bytes32 verifierSeed, uint256 instanceId, uint16 inputBit, uint8 round)
+        internal
+        view
+        returns (bytes32)
+    {
+        uint16 wireId = _evaluatorWireId(inputBit);
+        bytes16 label0 = deriveWireLabel(garblerSeed, instanceId, wireId, 0);
+        bytes16 label1 = deriveWireLabel(garblerSeed, instanceId, wireId, 1);
+
+        bytes32 senderRandomness = keccak256(
+            abi.encodePacked("OT-S", circuitId, instanceId, wireId, garblerSeed)
+        );
+        bytes32 verifierRandomness = keccak256(
+            abi.encodePacked("OT-R", circuitId, instanceId, wireId, verifierSeed)
+        );
+
+        if (round == 0) {
+            return keccak256(
+                abi.encodePacked(
+                    "OT-M0",
+                    circuitId,
+                    instanceId,
+                    inputBit,
+                    wireId,
+                    label0,
+                    label1,
+                    senderRandomness
+                )
+            );
+        }
+
+        if (round == 1) {
+            return keccak256(
+                abi.encodePacked(
+                    "OT-M1",
+                    circuitId,
+                    instanceId,
+                    inputBit,
+                    wireId,
+                    OT_DUMMY_CHOICE,
+                    verifierRandomness
+                )
+            );
+        }
+
+        return keccak256(
+            abi.encodePacked(
+                "OT-M2",
+                circuitId,
+                instanceId,
+                inputBit,
+                wireId,
+                OT_DUMMY_CHOICE,
+                label0,
+                senderRandomness,
+                verifierRandomness
+            )
+        );
+    }
+
+    function recomputeOtRoot(bytes32 garblerSeed, bytes32 verifierSeed, uint256 instanceId)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32[] memory level = new bytes32[](uint256(bitWidth) * OT_ROUNDS_PER_INPUT);
+        uint256 cursor = 0;
+        for (uint16 i = 0; i < bitWidth; i++) {
+            for (uint8 round = 0; round < OT_ROUNDS_PER_INPUT; round++) {
+                uint8 author = _otMessageAuthor(round);
+                bytes32 payloadHash = _computeOtPayloadHash(garblerSeed, verifierSeed, instanceId, i, round);
+                level[cursor] = _otTranscriptLeafHash(i, round, author, payloadHash);
+                cursor++;
+            }
+        }
+
+        uint256 width = level.length;
+        while (width > 1) {
+            uint256 nextWidth = (width + 1) / 2;
+            for (uint256 i = 0; i < nextWidth; i++) {
+                uint256 leftIndex = 2 * i;
+                uint256 rightIndex = leftIndex + 1;
+                bytes32 left = level[leftIndex];
+                bytes32 right = rightIndex < width ? level[rightIndex] : left;
+                level[i] = _commutativeNodeHash(left, right);
+            }
+            width = nextWidth;
+        }
+
+        return level[0];
+    }
+
+    function challengeOtLeaf(
+        uint256 instanceId,
+        bytes32 verifierSeed,
+        uint16 inputBit,
+        uint8 round,
+        bytes32 payloadHash,
+        bytes32[] calldata otProof
+    ) public {
+        require(currentStage == Stage.Dispute, "Wrong stage");
+        require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
+        require(msg.sender == alice || msg.sender == bob, "Only participants");
+        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
+        require(
+            keccak256(abi.encodePacked(verifierSeed)) == verifierSeedCommitment,
+            "Invalid verifier seed"
+        );
+
+        bytes32 garblerSeed = _requireRevealedSeedForOpenedInstance(instanceId);
+        uint8 author = _otMessageAuthor(round);
+        bytes32 leafHash = _otTranscriptLeafHash(inputBit, round, author, payloadHash);
+        require(
+            MerkleProof.verify(otProof, instanceCommitments[instanceId].rootOT, leafHash),
+            "Bad OT proof"
+        );
+
+        bytes32 expectedPayloadHash = _computeOtPayloadHash(garblerSeed, verifierSeed, instanceId, inputBit, round);
+        bool matchLeaf = payloadHash == expectedPayloadHash;
+
+        if (!matchLeaf) {
+            address honestParty = author == 0 ? bob : alice;
+            address dishonestParty = author == 0 ? alice : bob;
+            emit OTLeafChallenged(instanceId, inputBit, round, true);
+            emit CheaterSlashed(dishonestParty, honestParty);
+            _slash(honestParty, dishonestParty);
+        } else {
+            address counterparty = msg.sender == alice ? bob : alice;
+            emit OTLeafChallenged(instanceId, inputBit, round, false);
+            emit CheaterSlashed(msg.sender, counterparty);
+            _slash(counterparty, msg.sender);
+        }
     }
     // ------ gc part end ------
 }

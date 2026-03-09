@@ -10,9 +10,10 @@ contract MillionairesScript is Script {
         address bob = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
         bytes32 circuitId = keccak256("millionaires-yao-v1");
         bytes32 layoutRoot = bytes32(0);
+        uint16 bitWidth = 8;
 
         vm.startBroadcast(pk);
-        new MillionairesProblem(bob, circuitId, layoutRoot);
+        new MillionairesProblem(bob, circuitId, layoutRoot, bitWidth);
         vm.stopBroadcast();
     }
 }
