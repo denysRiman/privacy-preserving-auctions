@@ -1,18 +1,25 @@
 use off_chain_common::cli::{
-    bytes32_vec_literal, hex32, hex_prefixed, parse_bytes16, parse_bytes32, parse_bytes32_list_csv,
-    parse_flag_value, parse_leaf71, parse_u16, parse_u64, parse_u8, print_tx_summary, required_env,
+    bytes32_vec_literal, hex_prefixed, hex32, parse_bytes16, parse_bytes32, parse_bytes32_list_csv,
+    parse_flag_value, parse_leaf71, parse_u8, parse_u16, parse_u64, print_tx_summary, required_env,
     required_flag_value, rpc_url, run_cast,
 };
 use off_chain_common::consensus::{keccak256, layout_leaf_hash};
-use off_chain_common::evaluation::{evaluate_garbled_circuit, label16_to_bytes32, u64_to_bits_le, NotGateHint};
+use off_chain_common::evaluation::{
+    NotGateHint, evaluate_garbled_circuit, label16_to_bytes32, u64_to_bits_le,
+};
 use off_chain_common::garble::garble_circuit;
 use off_chain_common::ih::{gc_block_hash, ih_proof_from_hashes, incremental_root_from_hashes};
 use off_chain_common::merkle::{merkle_proof_from_hashes, merkle_root_from_hashes};
+use off_chain_common::ot::{
+    ot_leaf_coordinates, ot_leaf_index, ot_message_author, ot_proof_from_payload_hashes,
+    ot_root_from_payload_hashes, recompute_ot_payload_hashes, verifier_seed_commitment,
+};
 use off_chain_common::scenario::build_millionaires_layout;
 use off_chain_common::types::{CircuitLayout, GateDesc};
 use std::env;
 use std::error::Error;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -40,6 +47,32 @@ struct PreparedDispute {
     layout_root: [u8; 32],
     ih_proof: Vec<[u8; 32]>,
     layout_proof: Vec<[u8; 32]>,
+}
+
+#[derive(Debug, Clone)]
+struct PrepareOtDisputeConfig {
+    bit_width: usize,
+    circuit_id: [u8; 32],
+    instance_id: u64,
+    garbler_seed: [u8; 32],
+    verifier_seed: [u8; 32],
+    claimed_payload_hashes: Vec<[u8; 32]>,
+    input_bit: Option<u16>,
+    round: Option<u8>,
+    allow_false_challenge: bool,
+    expected_root_ot: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedOtDispute {
+    input_bit: u16,
+    round: u8,
+    author: u8,
+    claimed_payload_hash: [u8; 32],
+    expected_payload_hash: [u8; 32],
+    mismatch_locations: Vec<(u16, u8)>,
+    root_ot: [u8; 32],
+    ot_proof: Vec<[u8; 32]>,
 }
 
 fn read_claimed_leaves_file(path: &Path) -> AppResult<Vec<[u8; 71]>> {
@@ -82,6 +115,56 @@ fn read_claimed_leaves_file(path: &Path) -> AppResult<Vec<[u8; 71]>> {
         return Err(format!("No claimed leaves found in {}", path.display()).into());
     }
     Ok(leaves)
+}
+
+fn read_bytes32_lines_file(path: &Path) -> AppResult<Vec<[u8; 32]>> {
+    let raw = fs::read_to_string(path)?;
+    let mut values = Vec::new();
+
+    for (line_idx, line) in raw.lines().enumerate() {
+        let mut value = line
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_end_matches(',')
+            .trim()
+            .trim_matches('"')
+            .trim();
+
+        if value.is_empty() {
+            continue;
+        }
+
+        value = value.trim_start_matches('[').trim_end_matches(']');
+        if value.is_empty() {
+            continue;
+        }
+
+        let parsed = parse_bytes32(value).map_err(|e| {
+            format!(
+                "invalid bytes32 value at {}:{}: {}",
+                path.display(),
+                line_idx + 1,
+                e
+            )
+        })?;
+        values.push(parsed);
+    }
+
+    if values.is_empty() {
+        return Err(format!("No bytes32 values found in {}", path.display()).into());
+    }
+    Ok(values)
+}
+
+fn random_bytes32() -> AppResult<[u8; 32]> {
+    let mut file = fs::File::open("/dev/urandom")
+        .map_err(|e| format!("failed to open /dev/urandom (provide --seed explicitly): {e}"))?;
+    let mut seed = [0u8; 32];
+    file.read_exact(&mut seed)
+        .map_err(|e| format!("failed to read verifier seed from /dev/urandom: {e}"))?;
+    Ok(seed)
 }
 
 #[derive(Debug, Clone)]
@@ -271,13 +354,11 @@ fn prepare_dispute_packet(config: &PrepareDisputeConfig) -> AppResult<PreparedDi
         .iter()
         .zip(expected_leaves.iter())
         .enumerate()
-        .filter_map(|(idx, (claimed, expected))| {
-            if claimed != expected {
-                Some(idx)
-            } else {
-                None
-            }
-        })
+        .filter_map(
+            |(idx, (claimed, expected))| {
+                if claimed != expected { Some(idx) } else { None }
+            },
+        )
         .collect::<Vec<_>>();
 
     if mismatch_indices.is_empty() && config.gate_index.is_none() {
@@ -287,9 +368,7 @@ fn prepare_dispute_packet(config: &PrepareDisputeConfig) -> AppResult<PreparedDi
         );
     }
 
-    let selected_gate_index = config
-        .gate_index
-        .unwrap_or_else(|| mismatch_indices[0]);
+    let selected_gate_index = config.gate_index.unwrap_or_else(|| mismatch_indices[0]);
     if selected_gate_index >= gates.len() {
         return Err(format!(
             "gate index {} out of range, total gates {}",
@@ -345,6 +424,96 @@ fn prepare_dispute_packet(config: &PrepareDisputeConfig) -> AppResult<PreparedDi
         layout_root,
         ih_proof,
         layout_proof,
+    })
+}
+
+fn prepare_ot_dispute_packet(config: &PrepareOtDisputeConfig) -> AppResult<PreparedOtDispute> {
+    let expected_payload_hashes = recompute_ot_payload_hashes(
+        config.circuit_id,
+        config.bit_width,
+        config.garbler_seed,
+        config.verifier_seed,
+        config.instance_id,
+    )
+    .map_err(|e| format!("failed to recompute OT transcript: {e}"))?;
+
+    let mismatch_indices = config
+        .claimed_payload_hashes
+        .iter()
+        .zip(expected_payload_hashes.iter())
+        .enumerate()
+        .filter_map(
+            |(idx, (claimed, expected))| {
+                if claimed != expected { Some(idx) } else { None }
+            },
+        )
+        .collect::<Vec<_>>();
+
+    if mismatch_indices.is_empty() && config.input_bit.is_none() && config.round.is_none() {
+        return Err(
+            "No mismatches found between claimed and expected OT transcript; dispute packet not created"
+                .into(),
+        );
+    }
+
+    let selected_index = match (config.input_bit, config.round) {
+        (Some(input_bit), Some(round)) => ot_leaf_index(config.bit_width, input_bit, round)
+            .map_err(|e| format!("invalid OT dispute target: {e}"))?,
+        (None, None) => mismatch_indices[0],
+        _ => {
+            return Err(
+                "Provide both --input-bit and --round together, or omit both to auto-pick the first mismatch"
+                    .into(),
+            )
+        }
+    };
+    let (input_bit, round) = ot_leaf_coordinates(config.bit_width, selected_index)
+        .map_err(|e| format!("selected OT leaf is invalid: {e}"))?;
+
+    let selected_is_mismatch = mismatch_indices.contains(&selected_index);
+    if !selected_is_mismatch && !config.allow_false_challenge {
+        return Err(format!(
+            "selected OT leaf ({input_bit}, {round}) matches expected payload; refusing false challenge (use --allow-false-challenge to override)"
+        )
+        .into());
+    }
+
+    let root_ot = ot_root_from_payload_hashes(config.bit_width, &config.claimed_payload_hashes)
+        .map_err(|e| format!("failed to compute claimed rootOT: {e}"))?;
+    if let Some(expected_root_ot) = config.expected_root_ot {
+        if root_ot != expected_root_ot {
+            return Err(format!(
+                "computed rootOT {} does not match expected {}",
+                hex32(root_ot),
+                hex32(expected_root_ot)
+            )
+            .into());
+        }
+    }
+
+    let author = ot_message_author(round).map_err(|e| format!("invalid OT round: {e}"))?;
+    let ot_proof = ot_proof_from_payload_hashes(
+        config.bit_width,
+        &config.claimed_payload_hashes,
+        input_bit,
+        round,
+    )
+    .map_err(|e| format!("failed to build OT proof: {e}"))?;
+    let mismatch_locations = mismatch_indices
+        .iter()
+        .map(|idx| ot_leaf_coordinates(config.bit_width, *idx))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to map OT mismatch coordinates: {e}"))?;
+
+    Ok(PreparedOtDispute {
+        input_bit,
+        round,
+        author,
+        claimed_payload_hash: config.claimed_payload_hashes[selected_index],
+        expected_payload_hash: expected_payload_hashes[selected_index],
+        mismatch_locations,
+        root_ot,
+        ot_proof,
     })
 }
 
@@ -431,6 +600,52 @@ fn cmd_deposit() -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_commit_verifier_seed(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let seed = if let Some(raw) = parse_flag_value(args, "--seed") {
+        parse_bytes32(&raw)?
+    } else {
+        random_bytes32()?
+    };
+    let commitment = verifier_seed_commitment(seed);
+
+    let stage_before = run_cast(&[
+        "call".to_string(),
+        contract_address.clone(),
+        "currentStage()(uint8)".to_string(),
+        "--rpc-url".to_string(),
+        rpc_url.clone(),
+    ])?;
+    println!("stage_before={stage_before}");
+    println!("verifier_seed={}", hex32(seed));
+    println!("verifier_seed_commitment={}", hex32(commitment));
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address.clone(),
+        "commitVerifierSeed(bytes32)".to_string(),
+        hex32(commitment),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url.clone(),
+    ])?;
+    print_tx_summary("commit_verifier_seed", &tx_result);
+
+    let stage_after = run_cast(&[
+        "call".to_string(),
+        contract_address,
+        "currentStage()(uint8)".to_string(),
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+    println!("stage_after={stage_after}");
+    Ok(())
+}
+
 fn cmd_choose(args: &[String]) -> AppResult<()> {
     let rpc_url = rpc_url();
     let contract_address = required_env("CONTRACT_ADDRESS")?;
@@ -492,7 +707,13 @@ fn cmd_evaluate_m(args: &[String]) -> AppResult<()> {
     let bob_labels = y_bits
         .iter()
         .enumerate()
-        .map(|(idx, bit)| if *bit == 0 { y_offers[idx].0 } else { y_offers[idx].1 })
+        .map(|(idx, bit)| {
+            if *bit == 0 {
+                y_offers[idx].0
+            } else {
+                y_offers[idx].1
+            }
+        })
         .collect::<Vec<_>>();
 
     let gates = build_millionaires_layout(meta.bit_width);
@@ -542,6 +763,104 @@ fn cmd_evaluate_m(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_prepare_ot_dispute(args: &[String]) -> AppResult<()> {
+    let bit_width = parse_flag_value(args, "--bit-width")
+        .as_deref()
+        .map(|v| parse_u64(v, "bit-width"))
+        .transpose()?
+        .unwrap_or(8) as usize;
+    let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
+    let garbler_seed = if let Some(raw) = parse_flag_value(args, "--garbler-seed") {
+        parse_bytes32(&raw)?
+    } else {
+        parse_bytes32(&required_flag_value(args, "--seed")?)?
+    };
+    let verifier_seed = parse_bytes32(&required_flag_value(args, "--verifier-seed")?)?;
+    let claimed_payloads_file = required_flag_value(args, "--claimed-payloads-file")?;
+    let input_bit = parse_flag_value(args, "--input-bit")
+        .as_deref()
+        .map(|v| parse_u16(v, "input-bit"))
+        .transpose()?;
+    let round = parse_flag_value(args, "--round")
+        .as_deref()
+        .map(|v| parse_u8(v, "round"))
+        .transpose()?;
+    let allow_false_challenge = args.iter().any(|arg| arg == "--allow-false-challenge");
+    let expected_root_ot = parse_flag_value(args, "--expected-root-ot")
+        .as_deref()
+        .map(parse_bytes32)
+        .transpose()?;
+    let circuit_id = parse_flag_value(args, "--circuit-id")
+        .as_deref()
+        .map(parse_bytes32)
+        .transpose()?
+        .unwrap_or_else(|| keccak256(&[b"millionaires-yao-v1"]));
+
+    let claimed_payload_hashes = read_bytes32_lines_file(Path::new(&claimed_payloads_file))?;
+    let config = PrepareOtDisputeConfig {
+        bit_width,
+        circuit_id,
+        instance_id,
+        garbler_seed,
+        verifier_seed,
+        claimed_payload_hashes,
+        input_bit,
+        round,
+        allow_false_challenge,
+        expected_root_ot,
+    };
+    let prepared = prepare_ot_dispute_packet(&config)?;
+    let selected_is_mismatch = prepared
+        .mismatch_locations
+        .contains(&(prepared.input_bit, prepared.round));
+
+    println!("status=prepared");
+    println!("bit_width={bit_width}");
+    println!("circuit_id={}", hex32(circuit_id));
+    println!("instance_id={instance_id}");
+    println!("garbler_seed={}", hex32(garbler_seed));
+    println!("verifier_seed={}", hex32(verifier_seed));
+    println!(
+        "verifier_seed_commitment={}",
+        hex32(verifier_seed_commitment(verifier_seed))
+    );
+    println!("selected_input_bit={}", prepared.input_bit);
+    println!("selected_round={}", prepared.round);
+    println!("selected_author={}", prepared.author);
+    println!("selected_leaf_mismatch={selected_is_mismatch}");
+    println!("mismatch_count={}", prepared.mismatch_locations.len());
+    println!("mismatch_locations={:?}", prepared.mismatch_locations);
+    println!("root_ot={}", hex32(prepared.root_ot));
+    println!(
+        "claimed_payload_hash={}",
+        hex32(prepared.claimed_payload_hash)
+    );
+    println!(
+        "expected_payload_hash={}",
+        hex32(prepared.expected_payload_hash)
+    );
+    println!("ot_proof={}", bytes32_vec_literal(&prepared.ot_proof));
+
+    let contract_for_template =
+        env::var("CONTRACT_ADDRESS").unwrap_or_else(|_| "<CONTRACT_ADDRESS>".to_string());
+    let rpc_for_template = rpc_url();
+    println!();
+    println!("cast send template:");
+    println!(
+        "cast send {} \"disputeObliviousTransfer(uint256,bytes32,uint16,uint8,bytes32,bytes32[])\" {} {} {} {} {} \"{}\" --private-key <BOB_PRIVATE_KEY> --rpc-url {}",
+        contract_for_template,
+        instance_id,
+        hex32(verifier_seed),
+        prepared.input_bit,
+        prepared.round,
+        hex32(prepared.claimed_payload_hash),
+        bytes32_vec_literal(&prepared.ot_proof),
+        rpc_for_template
+    );
+
+    Ok(())
+}
+
 fn cmd_prepare_dispute(args: &[String]) -> AppResult<()> {
     let bit_width = parse_flag_value(args, "--bit-width")
         .as_deref()
@@ -556,9 +875,7 @@ fn cmd_prepare_dispute(args: &[String]) -> AppResult<()> {
         .map(|v| parse_u64(v, "gate-index"))
         .transpose()?
         .map(|v| v as usize);
-    let allow_false_challenge = args
-        .iter()
-        .any(|arg| arg == "--allow-false-challenge");
+    let allow_false_challenge = args.iter().any(|arg| arg == "--allow-false-challenge");
     let expected_root_gc = parse_flag_value(args, "--expected-root-gc")
         .as_deref()
         .map(parse_bytes32)
@@ -582,9 +899,7 @@ fn cmd_prepare_dispute(args: &[String]) -> AppResult<()> {
     };
     let prepared = prepare_dispute_packet(&config)?;
 
-    let selected_is_mismatch = prepared
-        .mismatch_indices
-        .contains(&prepared.gate_index);
+    let selected_is_mismatch = prepared.mismatch_indices.contains(&prepared.gate_index);
     println!("status=prepared");
     println!("bit_width={}", bit_width);
     println!("circuit_id={}", hex32(circuit_id));
@@ -603,7 +918,10 @@ fn cmd_prepare_dispute(args: &[String]) -> AppResult<()> {
     println!("claimed_leaf={}", hex_prefixed(&prepared.claimed_leaf));
     println!("expected_leaf={}", hex_prefixed(&prepared.expected_leaf));
     println!("ih_proof={}", bytes32_vec_literal(&prepared.ih_proof));
-    println!("layout_proof={}", bytes32_vec_literal(&prepared.layout_proof));
+    println!(
+        "layout_proof={}",
+        bytes32_vec_literal(&prepared.layout_proof)
+    );
 
     let contract_for_template =
         env::var("CONTRACT_ADDRESS").unwrap_or_else(|_| "<CONTRACT_ADDRESS>".to_string());
@@ -677,13 +995,56 @@ fn cmd_dispute(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_dispute_ot(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
+    let verifier_seed = parse_bytes32(&required_flag_value(args, "--verifier-seed")?)?;
+    let input_bit = parse_u16(&required_flag_value(args, "--input-bit")?, "input-bit")?;
+    let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
+    let payload_hash = parse_bytes32(&required_flag_value(args, "--payload-hash")?)?;
+    let ot_proof = parse_bytes32_list_csv(&required_flag_value(args, "--ot-proof")?)?;
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "disputeObliviousTransfer(uint256,bytes32,uint16,uint8,bytes32,bytes32[])".to_string(),
+        instance_id.to_string(),
+        hex32(verifier_seed),
+        input_bit.to_string(),
+        round.to_string(),
+        hex32(payload_hash),
+        bytes32_vec_literal(&ot_proof),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+
+    print_tx_summary("dispute_ot", &tx_result);
+    Ok(())
+}
+
 fn print_help() {
     println!("off-chain-bob commands:");
     println!("  deposit");
+    println!("  commit-verifier-seed [--seed <0x..32>]");
     println!("  choose --m <index>");
     println!("  evaluate-m --eval-dir <path> --y <u64>");
-    println!("  prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]");
-    println!("  dispute --instance-id <id> --seed <0x..32> --gate-index <k> --gate-type <0|1|2> --wire-a <u16> --wire-b <u16> --wire-c <u16> --leaf-bytes <0x..71> --ih-proof <0x..,0x..> --layout-proof <0x..,0x..>");
+    println!(
+        "  prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]"
+    );
+    println!(
+        "  prepare-ot-dispute --instance-id <id> --verifier-seed <0x..32> --claimed-payloads-file <path> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]"
+    );
+    println!(
+        "  dispute --instance-id <id> --seed <0x..32> --gate-index <k> --gate-type <0|1|2> --wire-a <u16> --wire-b <u16> --wire-c <u16> --leaf-bytes <0x..71> --ih-proof <0x..,0x..> --layout-proof <0x..,0x..>"
+    );
+    println!(
+        "  dispute-ot --instance-id <id> --verifier-seed <0x..32> --input-bit <n> --round <0|1|2> --payload-hash <0x..32> --ot-proof <0x..,0x..>"
+    );
     println!();
     println!("Default command with no args: deposit");
 }
@@ -695,10 +1056,13 @@ fn main() -> AppResult<()> {
 
     match command {
         "deposit" => cmd_deposit(),
+        "commit-verifier-seed" => cmd_commit_verifier_seed(tail),
         "choose" => cmd_choose(tail),
         "evaluate-m" => cmd_evaluate_m(tail),
         "prepare-dispute" => cmd_prepare_dispute(tail),
+        "prepare-ot-dispute" => cmd_prepare_ot_dispute(tail),
         "dispute" => cmd_dispute(tail),
+        "dispute-ot" => cmd_dispute_ot(tail),
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())
@@ -775,8 +1139,7 @@ mod tests {
             expected_root_gc: None,
         };
 
-        let err = prepare_dispute_packet(&config)
-            .expect_err("false challenge should be rejected");
+        let err = prepare_dispute_packet(&config).expect_err("false challenge should be rejected");
         assert!(err.to_string().contains("refusing false challenge"));
     }
 
@@ -795,6 +1158,99 @@ mod tests {
         let parsed = read_claimed_leaves_file(&path).expect("parse leaves");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], leaf);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn prepare_ot_dispute_picks_first_mismatch() {
+        let circuit_id = keccak256(&[b"millionaires-yao-v1"]);
+        let garbler_seed = [0x44u8; 32];
+        let verifier_seed = [0x55u8; 32];
+        let bit_width = 4usize;
+        let instance_id = 0u64;
+
+        let mut claimed = recompute_ot_payload_hashes(
+            circuit_id,
+            bit_width,
+            garbler_seed,
+            verifier_seed,
+            instance_id,
+        )
+        .expect("ot payloads");
+        claimed[0][0] ^= 1;
+
+        let config = PrepareOtDisputeConfig {
+            bit_width,
+            circuit_id,
+            instance_id,
+            garbler_seed,
+            verifier_seed,
+            claimed_payload_hashes: claimed,
+            input_bit: None,
+            round: None,
+            allow_false_challenge: false,
+            expected_root_ot: None,
+        };
+
+        let prepared = prepare_ot_dispute_packet(&config).expect("prepare ot dispute");
+        assert_eq!(prepared.input_bit, 0);
+        assert_eq!(prepared.round, 0);
+        assert_ne!(
+            prepared.claimed_payload_hash,
+            prepared.expected_payload_hash
+        );
+        assert!(prepared.mismatch_locations.contains(&(0, 0)));
+    }
+
+    #[test]
+    fn prepare_ot_dispute_rejects_false_challenge_by_default() {
+        let circuit_id = keccak256(&[b"millionaires-yao-v1"]);
+        let garbler_seed = [0x66u8; 32];
+        let verifier_seed = [0x77u8; 32];
+        let bit_width = 4usize;
+        let instance_id = 0u64;
+
+        let claimed = recompute_ot_payload_hashes(
+            circuit_id,
+            bit_width,
+            garbler_seed,
+            verifier_seed,
+            instance_id,
+        )
+        .expect("ot payloads");
+        let config = PrepareOtDisputeConfig {
+            bit_width,
+            circuit_id,
+            instance_id,
+            garbler_seed,
+            verifier_seed,
+            claimed_payload_hashes: claimed,
+            input_bit: Some(1),
+            round: Some(2),
+            allow_false_challenge: false,
+            expected_root_ot: None,
+        };
+
+        let err =
+            prepare_ot_dispute_packet(&config).expect_err("false OT challenge should be rejected");
+        assert!(err.to_string().contains("refusing false challenge"));
+    }
+
+    #[test]
+    fn reads_bytes32_lines_file() {
+        let value = [0xcdu8; 32];
+        let path = {
+            let millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_millis();
+            env::temp_dir().join(format!("claimed-payloads-{millis}.txt"))
+        };
+
+        fs::write(&path, format!("{}\n", hex32(value))).expect("write temp file");
+        let parsed = read_bytes32_lines_file(&path).expect("parse payloads");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], value);
         let _ = fs::remove_file(path);
     }
 }
