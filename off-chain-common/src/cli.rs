@@ -39,7 +39,9 @@ pub fn cast_args_with_tx_overrides(args: &[String]) -> Vec<String> {
         return out;
     }
 
-    if env_truthy("TX_LEGACY") && !out.iter().any(|arg| arg == "--legacy") {
+    let has_blob_tx = out.iter().any(|arg| arg == "--blob");
+
+    if env_truthy("TX_LEGACY") && !has_blob_tx && !out.iter().any(|arg| arg == "--legacy") {
         out.push("--legacy".to_string());
     }
 

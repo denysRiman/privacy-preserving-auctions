@@ -889,6 +889,28 @@ contract MillionairesTest is Test {
         mp.publishOpenedOtPayloadHashes(0, payloads);
     }
 
+    function test_CloseDispute_AllowsOnChainOtEvidence() public {
+        bytes32 garblerSeed = keccak256("garbler-seed");
+        bytes32 verifierSeed = _defaultVerifierSeed();
+        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
+
+        _toDisputeWithRoots(
+            garblerSeed,
+            bytes32(0),
+            rootOT,
+            9,
+            _defaultVerifierCommitment()
+        );
+
+        vm.prank(alice);
+        mp.publishOpenedOtPayloadHashes(0, payloads);
+
+        vm.prank(bob);
+        mp.closeDispute();
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Labels));
+    }
+
     function test_CloseDispute_RequiresOtPayloadPublication() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();

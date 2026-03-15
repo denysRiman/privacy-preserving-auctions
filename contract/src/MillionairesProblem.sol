@@ -646,10 +646,14 @@ contract MillionairesProblem {
         return instanceCommitments[instanceId].rootOT != bytes32(0);
     }
 
+    function _isOtEvidencePublished(uint256 instanceId) internal view returns (bool) {
+        return otPayloadsPublished[instanceId];
+    }
+
     function _allRequiredOtPayloadsPublished() internal view returns (bool) {
         for (uint256 i = 0; i < sOpen.length; i++) {
             uint256 instanceId = sOpen[i];
-            if (_instanceRequiresOtPublication(instanceId) && !otPayloadsPublished[instanceId]) {
+            if (_instanceRequiresOtPublication(instanceId) && !_isOtEvidencePublished(instanceId)) {
                 return false;
             }
         }
