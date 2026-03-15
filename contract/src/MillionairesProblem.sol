@@ -54,6 +54,11 @@ contract MillionairesProblem {
     bytes32 public verifierSeedCommitment;
     uint16 public bitWidth;
 
+    // Opened-instance OT transcript payloads published by Alice during Dispute.
+    mapping(uint256 => bytes32[]) private publishedOtPayloadHashes;
+    mapping(uint256 => bool) public otPayloadsPublished;
+    mapping(uint256 => bytes32) public otPayloadsCommitment;
+
     constructor(address _bob, bytes32 _circuitId, bytes32 _circuitLayoutRoot, uint16 _bitWidth) {
         require(_bitWidth > 0, "bitWidth must be > 0");
         alice = msg.sender;
@@ -258,6 +263,65 @@ contract MillionairesProblem {
     }
 
     /**
+     * @dev Phase 6: Alice publishes OT transcript payload hashes for one opened instance.
+     * The contract recomputes and verifies `rootOT` before storing payload hashes for Bob.
+     */
+    function publishOpenedOtPayloadHashes(uint256 instanceId, bytes32[] calldata payloadHashes) external {
+        require(currentStage == Stage.Dispute, "Wrong stage");
+        require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
+        require(msg.sender == alice, "Only Garbler");
+        require(_isOpenInstance(instanceId), "Not an opened instance");
+        require(!otPayloadsPublished[instanceId], "OT payloads already published");
+        require(instanceCommitments[instanceId].rootOT != bytes32(0), "Missing rootOT commitment");
+
+        uint256 expectedPayloadCount = uint256(bitWidth) * OT_ROUNDS_PER_INPUT;
+        require(payloadHashes.length == expectedPayloadCount, "Bad OT payload count");
+
+        bytes32 recomputedRoot = _otRootFromPayloadHashes(payloadHashes);
+        require(recomputedRoot == instanceCommitments[instanceId].rootOT, "OT root mismatch");
+
+        bytes32[] storage dst = publishedOtPayloadHashes[instanceId];
+        for (uint256 i = 0; i < payloadHashes.length; i++) {
+            dst.push(payloadHashes[i]);
+        }
+
+        bytes32 payloadCommitment = keccak256(abi.encodePacked(payloadHashes));
+        otPayloadsCommitment[instanceId] = payloadCommitment;
+        otPayloadsPublished[instanceId] = true;
+
+        emit OTPayloadsPublished(instanceId, payloadCommitment, payloadHashes.length);
+    }
+
+    function getPublishedOtPayloadCount(uint256 instanceId) external view returns (uint256) {
+        return publishedOtPayloadHashes[instanceId].length;
+    }
+
+    function getPublishedOtPayloadHashes(uint256 instanceId) external view returns (bytes32[] memory) {
+        return publishedOtPayloadHashes[instanceId];
+    }
+
+    function getPublishedOtPayloadHash(uint256 instanceId, uint256 leafIndex) external view returns (bytes32) {
+        require(leafIndex < publishedOtPayloadHashes[instanceId].length, "OT leaf out of range");
+        return publishedOtPayloadHashes[instanceId][leafIndex];
+    }
+
+    function allRequiredOtPayloadsPublished() external view returns (bool) {
+        return _allRequiredOtPayloadsPublished();
+    }
+
+    /**
+     * @dev Timeout in Dispute: if Alice does not publish required opened OT payloads, Bob slashes Alice.
+     */
+    function slashForMissingOtPayloads() external {
+        require(currentStage == Stage.Dispute, "Wrong stage");
+        require(block.timestamp > deadlines.dispute, "Dispute window still open");
+        require(msg.sender == bob, "Only Bob can trigger this");
+        require(!_allRequiredOtPayloadsPublished(), "OT payloads already published");
+
+        _slash(bob, alice);
+    }
+
+    /**
      * @dev Phase 7: Alice reveals her input labels for the evaluation circuit m.
      * These labels correspond to her private input x.
      * @param _labels The set of wire labels for Alice's input.
@@ -401,14 +465,16 @@ contract MillionairesProblem {
     function closeDispute() external {
         require(currentStage == Stage.Dispute, "Wrong stage");
 
-        // Bob can close anytime (early close)
+        // Bob can close early only after Alice publishes required opened OT payloads.
         if (msg.sender == bob) {
+            require(_allRequiredOtPayloadsPublished(), "OT payloads not fully published");
             currentStage = Stage.Labels;
             return;
         }
 
         require(msg.sender == alice, "Only Alice can close after deadline");
         require(block.timestamp > deadlines.dispute, "Dispute window still open");
+        require(_allRequiredOtPayloadsPublished(), "OT payloads not fully published");
         currentStage = Stage.Labels;
     }
 
@@ -564,6 +630,7 @@ contract MillionairesProblem {
 
     event GateLeafChallenged(uint256 indexed instanceId, uint256 indexed gateIndex, bool mismatch);
     event OTLeafChallenged(uint256 indexed instanceId, uint16 indexed inputBit, uint8 indexed round, bool mismatch);
+    event OTPayloadsPublished(uint256 indexed instanceId, bytes32 indexed payloadsCommitment, uint256 payloadCount);
     event CheaterSlashed(address indexed cheater, address indexed beneficiary);
 
     function _isOpenInstance(uint256 instanceId) internal view returns (bool) {
@@ -573,6 +640,20 @@ contract MillionairesProblem {
             if (sOpen[i] == instanceId) return true;
         }
         return false;
+    }
+
+    function _instanceRequiresOtPublication(uint256 instanceId) internal view returns (bool) {
+        return instanceCommitments[instanceId].rootOT != bytes32(0);
+    }
+
+    function _allRequiredOtPayloadsPublished() internal view returns (bool) {
+        for (uint256 i = 0; i < sOpen.length; i++) {
+            uint256 instanceId = sOpen[i];
+            if (_instanceRequiresOtPublication(instanceId) && !otPayloadsPublished[instanceId]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     function _assertValidLayoutProof(
@@ -670,6 +751,32 @@ contract MillionairesProblem {
         challengeOtLeaf(instanceId, verifierSeed, inputBit, round, payloadHash, otProof);
     }
 
+    /**
+     * @dev Phase 6 (Dispute): challenge OT transcript leaf using payload hashes published on-chain by Alice.
+     * This path removes off-chain payload-file trust assumptions for opened check-circuits.
+     */
+    function disputePublishedObliviousTransfer(
+        uint256 instanceId,
+        bytes32 verifierSeed,
+        uint16 inputBit,
+        uint8 round
+    ) external {
+        require(currentStage == Stage.Dispute, "Wrong stage");
+        require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
+        require(msg.sender == alice || msg.sender == bob, "Only participants can dispute");
+        require(instanceId != m, "Cannot dispute evaluation circuit m");
+        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
+        require(
+            keccak256(abi.encodePacked(verifierSeed)) == verifierSeedCommitment,
+            "Invalid verifier seed"
+        );
+        require(otPayloadsPublished[instanceId], "OT payloads not published");
+
+        uint256 leafIndex = _otLeafIndex(inputBit, round);
+        bytes32 payloadHash = publishedOtPayloadHashes[instanceId][leafIndex];
+        _resolveOtChallenge(instanceId, verifierSeed, inputBit, round, payloadHash);
+    }
+
     // leaf = H(gateIndex || gateType || wireA || wireB || wireC)
     function _layoutLeafHash(uint256 gateIndex, GateDesc calldata g) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(gateIndex, uint8(g.gateType), g.wireA, g.wireB, g.wireC));
@@ -707,6 +814,12 @@ contract MillionairesProblem {
     function _otMessageAuthor(uint8 round) internal pure returns (uint8) {
         require(round < OT_ROUNDS_PER_INPUT, "Bad OT round");
         return round == 1 ? 1 : 0;
+    }
+
+    function _otLeafIndex(uint16 inputBit, uint8 round) internal view returns (uint256) {
+        require(inputBit < bitWidth, "OT input bit out of range");
+        require(round < OT_ROUNDS_PER_INPUT, "Bad OT round");
+        return uint256(inputBit) * OT_ROUNDS_PER_INPUT + round;
     }
 
     function _otTranscriptLeafHash(uint16 inputBit, uint8 round, uint8 author, bytes32 payloadHash)
@@ -814,6 +927,34 @@ contract MillionairesProblem {
         return level[0];
     }
 
+    function _otRootFromPayloadHashes(bytes32[] calldata payloadHashes) internal view returns (bytes32) {
+        uint256 width = payloadHashes.length;
+        bytes32[] memory level = new bytes32[](width);
+
+        uint256 cursor = 0;
+        for (uint16 inputBit = 0; inputBit < bitWidth; inputBit++) {
+            for (uint8 round = 0; round < OT_ROUNDS_PER_INPUT; round++) {
+                uint8 author = _otMessageAuthor(round);
+                level[cursor] = _otTranscriptLeafHash(inputBit, round, author, payloadHashes[cursor]);
+                cursor++;
+            }
+        }
+
+        while (width > 1) {
+            uint256 nextWidth = (width + 1) / 2;
+            for (uint256 i = 0; i < nextWidth; i++) {
+                uint256 leftIndex = 2 * i;
+                uint256 rightIndex = leftIndex + 1;
+                bytes32 left = level[leftIndex];
+                bytes32 right = rightIndex < width ? level[rightIndex] : left;
+                level[i] = _commutativeNodeHash(left, right);
+            }
+            width = nextWidth;
+        }
+
+        return level[0];
+    }
+
     function challengeOtLeaf(
         uint256 instanceId,
         bytes32 verifierSeed,
@@ -831,7 +972,6 @@ contract MillionairesProblem {
             "Invalid verifier seed"
         );
 
-        bytes32 garblerSeed = _requireRevealedSeedForOpenedInstance(instanceId);
         uint8 author = _otMessageAuthor(round);
         bytes32 leafHash = _otTranscriptLeafHash(inputBit, round, author, payloadHash);
         require(
@@ -839,6 +979,18 @@ contract MillionairesProblem {
             "Bad OT proof"
         );
 
+        _resolveOtChallenge(instanceId, verifierSeed, inputBit, round, payloadHash);
+    }
+
+    function _resolveOtChallenge(
+        uint256 instanceId,
+        bytes32 verifierSeed,
+        uint16 inputBit,
+        uint8 round,
+        bytes32 payloadHash
+    ) internal {
+        bytes32 garblerSeed = _requireRevealedSeedForOpenedInstance(instanceId);
+        uint8 author = _otMessageAuthor(round);
         bytes32 expectedPayloadHash = _computeOtPayloadHash(garblerSeed, verifierSeed, instanceId, inputBit, round);
         bool matchLeaf = payloadHash == expectedPayloadHash;
 

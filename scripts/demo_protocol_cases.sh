@@ -22,6 +22,7 @@ BOB_Y_VALUE="${BOB_Y_VALUE:-random}"
 TX_LEGACY="${TX_LEGACY:-1}"
 TX_GAS_PRICE_WEI="${TX_GAS_PRICE_WEI:-0}"
 STRICT_BALANCE_CHECK="${STRICT_BALANCE_CHECK:-1}"
+VERIFIER_SEED_OVERRIDE="${VERIFIER_SEED_OVERRIDE:-${VERIFIER_SEED:-}}"
 
 CUT_AND_CHOOSE_N=10
 
@@ -32,6 +33,8 @@ ALICE_ADDR=""
 BOB_ADDR=""
 ALICE_RESET_WEI=""
 BOB_RESET_WEI=""
+VERIFIER_SEED_HEX=""
+VERIFIER_SEED_COMMITMENT=""
 TX_FLAGS=()
 
 is_truthy() {
@@ -138,14 +141,18 @@ deploy_contract() {
   compute_circuit_meta "${m_choice}"
 
   local deploy_out
-  deploy_out="$(
+  if ! deploy_out="$(
     cd "${CONTRACT_DIR}" && forge create src/MillionairesProblem.sol:MillionairesProblem \
       --rpc-url "${RPC_URL}" \
       --private-key "${ALICE_PK}" \
       --broadcast \
       --json \
-      --constructor-args "${BOB_ADDR}" "${CIRCUIT_ID}" "${LAYOUT_ROOT}" 2>&1
-  )"
+      --constructor-args "${BOB_ADDR}" "${CIRCUIT_ID}" "${LAYOUT_ROOT}" "${BIT_WIDTH}" 2>&1
+  )"; then
+    echo "Failed to deploy MillionairesProblem." >&2
+    echo "${deploy_out}" >&2
+    exit 1
+  fi
 
   CONTRACT_ADDRESS="$(
     echo "${deploy_out}" \
@@ -260,6 +267,17 @@ compact_cli_output() {
       tx="$(extract_kv_from_text reveal_openings_tx_hash "${raw}")"
       [[ -n "${tx}" ]] && echo "  tx=${tx}"
       ;;
+    alice:publish-ot-payloads)
+      local tx instance payload_count payload_commitment
+      tx="$(extract_kv_from_text publish_ot_payloads_tx_hash "${raw}")"
+      instance="$(extract_kv_from_text instance_id "${raw}")"
+      payload_count="$(extract_kv_from_text payload_count "${raw}")"
+      payload_commitment="$(extract_kv_from_text payload_commitment "${raw}")"
+      [[ -n "${tx}" ]] && echo "  tx=${tx}"
+      [[ -n "${instance}" ]] && echo "  opened_instance=${instance}"
+      [[ -n "${payload_count}" ]] && echo "  payload_count=${payload_count}"
+      [[ -n "${payload_commitment}" ]] && echo "  payload_commitment=${payload_commitment}"
+      ;;
     alice:reveal-labels)
       local tx labels_count
       tx="$(extract_kv_from_text reveal_labels_tx_hash "${raw}")"
@@ -288,6 +306,15 @@ compact_cli_output() {
       tx="$(extract_kv_from_text choose_tx_hash "${raw}")"
       [[ -n "${tx}" ]] && echo "  tx=${tx}"
       ;;
+    bob:commit-verifier-seed)
+      local tx seed commitment
+      tx="$(extract_kv_from_text commit_verifier_seed_tx_hash "${raw}")"
+      seed="$(extract_kv_from_text verifier_seed "${raw}")"
+      commitment="$(extract_kv_from_text verifier_seed_commitment "${raw}")"
+      [[ -n "${tx}" ]] && echo "  tx=${tx}"
+      [[ -n "${seed}" ]] && echo "  verifier_seed=${seed}"
+      [[ -n "${commitment}" ]] && echo "  verifier_seed_commitment=${commitment}"
+      ;;
     bob:evaluate-m)
       local y_value decoded output_label
       y_value="$(extract_kv_from_text y_value "${raw}")"
@@ -296,6 +323,20 @@ compact_cli_output() {
       [[ -n "${y_value}" ]] && echo "  bob_y=${y_value}"
       [[ -n "${decoded}" ]] && echo "  decoded_bit=${decoded}"
       [[ -n "${output_label}" ]] && echo "  output_label=${output_label}"
+      ;;
+    bob:prepare-ot-dispute|bob:prepare-ot-dispute-onchain)
+      local mismatch_count selected_mismatch input_bit round author root_ot
+      mismatch_count="$(extract_kv_from_text mismatch_count "${raw}")"
+      selected_mismatch="$(extract_kv_from_text selected_leaf_mismatch "${raw}")"
+      input_bit="$(extract_kv_from_text selected_input_bit "${raw}")"
+      round="$(extract_kv_from_text selected_round "${raw}")"
+      author="$(extract_kv_from_text selected_author "${raw}")"
+      root_ot="$(extract_kv_from_text root_ot "${raw}")"
+      [[ -n "${mismatch_count}" ]] && echo "  ot_mismatch_count=${mismatch_count}"
+      [[ -n "${selected_mismatch}" ]] && echo "  selected_leaf_mismatch=${selected_mismatch}"
+      [[ -n "${input_bit}" && -n "${round}" ]] && echo "  selected_ot_leaf=(bit=${input_bit}, round=${round})"
+      [[ -n "${author}" ]] && echo "  selected_author=${author} (0=Alice, 1=Bob)"
+      [[ -n "${root_ot}" ]] && echo "  rootOT=${root_ot}"
       ;;
     bob:dispute)
       local tx
@@ -319,6 +360,21 @@ run_bob() {
   local raw
   raw="$(run_bob_raw "$@")"
   compact_cli_output "bob" "${command}" "${raw}"
+}
+
+commit_bob_verifier_seed() {
+  local raw
+  if [[ -n "${VERIFIER_SEED_OVERRIDE}" ]]; then
+    raw="$(run_bob_raw commit-verifier-seed --seed "${VERIFIER_SEED_OVERRIDE}")"
+  else
+    raw="$(run_bob_raw commit-verifier-seed)"
+  fi
+  compact_cli_output "bob" "commit-verifier-seed" "${raw}"
+
+  VERIFIER_SEED_HEX="$(extract_kv_from_text verifier_seed "${raw}")"
+  VERIFIER_SEED_COMMITMENT="$(extract_kv_from_text verifier_seed_commitment "${raw}")"
+  assert_non_empty "verifier_seed" "${VERIFIER_SEED_HEX}"
+  assert_non_empty "verifier_seed_commitment" "${VERIFIER_SEED_COMMITMENT}"
 }
 
 stage_value() {
@@ -443,6 +499,26 @@ choose_challenge_instance() {
   fi
 }
 
+publish_opened_ot_payloads_onchain() {
+  local out_dir="$1"
+  local m_choice="$2"
+
+  phase "Phase 6: Alice publishes opened OT payloads on-chain"
+  for ((i=0; i<CUT_AND_CHOOSE_N; i++)); do
+    if [[ "${i}" -eq "${m_choice}" ]]; then
+      continue
+    fi
+    local payloads_file="${out_dir}/instance-${i}-ot-payloads.txt"
+    if [[ ! -f "${payloads_file}" ]]; then
+      echo "Missing OT payload file for opened instance ${i}: ${payloads_file}" >&2
+      exit 1
+    fi
+    run_alice publish-ot-payloads \
+      --instance-id "${i}" \
+      --payloads-file "${payloads_file}"
+  done
+}
+
 flip_first_hex_byte() {
   local value="$1"
   local raw="${value#0x}"
@@ -552,6 +628,59 @@ common_bootstrap() {
   phase "Phase 1: Bob deposit"
   run_bob deposit
   wait_phase
+
+  phase "Phase 2: Bob commits verifier seed for OT replay"
+  commit_bob_verifier_seed
+  wait_phase
+}
+
+show_ot_visibility() {
+  local out_dir="$1"
+  local instance_id="$2"
+  local title="${3:-OT visibility check}"
+  local seed_file="${out_dir}/instance-${instance_id}-seed.txt"
+  local root_ot_file="${out_dir}/instance-${instance_id}-root-ot.txt"
+  local payloads_file="${out_dir}/instance-${instance_id}-ot-payloads.txt"
+
+  if [[ ! -f "${seed_file}" || ! -f "${root_ot_file}" || ! -f "${payloads_file}" ]]; then
+    echo "Missing OT artifacts for instance ${instance_id} in ${out_dir}" >&2
+    exit 1
+  fi
+
+  local seed
+  local root_ot
+  local payload_count
+  local first_payload
+  local last_payload
+  seed="$(tr -d '[:space:]' < "${seed_file}")"
+  root_ot="$(tr -d '[:space:]' < "${root_ot_file}")"
+  payload_count="$(wc -l < "${payloads_file}" | tr -d '[:space:]')"
+  first_payload="$(sed -n '1p' "${payloads_file}")"
+  last_payload="$(tail -n 1 "${payloads_file}")"
+
+  phase "${title}"
+  echo "  opened_instance=${instance_id}"
+  echo "  verifier_seed=${VERIFIER_SEED_HEX}"
+  echo "  verifier_seed_commitment=${VERIFIER_SEED_COMMITMENT}"
+  echo "  payload_file=${payloads_file}"
+  echo "  payload_count=${payload_count}"
+  [[ -n "${first_payload}" ]] && echo "  payload_0=${first_payload}"
+  [[ -n "${last_payload}" ]] && echo "  payload_last=${last_payload}"
+
+  local ot_raw
+  ot_raw="$(
+    run_bob_raw prepare-ot-dispute-onchain \
+      --instance-id "${instance_id}" \
+      --garbler-seed "${seed}" \
+      --verifier-seed "${VERIFIER_SEED_HEX}" \
+      --bit-width "${BIT_WIDTH}" \
+      --circuit-id "${CIRCUIT_ID}" \
+      --expected-root-ot "${root_ot}" \
+      --input-bit 0 \
+      --round 0 \
+      --allow-false-challenge
+  )"
+  compact_cli_output "bob" "prepare-ot-dispute-onchain" "${ot_raw}"
 }
 
 scenario_success() {
@@ -571,7 +700,7 @@ scenario_success() {
   echo "bob_y=${bob_y_value}"
   common_bootstrap "${m_choice}"
 
-  phase "Phase 2: derive output anchors + submit commitments"
+  phase "Phase 3: derive output anchors + submit commitments"
   local anchors_raw
   anchors_raw="$(
     run_alice_raw derive-anchors \
@@ -588,23 +717,32 @@ scenario_success() {
   run_alice submit-commitments \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
+    --verifier-seed "${VERIFIER_SEED_HEX}" \
     --h0 "${h0_list}" \
     --h1 "${h1_list}" \
     --export-dir "${out_dir}"
   wait_phase
 
-  phase "Phase 3: Bob chooses m"
+  phase "Phase 4: Bob chooses m"
   run_bob choose --m "${m_choice}"
   wait_phase
 
-  phase "Phase 4: Alice reveals openings"
+  phase "Phase 5: Alice reveals openings"
   run_alice reveal-openings \
     --m "${m_choice}" \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  phase "Phase 5: Bob closes dispute window"
+  publish_opened_ot_payloads_onchain "${out_dir}" "${m_choice}"
+  wait_phase
+
+  local challenge_instance
+  challenge_instance="$(choose_challenge_instance "${m_choice}")"
+  show_ot_visibility "${out_dir}" "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
+  wait_phase
+
+  phase "Phase 7: Bob closes dispute window"
   cast send "${CONTRACT_ADDRESS}" "closeDispute()" \
     "${TX_FLAGS[@]}" \
     --private-key "${BOB_PK}" \
@@ -612,18 +750,19 @@ scenario_success() {
   echo "closeDispute sent"
   wait_phase
 
-  phase "Phase 6: Alice prepares evaluation package (OT-simulated) + reveals x labels"
+  phase "Phase 8: Alice prepares evaluation package (OT-simulated) + reveals x labels"
   run_alice prepare-eval \
     --m "${m_choice}" \
     --x "${alice_x_value}" \
     --out-dir "${eval_dir}" \
     --bit-width "${BIT_WIDTH}" \
-    --circuit-id "${CIRCUIT_ID}"
+    --circuit-id "${CIRCUIT_ID}" \
+    --verifier-seed "${VERIFIER_SEED_HEX}"
 
   run_alice reveal-labels --labels-file "${eval_dir}/alice-x-labels32.txt"
   wait_phase
 
-  phase "Phase 7: Bob evaluates GC_m with y (OT-simulated) and submits output label"
+  phase "Phase 9: Bob evaluates GC_m with y (OT-simulated) and submits output label"
   local eval_raw
   eval_raw="$(
     run_bob_raw evaluate-m \
@@ -666,7 +805,7 @@ scenario_success() {
     exit 1
   fi
 
-  echo "final_stage=${stage} (7 means Closed)"
+  echo "final_stage=${stage} (8 means Closed)"
   echo "input_x=${alice_x_value}"
   echo "input_y=${bob_y_value}"
   echo "decoded_bit=${decoded_bit} (from Bob GC evaluation)"
@@ -689,14 +828,15 @@ scenario_alice_cheats() {
   echo "bob_m_choice=${m_choice}"
   common_bootstrap "${m_choice}"
 
-  phase "Phase 2: Alice exports honest artifacts"
+  phase "Phase 3: Alice exports honest artifacts"
   run_alice export-artifacts \
     --out-dir "${out_dir}" \
     --bit-width "${BIT_WIDTH}" \
-    --circuit-id "${CIRCUIT_ID}"
+    --circuit-id "${CIRCUIT_ID}" \
+    --verifier-seed "${VERIFIER_SEED_HEX}"
   wait_phase
 
-  phase "Phase 2: Alice commits a tampered rootGC for one opened instance"
+  phase "Phase 3: Alice commits a tampered rootGC for one opened instance"
   local seed_file="${out_dir}/instance-${challenge_instance}-seed.txt"
   local honest_leaves_file="${out_dir}/instance-${challenge_instance}-leaves.txt"
   local tampered_leaves_file="${out_dir}/instance-${challenge_instance}-leaves-tampered.txt"
@@ -732,21 +872,28 @@ scenario_alice_cheats() {
   run_alice submit-commitments \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
+    --verifier-seed "${VERIFIER_SEED_HEX}" \
     --root-gcs "${root_gcs_list}"
   wait_phase
 
-  phase "Phase 3: Bob chooses m"
+  phase "Phase 4: Bob chooses m"
   run_bob choose --m "${m_choice}"
   wait_phase
 
-  phase "Phase 4: Alice reveals openings"
+  phase "Phase 5: Alice reveals openings"
   run_alice reveal-openings \
     --m "${m_choice}" \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  phase "Phase 5: Bob disputes one tampered node"
+  publish_opened_ot_payloads_onchain "${out_dir}" "${m_choice}"
+  wait_phase
+
+  show_ot_visibility "${out_dir}" "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
+  wait_phase
+
+  phase "Phase 7: Bob disputes one tampered GC node"
   local gate_index
   local gate_type
   local wire_a
@@ -788,7 +935,7 @@ scenario_alice_cheats() {
 
   local stage
   stage="$(stage_value)"
-  echo "final_stage=${stage} (7 means Closed)"
+  echo "final_stage=${stage} (8 means Closed)"
   echo "winner=Bob"
   echo "outcome=Alice slashed, Bob won dispute"
   local expected_alice
@@ -810,25 +957,32 @@ scenario_bob_cheats() {
   echo "bob_m_choice=${m_choice}"
   common_bootstrap "${m_choice}"
 
-  phase "Phase 2: Alice submits honest commitments"
+  phase "Phase 3: Alice submits honest commitments"
   run_alice submit-commitments \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
+    --verifier-seed "${VERIFIER_SEED_HEX}" \
     --export-dir "${out_dir}"
   wait_phase
 
-  phase "Phase 3: Bob chooses m"
+  phase "Phase 4: Bob chooses m"
   run_bob choose --m "${m_choice}"
   wait_phase
 
-  phase "Phase 4: Alice reveals openings"
+  phase "Phase 5: Alice reveals openings"
   run_alice reveal-openings \
     --m "${m_choice}" \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  phase "Phase 5: Bob submits false challenge"
+  publish_opened_ot_payloads_onchain "${out_dir}" "${m_choice}"
+  wait_phase
+
+  show_ot_visibility "${out_dir}" "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
+  wait_phase
+
+  phase "Phase 7: Bob submits false GC challenge"
   local seed_file="${out_dir}/instance-${challenge_instance}-seed.txt"
   local leaves_file="${out_dir}/instance-${challenge_instance}-leaves.txt"
   local root_file="${out_dir}/instance-${challenge_instance}-root-gc.txt"
@@ -899,7 +1053,7 @@ scenario_bob_cheats() {
 
   local stage
   stage="$(stage_value)"
-  echo "final_stage=${stage} (7 means Closed)"
+  echo "final_stage=${stage} (8 means Closed)"
   echo "winner=Alice"
   echo "outcome=Bob false-challenged, Alice received collateral"
   local expected_alice

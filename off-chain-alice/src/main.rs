@@ -794,6 +794,45 @@ fn cmd_reveal_openings(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_publish_ot_payloads(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let alice_private_key = required_env_any(&["ALICE_PRIVATE_KEY", "ALICE_PK"])?;
+    let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
+
+    let payloads = if let Some(raw) = parse_flag_value(args, "--payloads") {
+        parse_bytes32_list_csv(&raw)?
+    } else if let Some(path) = parse_flag_value(args, "--payloads-file") {
+        read_bytes32_lines_file(Path::new(&path))?
+    } else {
+        return Err("Provide --payloads or --payloads-file".into());
+    };
+    if payloads.is_empty() {
+        return Err("OT payload list cannot be empty".into());
+    }
+
+    let payloads_arg = bytes32_vec_literal(&payloads);
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "publishOpenedOtPayloadHashes(uint256,bytes32[])".to_string(),
+        instance_id.to_string(),
+        payloads_arg,
+        "--private-key".to_string(),
+        alice_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+
+    print_tx_summary("publish_ot_payloads", &tx_result);
+    let payload_refs = payloads.iter().map(|payload| payload.as_slice()).collect::<Vec<_>>();
+    let payload_commitment = keccak256(&payload_refs);
+    println!("instance_id={instance_id}");
+    println!("payload_count={}", payloads.len());
+    println!("payload_commitment={}", hex32(payload_commitment));
+    Ok(())
+}
+
 fn cmd_reveal_labels(args: &[String]) -> AppResult<()> {
     let rpc_url = rpc_url();
     let contract_address = required_env("CONTRACT_ADDRESS")?;
@@ -842,6 +881,9 @@ fn print_help() {
     println!(
         "  reveal-openings --m <index> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]"
     );
+    println!(
+        "  publish-ot-payloads --instance-id <id> (--payloads <0x..,0x..> | --payloads-file <path>)"
+    );
     println!("  reveal-labels (--labels <0x..,0x..> | --labels-file <path>)");
     println!();
     println!("Default command with no args: deposit");
@@ -859,6 +901,7 @@ fn main() -> AppResult<()> {
         "export-artifacts" => cmd_export_artifacts(tail),
         "prepare-eval" => cmd_prepare_eval(tail),
         "reveal-openings" => cmd_reveal_openings(tail),
+        "publish-ot-payloads" => cmd_publish_ot_payloads(tail),
         "reveal-labels" => cmd_reveal_labels(tail),
         "-h" | "--help" | "help" => {
             print_help();

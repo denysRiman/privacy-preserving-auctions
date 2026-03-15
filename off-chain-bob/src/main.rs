@@ -158,6 +158,41 @@ fn read_bytes32_lines_file(path: &Path) -> AppResult<Vec<[u8; 32]>> {
     Ok(values)
 }
 
+fn fetch_onchain_ot_payload_hashes(
+    contract_address: &str,
+    rpc_url: &str,
+    instance_id: u64,
+) -> AppResult<Vec<[u8; 32]>> {
+    let count_raw = run_cast(&[
+        "call".to_string(),
+        contract_address.to_string(),
+        "getPublishedOtPayloadCount(uint256)(uint256)".to_string(),
+        instance_id.to_string(),
+        "--rpc-url".to_string(),
+        rpc_url.to_string(),
+    ])?;
+    let payload_count = parse_u64(count_raw.trim(), "payload-count")? as usize;
+    if payload_count == 0 {
+        return Err(format!("No on-chain OT payloads published for instance {instance_id}").into());
+    }
+
+    let mut payloads = Vec::with_capacity(payload_count);
+    for leaf_index in 0..payload_count {
+        let payload_raw = run_cast(&[
+            "call".to_string(),
+            contract_address.to_string(),
+            "getPublishedOtPayloadHash(uint256,uint256)(bytes32)".to_string(),
+            instance_id.to_string(),
+            leaf_index.to_string(),
+            "--rpc-url".to_string(),
+            rpc_url.to_string(),
+        ])?;
+        payloads.push(parse_bytes32(payload_raw.trim())?);
+    }
+
+    Ok(payloads)
+}
+
 fn random_bytes32() -> AppResult<[u8; 32]> {
     let mut file = fs::File::open("/dev/urandom")
         .map_err(|e| format!("failed to open /dev/urandom (provide --seed explicitly): {e}"))?;
@@ -861,6 +896,105 @@ fn cmd_prepare_ot_dispute(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_prepare_ot_dispute_onchain(args: &[String]) -> AppResult<()> {
+    let bit_width = parse_flag_value(args, "--bit-width")
+        .as_deref()
+        .map(|v| parse_u64(v, "bit-width"))
+        .transpose()?
+        .unwrap_or(8) as usize;
+    let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
+    let garbler_seed = if let Some(raw) = parse_flag_value(args, "--garbler-seed") {
+        parse_bytes32(&raw)?
+    } else {
+        parse_bytes32(&required_flag_value(args, "--seed")?)?
+    };
+    let verifier_seed = parse_bytes32(&required_flag_value(args, "--verifier-seed")?)?;
+    let input_bit = parse_flag_value(args, "--input-bit")
+        .as_deref()
+        .map(|v| parse_u16(v, "input-bit"))
+        .transpose()?;
+    let round = parse_flag_value(args, "--round")
+        .as_deref()
+        .map(|v| parse_u8(v, "round"))
+        .transpose()?;
+    let allow_false_challenge = args.iter().any(|arg| arg == "--allow-false-challenge");
+    let expected_root_ot = parse_flag_value(args, "--expected-root-ot")
+        .as_deref()
+        .map(parse_bytes32)
+        .transpose()?;
+    let circuit_id = parse_flag_value(args, "--circuit-id")
+        .as_deref()
+        .map(parse_bytes32)
+        .transpose()?
+        .unwrap_or_else(|| keccak256(&[b"millionaires-yao-v1"]));
+
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let claimed_payload_hashes =
+        fetch_onchain_ot_payload_hashes(&contract_address, &rpc_url, instance_id)?;
+    let fetched_payload_count = claimed_payload_hashes.len();
+
+    let config = PrepareOtDisputeConfig {
+        bit_width,
+        circuit_id,
+        instance_id,
+        garbler_seed,
+        verifier_seed,
+        claimed_payload_hashes,
+        input_bit,
+        round,
+        allow_false_challenge,
+        expected_root_ot,
+    };
+    let prepared = prepare_ot_dispute_packet(&config)?;
+    let selected_is_mismatch = prepared
+        .mismatch_locations
+        .contains(&(prepared.input_bit, prepared.round));
+
+    println!("status=prepared");
+    println!("source=onchain");
+    println!("fetched_payload_count={fetched_payload_count}");
+    println!("bit_width={bit_width}");
+    println!("circuit_id={}", hex32(circuit_id));
+    println!("instance_id={instance_id}");
+    println!("garbler_seed={}", hex32(garbler_seed));
+    println!("verifier_seed={}", hex32(verifier_seed));
+    println!(
+        "verifier_seed_commitment={}",
+        hex32(verifier_seed_commitment(verifier_seed))
+    );
+    println!("selected_input_bit={}", prepared.input_bit);
+    println!("selected_round={}", prepared.round);
+    println!("selected_author={}", prepared.author);
+    println!("selected_leaf_mismatch={selected_is_mismatch}");
+    println!("mismatch_count={}", prepared.mismatch_locations.len());
+    println!("mismatch_locations={:?}", prepared.mismatch_locations);
+    println!("root_ot={}", hex32(prepared.root_ot));
+    println!(
+        "claimed_payload_hash={}",
+        hex32(prepared.claimed_payload_hash)
+    );
+    println!(
+        "expected_payload_hash={}",
+        hex32(prepared.expected_payload_hash)
+    );
+    println!("ot_proof={}", bytes32_vec_literal(&prepared.ot_proof));
+
+    println!();
+    println!("cast send template:");
+    println!(
+        "cast send {} \"disputePublishedObliviousTransfer(uint256,bytes32,uint16,uint8)\" {} {} {} {} --private-key <BOB_PRIVATE_KEY> --rpc-url {}",
+        contract_address,
+        instance_id,
+        hex32(verifier_seed),
+        prepared.input_bit,
+        prepared.round,
+        rpc_url
+    );
+
+    Ok(())
+}
+
 fn cmd_prepare_dispute(args: &[String]) -> AppResult<()> {
     let bit_width = parse_flag_value(args, "--bit-width")
         .as_deref()
@@ -1027,6 +1161,34 @@ fn cmd_dispute_ot(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_dispute_ot_published(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
+    let verifier_seed = parse_bytes32(&required_flag_value(args, "--verifier-seed")?)?;
+    let input_bit = parse_u16(&required_flag_value(args, "--input-bit")?, "input-bit")?;
+    let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "disputePublishedObliviousTransfer(uint256,bytes32,uint16,uint8)".to_string(),
+        instance_id.to_string(),
+        hex32(verifier_seed),
+        input_bit.to_string(),
+        round.to_string(),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+
+    print_tx_summary("dispute_ot_published", &tx_result);
+    Ok(())
+}
+
 fn print_help() {
     println!("off-chain-bob commands:");
     println!("  deposit");
@@ -1040,10 +1202,16 @@ fn print_help() {
         "  prepare-ot-dispute --instance-id <id> --verifier-seed <0x..32> --claimed-payloads-file <path> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]"
     );
     println!(
+        "  prepare-ot-dispute-onchain --instance-id <id> --verifier-seed <0x..32> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]"
+    );
+    println!(
         "  dispute --instance-id <id> --seed <0x..32> --gate-index <k> --gate-type <0|1|2> --wire-a <u16> --wire-b <u16> --wire-c <u16> --leaf-bytes <0x..71> --ih-proof <0x..,0x..> --layout-proof <0x..,0x..>"
     );
     println!(
         "  dispute-ot --instance-id <id> --verifier-seed <0x..32> --input-bit <n> --round <0|1|2> --payload-hash <0x..32> --ot-proof <0x..,0x..>"
+    );
+    println!(
+        "  dispute-ot-published --instance-id <id> --verifier-seed <0x..32> --input-bit <n> --round <0|1|2>"
     );
     println!();
     println!("Default command with no args: deposit");
@@ -1061,8 +1229,10 @@ fn main() -> AppResult<()> {
         "evaluate-m" => cmd_evaluate_m(tail),
         "prepare-dispute" => cmd_prepare_dispute(tail),
         "prepare-ot-dispute" => cmd_prepare_ot_dispute(tail),
+        "prepare-ot-dispute-onchain" => cmd_prepare_ot_dispute_onchain(tail),
         "dispute" => cmd_dispute(tail),
         "dispute-ot" => cmd_dispute_ot(tail),
+        "dispute-ot-published" => cmd_dispute_ot_published(tail),
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())

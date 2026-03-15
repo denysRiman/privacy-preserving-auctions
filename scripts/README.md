@@ -1,7 +1,7 @@
 # Local Scripts
 
 - `start_anvil.sh`: starts local Anvil node on `127.0.0.1:8545` with zero-gas defaults (`base_fee=0`, `gas_price=0`).
-- `demo_protocol_cases.sh`: pretty CLI demo of 3 protocol scenarios with 5-second phase pauses.
+- `demo_protocol_cases.sh`: pretty CLI demo of 3 protocol scenarios with 5-second phase pauses, including verifier-seed commit and OT transcript visibility for opened instances.
 
 ## Demo Run
 
@@ -19,6 +19,11 @@ Scenarios:
 - `success`: normal happy path, protocol completes and settles.
 - `alice-cheat`: Alice commits tampered garbling, Bob disputes and slashes Alice.
 - `bob-cheat`: Bob false-challenges honest Alice, Bob is slashed and Alice gets collateral.
+
+Each scenario now also prints OT-specific checkpoints:
+- Bob's verifier seed and commitment
+- exported `rootOT` / OT payload transcript info for one opened instance
+- Bob's `prepare-ot-dispute` view over an honest opened transcript (`selected_leaf_mismatch=false`)
 
 For every scenario, the script deploys contract, then resets balances before Phase 1:
 - Alice starts with `3 ETH`
@@ -53,4 +58,5 @@ You can override defaults by exporting env vars before running:
 - `TX_LEGACY` (default: `1`)
 - `TX_GAS_PRICE_WEI` (default: `0`)
 - `STRICT_BALANCE_CHECK` (default: `1`)
+- `VERIFIER_SEED` or `VERIFIER_SEED_OVERRIDE` to force a specific Bob verifier seed in the demo
 - `BASE_FEE_WEI`/`GAS_PRICE_WEI` for `start_anvil.sh` (both default `0`)

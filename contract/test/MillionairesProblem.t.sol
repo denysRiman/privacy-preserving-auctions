@@ -845,6 +845,146 @@ contract MillionairesTest is Test {
         mp.disputeObliviousTransfer(0, wrongVerifierSeed, 0, 0, payloadHash, proof);
     }
 
+    function test_PublishOpenedOtPayloadHashes_Success() public {
+        bytes32 garblerSeed = keccak256("garbler-seed");
+        bytes32 verifierSeed = _defaultVerifierSeed();
+        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
+
+        _toDisputeWithRoots(
+            garblerSeed,
+            bytes32(0),
+            rootOT,
+            9,
+            _defaultVerifierCommitment()
+        );
+
+        vm.prank(alice);
+        mp.publishOpenedOtPayloadHashes(0, payloads);
+
+        assertTrue(mp.otPayloadsPublished(0));
+        assertEq(mp.getPublishedOtPayloadCount(0), payloads.length);
+        assertEq(mp.getPublishedOtPayloadHash(0, 0), payloads[0]);
+        assertEq(mp.otPayloadsCommitment(0), keccak256(abi.encodePacked(payloads)));
+        assertTrue(mp.allRequiredOtPayloadsPublished());
+    }
+
+    function test_PublishOpenedOtPayloadHashes_BadRoot_Reverts() public {
+        bytes32 garblerSeed = keccak256("garbler-seed");
+        bytes32 verifierSeed = _defaultVerifierSeed();
+        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
+        payloads[0] = bytes32(uint256(payloads[0]) ^ 1);
+
+        _toDisputeWithRoots(
+            garblerSeed,
+            bytes32(0),
+            rootOT,
+            9,
+            _defaultVerifierCommitment()
+        );
+
+        vm.prank(alice);
+        vm.expectRevert("OT root mismatch");
+        mp.publishOpenedOtPayloadHashes(0, payloads);
+    }
+
+    function test_CloseDispute_RequiresOtPayloadPublication() public {
+        bytes32 garblerSeed = keccak256("garbler-seed");
+        bytes32 verifierSeed = _defaultVerifierSeed();
+        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+
+        _toDisputeWithRoots(
+            garblerSeed,
+            bytes32(0),
+            rootOT,
+            9,
+            _defaultVerifierCommitment()
+        );
+
+        vm.prank(bob);
+        vm.expectRevert("OT payloads not fully published");
+        mp.closeDispute();
+    }
+
+    function test_SlashForMissingOtPayloads_SlashesAlice() public {
+        bytes32 garblerSeed = keccak256("garbler-seed");
+        bytes32 verifierSeed = _defaultVerifierSeed();
+        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+
+        _toDisputeWithRoots(
+            garblerSeed,
+            bytes32(0),
+            rootOT,
+            9,
+            _defaultVerifierCommitment()
+        );
+
+        vm.warp(block.timestamp + 2 hours);
+
+        uint256 bobBefore = bob.balance;
+        vm.prank(bob);
+        mp.slashForMissingOtPayloads();
+
+        assertEq(bob.balance, bobBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+    }
+
+    function test_DisputePublishedObliviousTransfer_SlashesAliceOnMismatch() public {
+        bytes32 garblerSeed = keccak256("garbler-seed");
+        bytes32 verifierSeed = _defaultVerifierSeed();
+        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
+        bytes32 badPayloadHash = bytes32(uint256(payloads[0]) ^ 1);
+        payloads[0] = badPayloadHash;
+
+        bytes32[] memory badLeaves = _otLeaves(garblerSeed, verifierSeed, 0);
+        badLeaves[0] = mp.computeOtLeafHash(0, 0, 0, badPayloadHash);
+        bytes32 rootOT = _rootFromLeaves(badLeaves);
+
+        _toDisputeWithRoots(
+            garblerSeed,
+            bytes32(0),
+            rootOT,
+            9,
+            _defaultVerifierCommitment()
+        );
+
+        vm.prank(alice);
+        mp.publishOpenedOtPayloadHashes(0, payloads);
+
+        uint256 bobBefore = bob.balance;
+        vm.prank(bob);
+        mp.disputePublishedObliviousTransfer(0, verifierSeed, 0, 0);
+
+        assertEq(bob.balance, bobBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+    }
+
+    function test_DisputePublishedObliviousTransfer_SlashesBobOnFalseChallenge() public {
+        bytes32 garblerSeed = keccak256("garbler-seed");
+        bytes32 verifierSeed = _defaultVerifierSeed();
+        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
+
+        _toDisputeWithRoots(
+            garblerSeed,
+            bytes32(0),
+            rootOT,
+            9,
+            _defaultVerifierCommitment()
+        );
+
+        vm.prank(alice);
+        mp.publishOpenedOtPayloadHashes(0, payloads);
+
+        uint256 aliceBefore = alice.balance;
+        vm.prank(bob);
+        mp.disputePublishedObliviousTransfer(0, verifierSeed, 0, 0);
+
+        assertEq(alice.balance, aliceBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+    }
+
     function test_SubmitCommitments_BeforeVerifierSeed_Reverts() public {
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
@@ -1028,6 +1168,27 @@ contract MillionairesTest is Test {
                     round
                 );
                 leaves[cursor] = mp.computeOtLeafHash(inputBit, round, author, payloadHash);
+                cursor++;
+            }
+        }
+    }
+
+    function _otPayloadHashes(bytes32 garblerSeed, bytes32 verifierSeed, uint256 instanceId)
+        internal
+        view
+        returns (bytes32[] memory payloads)
+    {
+        payloads = new bytes32[](uint256(BIT_WIDTH) * 3);
+        uint256 cursor = 0;
+        for (uint16 inputBit = 0; inputBit < BIT_WIDTH; inputBit++) {
+            for (uint8 round = 0; round < 3; round++) {
+                payloads[cursor] = mp.computeOtPayloadHash(
+                    garblerSeed,
+                    verifierSeed,
+                    instanceId,
+                    inputBit,
+                    round
+                );
                 cursor++;
             }
         }
