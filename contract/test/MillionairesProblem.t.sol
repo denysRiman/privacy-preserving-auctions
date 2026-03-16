@@ -15,12 +15,6 @@ contract MillionairesProblemHarness is MillionairesProblem {
         return recomputeGateLeafBytes(seed, instanceId, gateIndex, g);
     }
 
-    function computeOtRoot(bytes32 garblerSeed, bytes32 verifierSeed, uint256 instanceId)
-    external view returns (bytes32)
-    {
-        return recomputeOtRoot(garblerSeed, verifierSeed, instanceId);
-    }
-
     function computeOtPayloadHash(bytes32 garblerSeed, bytes32 verifierSeed, uint256 instanceId, uint16 inputBit, uint8 round)
     external view returns (bytes32)
     {
@@ -735,7 +729,7 @@ contract MillionairesTest is Test {
     function test_DisputePublishedObliviousTransfer_RequiresPublishedPayloads_Reverts() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
 
         _toDisputeWithRoots(
             garblerSeed,
@@ -754,7 +748,7 @@ contract MillionairesTest is Test {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
         bytes32 wrongVerifierSeed = keccak256("wrong-verifier-seed");
-        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
         bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
 
         _toDisputeWithRoots(
@@ -776,7 +770,7 @@ contract MillionairesTest is Test {
     function test_PublishOpenedOtPayloadHashes_Success() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
         bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
 
         _toDisputeWithRoots(
@@ -800,7 +794,7 @@ contract MillionairesTest is Test {
     function test_PublishOpenedOtPayloadHashes_BadRoot_Reverts() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
         bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
         payloads[0] = bytes32(uint256(payloads[0]) ^ 1);
 
@@ -820,7 +814,7 @@ contract MillionairesTest is Test {
     function test_CloseDispute_AllowsOnChainOtEvidence() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
         bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
 
         _toDisputeWithRoots(
@@ -842,7 +836,7 @@ contract MillionairesTest is Test {
     function test_CloseDispute_RequiresOtPayloadPublication() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
 
         _toDisputeWithRoots(
             garblerSeed,
@@ -860,7 +854,7 @@ contract MillionairesTest is Test {
     function test_SlashForMissingOtPayloads_SlashesAlice() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
 
         _toDisputeWithRoots(
             garblerSeed,
@@ -913,7 +907,7 @@ contract MillionairesTest is Test {
     function test_DisputePublishedObliviousTransfer_SlashesBobOnFalseChallenge() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
         bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
 
         _toDisputeWithRoots(

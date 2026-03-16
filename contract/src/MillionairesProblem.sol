@@ -778,7 +778,6 @@ contract MillionairesProblem {
         }
         return state;
     }
-
     uint8 private constant OT_ROUNDS_PER_INPUT = 3;
     uint8 private constant OT_DUMMY_CHOICE = 0;
 
@@ -870,38 +869,6 @@ contract MillionairesProblem {
                 verifierRandomness
             )
         );
-    }
-
-    function recomputeOtRoot(bytes32 garblerSeed, bytes32 verifierSeed, uint256 instanceId)
-        internal
-        view
-        returns (bytes32)
-    {
-        bytes32[] memory level = new bytes32[](uint256(bitWidth) * OT_ROUNDS_PER_INPUT);
-        uint256 cursor = 0;
-        for (uint16 i = 0; i < bitWidth; i++) {
-            for (uint8 round = 0; round < OT_ROUNDS_PER_INPUT; round++) {
-                uint8 author = _otMessageAuthor(round);
-                bytes32 payloadHash = _computeOtPayloadHash(garblerSeed, verifierSeed, instanceId, i, round);
-                level[cursor] = _otTranscriptLeafHash(i, round, author, payloadHash);
-                cursor++;
-            }
-        }
-
-        uint256 width = level.length;
-        while (width > 1) {
-            uint256 nextWidth = (width + 1) / 2;
-            for (uint256 i = 0; i < nextWidth; i++) {
-                uint256 leftIndex = 2 * i;
-                uint256 rightIndex = leftIndex + 1;
-                bytes32 left = level[leftIndex];
-                bytes32 right = rightIndex < width ? level[rightIndex] : left;
-                level[i] = _commutativeNodeHash(left, right);
-            }
-            width = nextWidth;
-        }
-
-        return level[0];
     }
 
     function _otRootFromPayloadHashes(bytes32[] calldata payloadHashes) internal view returns (bytes32) {
