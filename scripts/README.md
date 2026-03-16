@@ -1,7 +1,7 @@
 # Local Scripts
 
 - `start_anvil.sh`: starts local Anvil node on `127.0.0.1:8545` with zero-gas defaults (`base_fee=0`, `gas_price=0`).
-- `demo_protocol_cases.sh`: pretty CLI demo of 3 protocol scenarios with 5-second phase pauses, including verifier-seed commit and OT transcript visibility for opened instances.
+- `demo_protocol_cases.sh`: pretty CLI demo of 3 protocol scenarios with 1-second phase pauses by default, including verifier-seed commit and OT transcript visibility for opened instances.
 
 ## Demo Run
 
@@ -23,7 +23,7 @@ Scenarios:
 Each scenario now also prints OT-specific checkpoints:
 - Bob's verifier seed and commitment
 - exported `rootOT` / OT payload transcript info for one opened instance
-- Bob's `prepare-ot-dispute` view over an honest opened transcript (`selected_leaf_mismatch=false`)
+- Bob's `prepare-ot-dispute` view (from on-chain published payloads) over an honest opened transcript (`selected_leaf_mismatch=false`)
 
 For every scenario, the script deploys contract, then resets balances before Phase 1:
 - Alice starts with `3 ETH`
@@ -51,7 +51,7 @@ You can override defaults by exporting env vars before running:
 - `BIT_WIDTH`
 - `M_CHOICE` (`random` by default, or fixed integer `0..9`)
 - `DEPOSIT_WEI`
-- `PAUSE_SECONDS` (default: `5`)
+- `PAUSE_SECONDS` (default: `1`)
 - `WORK_ROOT` (default: `/tmp/auction-demo-cases`)
 - `ALICE_START_BALANCE_HEX` (default: `0x29a2241af62c0000`, 3 ETH)
 - `BOB_START_BALANCE_HEX` (default: `0x4563918244f40000`, 5 ETH)

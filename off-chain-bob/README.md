@@ -1,8 +1,8 @@
 # off-chain-bob
 
 Bob backend CLI for the protocol flow:
-- on-chain actions (`deposit`, `commit-verifier-seed`, `choose`, `dispute`, `dispute-ot`, `dispute-ot-published`)
-- off-chain dispute packet preparation (`prepare-dispute`, `prepare-ot-dispute`, `prepare-ot-dispute-onchain`) using `off-chain-common` consensus logic
+- on-chain actions (`deposit`, `commit-verifier-seed`, `choose`, `dispute`, `dispute-ot`)
+- off-chain dispute packet preparation (`prepare-dispute`, `prepare-ot-dispute`) using `off-chain-common` consensus logic
 
 ## Required environment variables (for on-chain commands)
 - `CONTRACT_ADDRESS`: deployed `MillionairesProblem` address
@@ -17,11 +17,9 @@ Bob backend CLI for the protocol flow:
 - `commit-verifier-seed [--seed <0x..32>]`
 - `choose --m <index>`
 - `prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]`
-- `prepare-ot-dispute --instance-id <id> --verifier-seed <0x..32> --claimed-payloads-file <path> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]`
-- `prepare-ot-dispute-onchain --instance-id <id> --verifier-seed <0x..32> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]`
+- `prepare-ot-dispute --instance-id <id> --verifier-seed <0x..32> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]`
 - `dispute --instance-id <id> --seed <0x..32> --gate-index <k> --gate-type <0|1|2> --wire-a <u16> --wire-b <u16> --wire-c <u16> --leaf-bytes <0x..71> --ih-proof <0x..,0x..> --layout-proof <0x..,0x..>`
-- `dispute-ot --instance-id <id> --verifier-seed <0x..32> --input-bit <n> --round <0|1|2> --payload-hash <0x..32> --ot-proof <0x..,0x..>`
-- `dispute-ot-published --instance-id <id> --verifier-seed <0x..32> --input-bit <n> --round <0|1|2>`
+- `dispute-ot --instance-id <id> --verifier-seed <0x..32> --input-bit <n> --round <0|1|2>`
 
 ## Typical usage
 ```bash
@@ -52,16 +50,8 @@ cargo run --offline -- prepare-dispute \
   --claimed-leaves-file /path/to/instance0_leaves.txt \
   --bit-width 8
 
-# 5) Bob prepares OT dispute packet from claimed public OT transcript payloads
+# 5) Bob prepares OT dispute packet from OT payload hashes already published on-chain by Alice
 cargo run --offline -- prepare-ot-dispute \
-  --instance-id 0 \
-  --garbler-seed 0x... \
-  --verifier-seed 0x... \
-  --claimed-payloads-file /path/to/instance0-ot-payloads.txt \
-  --bit-width 8
-
-# 5b) Preferred in current protocol: read OT payloads directly from contract storage
-cargo run --offline -- prepare-ot-dispute-onchain \
   --instance-id 0 \
   --garbler-seed 0x... \
   --verifier-seed 0x... \
@@ -78,10 +68,6 @@ cargo run --offline -- prepare-ot-dispute-onchain \
 - mismatch summary (`mismatch_locations`)
 - selected OT `(inputBit, round, author)`
 - `rootOT`, selected `payloadHash`, and `otProof`
-- ready-to-run `cast send` template for `disputeObliviousTransfer`
-
-`prepare-ot-dispute-onchain` prints:
-- the same mismatch and selected leaf fields
 - values derived from OT payload hashes already published on-chain by Alice
 - ready-to-run `cast send` template for `disputePublishedObliviousTransfer`
 
@@ -90,13 +76,6 @@ cargo run --offline -- prepare-ot-dispute-onchain \
 - `0x...` prefix supported
 - empty lines and `# comments` are ignored
 
-## Claimed OT payload file format
-- one `bytes32` payload hash hex per line
-- order must match Solidity replay order: `(inputBit=0, round=0..2)`, then `(inputBit=1, round=0..2)`, etc.
-- `0x...` prefix supported
-- empty lines and `# comments` are ignored
-
 ## Notes
 - OT dispute evidence is single-mode in this repo: Alice publishes opened OT payload hashes on-chain.
-- Use `prepare-ot-dispute-onchain + dispute-ot-published` as the default path.
-- `prepare-ot-dispute + dispute-ot` remains available for explicit proof-vector testing from a local payload file.
+- Use `prepare-ot-dispute + dispute-ot` for the OT dispute flow.

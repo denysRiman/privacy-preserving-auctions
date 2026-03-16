@@ -13,7 +13,7 @@ BOB_PK="${BOB_PK:-${BOB_PRIVATE_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae
 BIT_WIDTH="${BIT_WIDTH:-8}"
 M_CHOICE="${M_CHOICE:-random}"
 DEPOSIT_WEI="${DEPOSIT_WEI:-1000000000000000000}"
-PAUSE_SECONDS="${PAUSE_SECONDS:-5}"
+PAUSE_SECONDS="${PAUSE_SECONDS:-1}"
 WORK_ROOT="${WORK_ROOT:-/tmp/auction-demo-cases}"
 ALICE_START_BALANCE_HEX="${ALICE_START_BALANCE_HEX:-0x29a2241af62c0000}" # 3 ETH
 BOB_START_BALANCE_HEX="${BOB_START_BALANCE_HEX:-0x4563918244f40000}"     # 5 ETH
@@ -97,7 +97,6 @@ wait_phase() {
   if [[ "${PAUSE_SECONDS}" -le 0 ]]; then
     return
   fi
-  echo "  waiting ${PAUSE_SECONDS}s..."
   sleep "${PAUSE_SECONDS}"
 }
 
@@ -224,9 +223,36 @@ wei_to_eth_safe() {
   local wei
   wei="$(first_token "${raw}")"
   if [[ "${wei}" =~ ^[0-9]+$ ]]; then
-    cast from-wei "${wei}"
+    format_eth_compact "$(cast from-wei "${wei}")"
   else
     echo "${raw}"
+  fi
+}
+
+format_eth_compact() {
+  local raw="$1"
+  local token
+  local compact
+
+  token="$(first_token "${raw}")"
+  if [[ ! "${token}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "${raw}"
+    return
+  fi
+
+  compact="$(printf '%s' "${token}" | sed -E 's/(\.[0-9]*[1-9])0+$/\1/; s/\.0+$/.0/')"
+  if [[ "${compact}" =~ ^[0-9]+$ ]]; then
+    compact="${compact}.0"
+  fi
+  echo "${compact}"
+}
+
+short_hash32() {
+  local value="$1"
+  if [[ "${value}" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+    echo "${value:0:10}...${value:58:8}"
+  else
+    echo "${value}"
   fi
 }
 
@@ -237,52 +263,84 @@ compact_cli_output() {
 
   case "${actor}:${command}" in
     alice:deposit)
-      local tx before after vault
-      tx="$(extract_kv_from_text deposit_tx_hash "${raw}")"
+      local before after vault
       before="$(extract_kv_from_text alice_wallet_before "${raw}")"
       after="$(extract_kv_from_text alice_wallet_after "${raw}")"
       vault="$(extract_kv_from_text alice_vault "${raw}")"
-      [[ -n "${tx}" ]] && echo "  tx=${tx}"
       [[ -n "${before}" && -n "${after}" ]] && echo "  alice_wallet: $(wei_to_eth_safe "${before}") ETH -> $(wei_to_eth_safe "${after}") ETH"
       [[ -n "${vault}" ]] && echo "  alice_vault: $(wei_to_eth_safe "${vault}") ETH"
       ;;
     bob:deposit)
-      local tx before after vault
-      tx="$(extract_kv_from_text deposit_tx_hash "${raw}")"
+      local before after vault
       before="$(extract_kv_from_text bob_wallet_before "${raw}")"
       after="$(extract_kv_from_text bob_wallet_after "${raw}")"
       vault="$(extract_kv_from_text bob_vault "${raw}")"
-      [[ -n "${tx}" ]] && echo "  tx=${tx}"
       [[ -n "${before}" && -n "${after}" ]] && echo "  bob_wallet: $(wei_to_eth_safe "${before}") ETH -> $(wei_to_eth_safe "${after}") ETH"
       [[ -n "${vault}" ]] && echo "  bob_vault: $(wei_to_eth_safe "${vault}") ETH"
       ;;
     alice:submit-commitments)
-      local tx
-      tx="$(extract_kv_from_text submit_commitments_tx_hash "${raw}")"
-      [[ -n "${tx}" ]] && echo "  tx=${tx}"
+      local circuit_id bit_width root_ot_nonzero instance0_line instance9_line
+      local com0 rootgc0 rootot0 com9 rootgc9 rootot9
+      circuit_id="$(extract_kv_from_text circuit_id "${raw}")"
+      bit_width="$(extract_kv_from_text bit_width "${raw}")"
+      root_ot_nonzero="$(
+        printf '%s\n' "${raw}" \
+          | sed -nE 's/.* rootOT=(0x[0-9a-fA-F]{64}).*/\1/p' \
+          | grep -Evc '^0x0{64}$' || true
+      )"
+      instance0_line="$(printf '%s\n' "${raw}" | sed -nE '/^instance=0 /p' | head -n1)"
+      instance9_line="$(printf '%s\n' "${raw}" | sed -nE "/^instance=$((CUT_AND_CHOOSE_N - 1)) /p" | head -n1)"
+
+      com0="$(printf '%s\n' "${instance0_line}" | sed -nE 's/.*comSeed=(0x[0-9a-fA-F]{64}).*/\1/p')"
+      rootgc0="$(printf '%s\n' "${instance0_line}" | sed -nE 's/.*rootGC=(0x[0-9a-fA-F]{64}).*/\1/p')"
+      rootot0="$(printf '%s\n' "${instance0_line}" | sed -nE 's/.*rootOT=(0x[0-9a-fA-F]{64}).*/\1/p')"
+      com9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*comSeed=(0x[0-9a-fA-F]{64}).*/\1/p')"
+      rootgc9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*rootGC=(0x[0-9a-fA-F]{64}).*/\1/p')"
+      rootot9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*rootOT=(0x[0-9a-fA-F]{64}).*/\1/p')"
+
+      echo "  submitted_by=Alice (garbler)"
+      [[ -n "${bit_width}" ]] && echo "  bit_width=${bit_width}"
+      [[ -n "${circuit_id}" ]] && echo "  circuit_id=$(short_hash32 "${circuit_id}")"
       echo "  commitments_submitted=${CUT_AND_CHOOSE_N}"
+      [[ -n "${root_ot_nonzero}" ]] && echo "  rootOT_nonzero=${root_ot_nonzero}/${CUT_AND_CHOOSE_N}"
+      [[ -n "${com0}" || -n "${rootgc0}" || -n "${rootot0}" ]] && \
+        echo "  instance_0: comSeed=$(short_hash32 "${com0}") rootGC=$(short_hash32 "${rootgc0}") rootOT=$(short_hash32 "${rootot0}")"
+      [[ -n "${com9}" || -n "${rootgc9}" || -n "${rootot9}" ]] && \
+        echo "  instance_9: comSeed=$(short_hash32 "${com9}") rootGC=$(short_hash32 "${rootgc9}") rootOT=$(short_hash32 "${rootot9}")"
       ;;
     alice:reveal-openings)
-      local tx
-      tx="$(extract_kv_from_text reveal_openings_tx_hash "${raw}")"
-      [[ -n "${tx}" ]] && echo "  tx=${tx}"
+      local m open_indices cleaned opened_count
+      m="$(extract_kv_from_text m "${raw}")"
+      open_indices="$(extract_kv_from_text open_indices "${raw}")"
+      [[ -n "${m}" ]] && echo "  evaluation_instance_m=${m}"
+
+      if [[ -n "${open_indices}" ]]; then
+        cleaned="$(printf '%s' "${open_indices}" | tr -d '[][:space:]')"
+        opened_count=0
+        if [[ -n "${cleaned}" ]]; then
+          local -a idx_arr
+          IFS=',' read -r -a idx_arr <<< "${cleaned}"
+          opened_count="${#idx_arr[@]}"
+        fi
+        echo "  opened_instances_count=${opened_count}"
+        echo "  opened_instances=${open_indices}"
+      fi
       ;;
     alice:publish-ot-payloads)
-      local tx instance payload_count payload_commitment
-      tx="$(extract_kv_from_text publish_ot_payloads_tx_hash "${raw}")"
+      local instance payload_commitment
       instance="$(extract_kv_from_text instance_id "${raw}")"
-      payload_count="$(extract_kv_from_text payload_count "${raw}")"
       payload_commitment="$(extract_kv_from_text payload_commitment "${raw}")"
-      [[ -n "${tx}" ]] && echo "  tx=${tx}"
-      [[ -n "${instance}" ]] && echo "  opened_instance=${instance}"
-      [[ -n "${payload_count}" ]] && echo "  payload_count=${payload_count}"
-      [[ -n "${payload_commitment}" ]] && echo "  payload_commitment=${payload_commitment}"
+      if [[ -n "${instance}" && -n "${payload_commitment}" ]]; then
+        echo "  instance ${instance} - ${payload_commitment}"
+      elif [[ -n "${instance}" ]]; then
+        echo "  instance ${instance}"
+      elif [[ -n "${payload_commitment}" ]]; then
+        echo "  payload_commitment=${payload_commitment}"
+      fi
       ;;
     alice:reveal-labels)
-      local tx labels_count
-      tx="$(extract_kv_from_text reveal_labels_tx_hash "${raw}")"
+      local labels_count
       labels_count="$(extract_kv_from_text labels_count "${raw}")"
-      [[ -n "${tx}" ]] && echo "  tx=${tx}"
       [[ -n "${labels_count}" ]] && echo "  labels_count=${labels_count}"
       ;;
     alice:export-artifacts)
@@ -302,16 +360,11 @@ compact_cli_output() {
       [[ -n "${h1}" ]] && echo "  h1(m)=${h1}"
       ;;
     bob:choose)
-      local tx
-      tx="$(extract_kv_from_text choose_tx_hash "${raw}")"
-      [[ -n "${tx}" ]] && echo "  tx=${tx}"
       ;;
     bob:commit-verifier-seed)
-      local tx seed commitment
-      tx="$(extract_kv_from_text commit_verifier_seed_tx_hash "${raw}")"
+      local seed commitment
       seed="$(extract_kv_from_text verifier_seed "${raw}")"
       commitment="$(extract_kv_from_text verifier_seed_commitment "${raw}")"
-      [[ -n "${tx}" ]] && echo "  tx=${tx}"
       [[ -n "${seed}" ]] && echo "  verifier_seed=${seed}"
       [[ -n "${commitment}" ]] && echo "  verifier_seed_commitment=${commitment}"
       ;;
@@ -324,7 +377,7 @@ compact_cli_output() {
       [[ -n "${decoded}" ]] && echo "  decoded_bit=${decoded}"
       [[ -n "${output_label}" ]] && echo "  output_label=${output_label}"
       ;;
-    bob:prepare-ot-dispute|bob:prepare-ot-dispute-onchain)
+    bob:prepare-ot-dispute)
       local mismatch_count selected_mismatch input_bit round author root_ot
       mismatch_count="$(extract_kv_from_text mismatch_count "${raw}")"
       selected_mismatch="$(extract_kv_from_text selected_leaf_mismatch "${raw}")"
@@ -339,9 +392,6 @@ compact_cli_output() {
       [[ -n "${root_ot}" ]] && echo "  rootOT=${root_ot}"
       ;;
     bob:dispute)
-      local tx
-      tx="$(extract_kv_from_text dispute_tx_hash "${raw}")"
-      [[ -n "${tx}" ]] && echo "  tx=${tx}"
       ;;
     *)
       ;;
@@ -575,10 +625,8 @@ print_balance_snapshot() {
   local bob_wei
   alice_wei="$(cast balance "${ALICE_ADDR}" --rpc-url "${RPC_URL}")"
   bob_wei="$(cast balance "${BOB_ADDR}" --rpc-url "${RPC_URL}")"
-  echo "${label}_alice_wei=${alice_wei}"
-  echo "${label}_alice_eth=$(cast from-wei "${alice_wei}")"
-  echo "${label}_bob_wei=${bob_wei}"
-  echo "${label}_bob_eth=$(cast from-wei "${bob_wei}")"
+  echo "${label}_alice_eth=$(format_eth_compact "$(cast from-wei "${alice_wei}")")"
+  echo "${label}_bob_eth=$(format_eth_compact "$(cast from-wei "${bob_wei}")")"
 }
 
 report_and_assert_final_balances() {
@@ -589,14 +637,10 @@ report_and_assert_final_balances() {
   actual_alice_wei="$(cast balance "${ALICE_ADDR}" --rpc-url "${RPC_URL}")"
   actual_bob_wei="$(cast balance "${BOB_ADDR}" --rpc-url "${RPC_URL}")"
 
-  echo "final_alice_wei=${actual_alice_wei}"
-  echo "final_alice_eth=$(cast from-wei "${actual_alice_wei}")"
-  echo "final_bob_wei=${actual_bob_wei}"
-  echo "final_bob_eth=$(cast from-wei "${actual_bob_wei}")"
-  echo "expected_alice_wei=${expected_alice_wei}"
-  echo "expected_alice_eth=$(cast from-wei "${expected_alice_wei}")"
-  echo "expected_bob_wei=${expected_bob_wei}"
-  echo "expected_bob_eth=$(cast from-wei "${expected_bob_wei}")"
+  echo "final_alice_eth=$(format_eth_compact "$(cast from-wei "${actual_alice_wei}")")"
+  echo "final_bob_eth=$(format_eth_compact "$(cast from-wei "${actual_bob_wei}")")"
+  echo "expected_alice_eth=$(format_eth_compact "$(cast from-wei "${expected_alice_wei}")")"
+  echo "expected_bob_eth=$(format_eth_compact "$(cast from-wei "${expected_bob_wei}")")"
 
   if is_truthy "${STRICT_BALANCE_CHECK}"; then
     if [[ "${actual_alice_wei}" != "${expected_alice_wei}" || "${actual_bob_wei}" != "${expected_bob_wei}" ]]; then
@@ -635,52 +679,53 @@ common_bootstrap() {
 }
 
 show_ot_visibility() {
-  local out_dir="$1"
-  local instance_id="$2"
-  local title="${3:-OT visibility check}"
-  local seed_file="${out_dir}/instance-${instance_id}-seed.txt"
-  local root_ot_file="${out_dir}/instance-${instance_id}-root-ot.txt"
-  local payloads_file="${out_dir}/instance-${instance_id}-ot-payloads.txt"
+  local instance_id="$1"
+  local title="${2:-OT visibility check}"
 
-  if [[ ! -f "${seed_file}" || ! -f "${root_ot_file}" || ! -f "${payloads_file}" ]]; then
-    echo "Missing OT artifacts for instance ${instance_id} in ${out_dir}" >&2
+  local seed
+  seed="$(cast call "${CONTRACT_ADDRESS}" "revealedSeeds(uint256)(bytes32)" "${instance_id}" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
+  if [[ ! "${seed}" =~ ^0x[0-9a-fA-F]{64}$ ]] || [[ "${seed}" == "0x0000000000000000000000000000000000000000000000000000000000000000" ]]; then
+    echo "Missing on-chain revealed seed for opened instance ${instance_id}" >&2
     exit 1
   fi
 
-  local seed
-  local root_ot
+  local payload_count_raw
+  payload_count_raw="$(cast call "${CONTRACT_ADDRESS}" "getPublishedOtPayloadCount(uint256)(uint256)" "${instance_id}" --rpc-url "${RPC_URL}")"
   local payload_count
+  payload_count="$(first_token "${payload_count_raw}")"
+  if ! [[ "${payload_count}" =~ ^[0-9]+$ ]] || [[ "${payload_count}" -eq 0 ]]; then
+    echo "No on-chain OT payload hashes published for opened instance ${instance_id}" >&2
+    exit 1
+  fi
+
   local first_payload
+  first_payload="$(cast call "${CONTRACT_ADDRESS}" "getPublishedOtPayloadHash(uint256,uint256)(bytes32)" "${instance_id}" 0 --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
+  local last_index=$((payload_count - 1))
   local last_payload
-  seed="$(tr -d '[:space:]' < "${seed_file}")"
-  root_ot="$(tr -d '[:space:]' < "${root_ot_file}")"
-  payload_count="$(wc -l < "${payloads_file}" | tr -d '[:space:]')"
-  first_payload="$(sed -n '1p' "${payloads_file}")"
-  last_payload="$(tail -n 1 "${payloads_file}")"
+  last_payload="$(cast call "${CONTRACT_ADDRESS}" "getPublishedOtPayloadHash(uint256,uint256)(bytes32)" "${instance_id}" "${last_index}" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
 
   phase "${title}"
   echo "  opened_instance=${instance_id}"
   echo "  verifier_seed=${VERIFIER_SEED_HEX}"
   echo "  verifier_seed_commitment=${VERIFIER_SEED_COMMITMENT}"
-  echo "  payload_file=${payloads_file}"
+  echo "  payload_source=onchain"
   echo "  payload_count=${payload_count}"
   [[ -n "${first_payload}" ]] && echo "  payload_0=${first_payload}"
   [[ -n "${last_payload}" ]] && echo "  payload_last=${last_payload}"
 
   local ot_raw
   ot_raw="$(
-    run_bob_raw prepare-ot-dispute-onchain \
+    run_bob_raw prepare-ot-dispute \
       --instance-id "${instance_id}" \
       --garbler-seed "${seed}" \
       --verifier-seed "${VERIFIER_SEED_HEX}" \
       --bit-width "${BIT_WIDTH}" \
       --circuit-id "${CIRCUIT_ID}" \
-      --expected-root-ot "${root_ot}" \
       --input-bit 0 \
       --round 0 \
       --allow-false-challenge
   )"
-  compact_cli_output "bob" "prepare-ot-dispute-onchain" "${ot_raw}"
+  compact_cli_output "bob" "prepare-ot-dispute" "${ot_raw}"
 }
 
 scenario_success() {
@@ -725,6 +770,8 @@ scenario_success() {
 
   phase "Phase 4: Bob chooses m"
   run_bob choose --m "${m_choice}"
+  echo "  selected_m=${m_choice}"
+  echo "  opened_instances_expected=$((CUT_AND_CHOOSE_N - 1))"
   wait_phase
 
   phase "Phase 5: Alice reveals openings"
@@ -739,7 +786,7 @@ scenario_success() {
 
   local challenge_instance
   challenge_instance="$(choose_challenge_instance "${m_choice}")"
-  show_ot_visibility "${out_dir}" "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
+  show_ot_visibility "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
   wait_phase
 
   phase "Phase 7: Bob closes dispute window"
@@ -878,6 +925,8 @@ scenario_alice_cheats() {
 
   phase "Phase 4: Bob chooses m"
   run_bob choose --m "${m_choice}"
+  echo "  selected_m=${m_choice}"
+  echo "  opened_instances_expected=$((CUT_AND_CHOOSE_N - 1))"
   wait_phase
 
   phase "Phase 5: Alice reveals openings"
@@ -890,7 +939,7 @@ scenario_alice_cheats() {
   publish_opened_ot_payloads_onchain "${out_dir}" "${m_choice}"
   wait_phase
 
-  show_ot_visibility "${out_dir}" "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
+  show_ot_visibility "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
   wait_phase
 
   phase "Phase 7: Bob disputes one tampered GC node"
@@ -967,6 +1016,8 @@ scenario_bob_cheats() {
 
   phase "Phase 4: Bob chooses m"
   run_bob choose --m "${m_choice}"
+  echo "  selected_m=${m_choice}"
+  echo "  opened_instances_expected=$((CUT_AND_CHOOSE_N - 1))"
   wait_phase
 
   phase "Phase 5: Alice reveals openings"
@@ -979,7 +1030,7 @@ scenario_bob_cheats() {
   publish_opened_ot_payloads_onchain "${out_dir}" "${m_choice}"
   wait_phase
 
-  show_ot_visibility "${out_dir}" "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
+  show_ot_visibility "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
   wait_phase
 
   phase "Phase 7: Bob submits false GC challenge"

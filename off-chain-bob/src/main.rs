@@ -117,47 +117,6 @@ fn read_claimed_leaves_file(path: &Path) -> AppResult<Vec<[u8; 71]>> {
     Ok(leaves)
 }
 
-fn read_bytes32_lines_file(path: &Path) -> AppResult<Vec<[u8; 32]>> {
-    let raw = fs::read_to_string(path)?;
-    let mut values = Vec::new();
-
-    for (line_idx, line) in raw.lines().enumerate() {
-        let mut value = line
-            .split('#')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .trim_end_matches(',')
-            .trim()
-            .trim_matches('"')
-            .trim();
-
-        if value.is_empty() {
-            continue;
-        }
-
-        value = value.trim_start_matches('[').trim_end_matches(']');
-        if value.is_empty() {
-            continue;
-        }
-
-        let parsed = parse_bytes32(value).map_err(|e| {
-            format!(
-                "invalid bytes32 value at {}:{}: {}",
-                path.display(),
-                line_idx + 1,
-                e
-            )
-        })?;
-        values.push(parsed);
-    }
-
-    if values.is_empty() {
-        return Err(format!("No bytes32 values found in {}", path.display()).into());
-    }
-    Ok(values)
-}
-
 fn fetch_onchain_ot_payload_hashes(
     contract_address: &str,
     rpc_url: &str,
@@ -811,104 +770,6 @@ fn cmd_prepare_ot_dispute(args: &[String]) -> AppResult<()> {
         parse_bytes32(&required_flag_value(args, "--seed")?)?
     };
     let verifier_seed = parse_bytes32(&required_flag_value(args, "--verifier-seed")?)?;
-    let claimed_payloads_file = required_flag_value(args, "--claimed-payloads-file")?;
-    let input_bit = parse_flag_value(args, "--input-bit")
-        .as_deref()
-        .map(|v| parse_u16(v, "input-bit"))
-        .transpose()?;
-    let round = parse_flag_value(args, "--round")
-        .as_deref()
-        .map(|v| parse_u8(v, "round"))
-        .transpose()?;
-    let allow_false_challenge = args.iter().any(|arg| arg == "--allow-false-challenge");
-    let expected_root_ot = parse_flag_value(args, "--expected-root-ot")
-        .as_deref()
-        .map(parse_bytes32)
-        .transpose()?;
-    let circuit_id = parse_flag_value(args, "--circuit-id")
-        .as_deref()
-        .map(parse_bytes32)
-        .transpose()?
-        .unwrap_or_else(|| keccak256(&[b"millionaires-yao-v1"]));
-
-    let claimed_payload_hashes = read_bytes32_lines_file(Path::new(&claimed_payloads_file))?;
-    let config = PrepareOtDisputeConfig {
-        bit_width,
-        circuit_id,
-        instance_id,
-        garbler_seed,
-        verifier_seed,
-        claimed_payload_hashes,
-        input_bit,
-        round,
-        allow_false_challenge,
-        expected_root_ot,
-    };
-    let prepared = prepare_ot_dispute_packet(&config)?;
-    let selected_is_mismatch = prepared
-        .mismatch_locations
-        .contains(&(prepared.input_bit, prepared.round));
-
-    println!("status=prepared");
-    println!("bit_width={bit_width}");
-    println!("circuit_id={}", hex32(circuit_id));
-    println!("instance_id={instance_id}");
-    println!("garbler_seed={}", hex32(garbler_seed));
-    println!("verifier_seed={}", hex32(verifier_seed));
-    println!(
-        "verifier_seed_commitment={}",
-        hex32(verifier_seed_commitment(verifier_seed))
-    );
-    println!("selected_input_bit={}", prepared.input_bit);
-    println!("selected_round={}", prepared.round);
-    println!("selected_author={}", prepared.author);
-    println!("selected_leaf_mismatch={selected_is_mismatch}");
-    println!("mismatch_count={}", prepared.mismatch_locations.len());
-    println!("mismatch_locations={:?}", prepared.mismatch_locations);
-    println!("root_ot={}", hex32(prepared.root_ot));
-    println!(
-        "claimed_payload_hash={}",
-        hex32(prepared.claimed_payload_hash)
-    );
-    println!(
-        "expected_payload_hash={}",
-        hex32(prepared.expected_payload_hash)
-    );
-    println!("ot_proof={}", bytes32_vec_literal(&prepared.ot_proof));
-
-    let contract_for_template =
-        env::var("CONTRACT_ADDRESS").unwrap_or_else(|_| "<CONTRACT_ADDRESS>".to_string());
-    let rpc_for_template = rpc_url();
-    println!();
-    println!("cast send template:");
-    println!(
-        "cast send {} \"disputeObliviousTransfer(uint256,bytes32,uint16,uint8,bytes32,bytes32[])\" {} {} {} {} {} \"{}\" --private-key <BOB_PRIVATE_KEY> --rpc-url {}",
-        contract_for_template,
-        instance_id,
-        hex32(verifier_seed),
-        prepared.input_bit,
-        prepared.round,
-        hex32(prepared.claimed_payload_hash),
-        bytes32_vec_literal(&prepared.ot_proof),
-        rpc_for_template
-    );
-
-    Ok(())
-}
-
-fn cmd_prepare_ot_dispute_onchain(args: &[String]) -> AppResult<()> {
-    let bit_width = parse_flag_value(args, "--bit-width")
-        .as_deref()
-        .map(|v| parse_u64(v, "bit-width"))
-        .transpose()?
-        .unwrap_or(8) as usize;
-    let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
-    let garbler_seed = if let Some(raw) = parse_flag_value(args, "--garbler-seed") {
-        parse_bytes32(&raw)?
-    } else {
-        parse_bytes32(&required_flag_value(args, "--seed")?)?
-    };
-    let verifier_seed = parse_bytes32(&required_flag_value(args, "--verifier-seed")?)?;
     let input_bit = parse_flag_value(args, "--input-bit")
         .as_deref()
         .map(|v| parse_u16(v, "input-bit"))
@@ -1138,38 +999,6 @@ fn cmd_dispute_ot(args: &[String]) -> AppResult<()> {
     let verifier_seed = parse_bytes32(&required_flag_value(args, "--verifier-seed")?)?;
     let input_bit = parse_u16(&required_flag_value(args, "--input-bit")?, "input-bit")?;
     let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
-    let payload_hash = parse_bytes32(&required_flag_value(args, "--payload-hash")?)?;
-    let ot_proof = parse_bytes32_list_csv(&required_flag_value(args, "--ot-proof")?)?;
-
-    let tx_result = run_cast(&[
-        "send".to_string(),
-        contract_address,
-        "disputeObliviousTransfer(uint256,bytes32,uint16,uint8,bytes32,bytes32[])".to_string(),
-        instance_id.to_string(),
-        hex32(verifier_seed),
-        input_bit.to_string(),
-        round.to_string(),
-        hex32(payload_hash),
-        bytes32_vec_literal(&ot_proof),
-        "--private-key".to_string(),
-        bob_private_key,
-        "--rpc-url".to_string(),
-        rpc_url,
-    ])?;
-
-    print_tx_summary("dispute_ot", &tx_result);
-    Ok(())
-}
-
-fn cmd_dispute_ot_published(args: &[String]) -> AppResult<()> {
-    let rpc_url = rpc_url();
-    let contract_address = required_env("CONTRACT_ADDRESS")?;
-    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
-
-    let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
-    let verifier_seed = parse_bytes32(&required_flag_value(args, "--verifier-seed")?)?;
-    let input_bit = parse_u16(&required_flag_value(args, "--input-bit")?, "input-bit")?;
-    let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
 
     let tx_result = run_cast(&[
         "send".to_string(),
@@ -1185,7 +1014,7 @@ fn cmd_dispute_ot_published(args: &[String]) -> AppResult<()> {
         rpc_url,
     ])?;
 
-    print_tx_summary("dispute_ot_published", &tx_result);
+    print_tx_summary("dispute_ot", &tx_result);
     Ok(())
 }
 
@@ -1199,19 +1028,13 @@ fn print_help() {
         "  prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]"
     );
     println!(
-        "  prepare-ot-dispute --instance-id <id> --verifier-seed <0x..32> --claimed-payloads-file <path> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]"
-    );
-    println!(
-        "  prepare-ot-dispute-onchain --instance-id <id> --verifier-seed <0x..32> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]"
+        "  prepare-ot-dispute --instance-id <id> --verifier-seed <0x..32> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]"
     );
     println!(
         "  dispute --instance-id <id> --seed <0x..32> --gate-index <k> --gate-type <0|1|2> --wire-a <u16> --wire-b <u16> --wire-c <u16> --leaf-bytes <0x..71> --ih-proof <0x..,0x..> --layout-proof <0x..,0x..>"
     );
     println!(
-        "  dispute-ot --instance-id <id> --verifier-seed <0x..32> --input-bit <n> --round <0|1|2> --payload-hash <0x..32> --ot-proof <0x..,0x..>"
-    );
-    println!(
-        "  dispute-ot-published --instance-id <id> --verifier-seed <0x..32> --input-bit <n> --round <0|1|2>"
+        "  dispute-ot --instance-id <id> --verifier-seed <0x..32> --input-bit <n> --round <0|1|2>"
     );
     println!();
     println!("Default command with no args: deposit");
@@ -1229,10 +1052,8 @@ fn main() -> AppResult<()> {
         "evaluate-m" => cmd_evaluate_m(tail),
         "prepare-dispute" => cmd_prepare_dispute(tail),
         "prepare-ot-dispute" => cmd_prepare_ot_dispute(tail),
-        "prepare-ot-dispute-onchain" => cmd_prepare_ot_dispute_onchain(tail),
         "dispute" => cmd_dispute(tail),
         "dispute-ot" => cmd_dispute_ot(tail),
-        "dispute-ot-published" => cmd_dispute_ot_published(tail),
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())
@@ -1406,21 +1227,4 @@ mod tests {
         assert!(err.to_string().contains("refusing false challenge"));
     }
 
-    #[test]
-    fn reads_bytes32_lines_file() {
-        let value = [0xcdu8; 32];
-        let path = {
-            let millis = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time")
-                .as_millis();
-            env::temp_dir().join(format!("claimed-payloads-{millis}.txt"))
-        };
-
-        fs::write(&path, format!("{}\n", hex32(value))).expect("write temp file");
-        let parsed = read_bytes32_lines_file(&path).expect("parse payloads");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0], value);
-        let _ = fs::remove_file(path);
-    }
 }

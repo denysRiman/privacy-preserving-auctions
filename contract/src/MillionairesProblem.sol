@@ -729,35 +729,8 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 6 (Dispute): challenge one OT transcript leaf under `rootOT`.
-     * For opened check-circuits (`instanceId != m`) Bob uses dummy OT choices, so replay is deterministic.
-     * If the committed leaf differs from the replayed leaf, the transcript author is slashed.
-     * If the leaf matches, the challenger lied and is slashed.
-     */
-    function disputeObliviousTransfer(
-        uint256 instanceId,
-        bytes32 verifierSeed,
-        uint16 inputBit,
-        uint8 round,
-        bytes32 payloadHash,
-        bytes32[] calldata otProof
-    ) external {
-        require(currentStage == Stage.Dispute, "Wrong stage");
-        require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
-        require(msg.sender == alice || msg.sender == bob, "Only participants can dispute");
-        require(instanceId != m, "Cannot dispute evaluation circuit m");
-        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
-        require(
-            keccak256(abi.encodePacked(verifierSeed)) == verifierSeedCommitment,
-            "Invalid verifier seed"
-        );
-
-        challengeOtLeaf(instanceId, verifierSeed, inputBit, round, payloadHash, otProof);
-    }
-
-    /**
-     * @dev Phase 6 (Dispute): challenge OT transcript leaf using payload hashes published on-chain by Alice.
-     * This path removes off-chain payload-file trust assumptions for opened check-circuits.
+     * @dev Phase 6 (Dispute): single OT challenge path using payload hashes published on-chain by Alice.
+     * For opened check-circuits (`instanceId != m`) replay is deterministic under revealed garbler seed + verifier seed.
      */
     function disputePublishedObliviousTransfer(
         uint256 instanceId,
@@ -957,33 +930,6 @@ contract MillionairesProblem {
         }
 
         return level[0];
-    }
-
-    function challengeOtLeaf(
-        uint256 instanceId,
-        bytes32 verifierSeed,
-        uint16 inputBit,
-        uint8 round,
-        bytes32 payloadHash,
-        bytes32[] calldata otProof
-    ) public {
-        require(currentStage == Stage.Dispute, "Wrong stage");
-        require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
-        require(msg.sender == alice || msg.sender == bob, "Only participants");
-        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
-        require(
-            keccak256(abi.encodePacked(verifierSeed)) == verifierSeedCommitment,
-            "Invalid verifier seed"
-        );
-
-        uint8 author = _otMessageAuthor(round);
-        bytes32 leafHash = _otTranscriptLeafHash(inputBit, round, author, payloadHash);
-        require(
-            MerkleProof.verify(otProof, instanceCommitments[instanceId].rootOT, leafHash),
-            "Bad OT proof"
-        );
-
-        _resolveOtChallenge(instanceId, verifierSeed, inputBit, round, payloadHash);
     }
 
     function _resolveOtChallenge(

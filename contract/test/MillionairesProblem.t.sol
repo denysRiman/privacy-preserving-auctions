@@ -110,44 +110,6 @@ contract MillionairesTest is Test {
         return a <= b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
     }
 
-    function _merkleProof(bytes32[] memory leaves, uint256 index) internal pure returns (bytes32[] memory proof) {
-        require(leaves.length > 0, "empty tree");
-        require(index < leaves.length, "proof index out of range");
-
-        uint256 width = leaves.length;
-        uint256 idx = index;
-        bytes32[] memory level = new bytes32[](width);
-        for (uint256 i = 0; i < width; i++) {
-            level[i] = leaves[i];
-        }
-
-        proof = new bytes32[](0);
-        while (width > 1) {
-            bytes32 sibling = idx % 2 == 0
-                ? (idx + 1 < width ? level[idx + 1] : level[idx])
-                : level[idx - 1];
-
-            bytes32[] memory nextProof = new bytes32[](proof.length + 1);
-            for (uint256 i = 0; i < proof.length; i++) {
-                nextProof[i] = proof[i];
-            }
-            nextProof[proof.length] = sibling;
-            proof = nextProof;
-
-            uint256 nextWidth = (width + 1) / 2;
-            for (uint256 i = 0; i < nextWidth; i++) {
-                uint256 leftIndex = 2 * i;
-                uint256 rightIndex = leftIndex + 1;
-                bytes32 left = level[leftIndex];
-                bytes32 right = rightIndex < width ? level[rightIndex] : left;
-                level[i] = _commutativeNodeHash(left, right);
-            }
-
-            idx /= 2;
-            width = nextWidth;
-        }
-    }
-
     function test_SuccessfulDeposits() public {
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
@@ -770,12 +732,9 @@ contract MillionairesTest is Test {
         mp.disputeGarbledTable(0, wrongSeed, 0, g, leaf, proof, layoutProof);
     }
 
-    function test_DisputeObliviousTransfer_SlashesBobOnMatch() public {
+    function test_DisputePublishedObliviousTransfer_RequiresPublishedPayloads_Reverts() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32[] memory leaves = _otLeaves(garblerSeed, verifierSeed, 0);
-        bytes32[] memory proof = _merkleProof(leaves, 0);
-        bytes32 payloadHash = mp.computeOtPayloadHash(garblerSeed, verifierSeed, 0, 0, 0);
         bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
 
         _toDisputeWithRoots(
@@ -786,51 +745,17 @@ contract MillionairesTest is Test {
             _defaultVerifierCommitment()
         );
 
-        uint256 aliceBefore = alice.balance;
-
         vm.prank(bob);
-        mp.disputeObliviousTransfer(0, verifierSeed, 0, 0, payloadHash, proof);
-
-        assertEq(alice.balance, aliceBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+        vm.expectRevert("OT payloads not published");
+        mp.disputePublishedObliviousTransfer(0, verifierSeed, 0, 0);
     }
 
-    function test_DisputeObliviousTransfer_SlashesAliceOnMismatch() public {
-        bytes32 garblerSeed = keccak256("garbler-seed");
-        bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 badPayloadHash = bytes32(
-            uint256(mp.computeOtPayloadHash(garblerSeed, verifierSeed, 0, 0, 0)) ^ 1
-        );
-        bytes32[] memory badLeaves = _otLeaves(garblerSeed, verifierSeed, 0);
-        badLeaves[0] = mp.computeOtLeafHash(0, 0, 0, badPayloadHash);
-        bytes32 rootOT = _rootFromLeaves(badLeaves);
-        bytes32[] memory proof = _merkleProof(badLeaves, 0);
-
-        _toDisputeWithRoots(
-            garblerSeed,
-            bytes32(0),
-            rootOT,
-            9,
-            _defaultVerifierCommitment()
-        );
-
-        uint256 bobBefore = bob.balance;
-
-        vm.prank(bob);
-        mp.disputeObliviousTransfer(0, verifierSeed, 0, 0, badPayloadHash, proof);
-
-        assertEq(bob.balance, bobBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
-    }
-
-    function test_DisputeObliviousTransfer_InvalidVerifierSeed_Reverts() public {
+    function test_DisputePublishedObliviousTransfer_InvalidVerifierSeed_Reverts() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
         bytes32 wrongVerifierSeed = keccak256("wrong-verifier-seed");
-        bytes32[] memory leaves = _otLeaves(garblerSeed, verifierSeed, 0);
-        bytes32[] memory proof = _merkleProof(leaves, 0);
-        bytes32 payloadHash = mp.computeOtPayloadHash(garblerSeed, verifierSeed, 0, 0, 0);
         bytes32 rootOT = mp.computeOtRoot(garblerSeed, verifierSeed, 0);
+        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
 
         _toDisputeWithRoots(
             garblerSeed,
@@ -840,9 +765,12 @@ contract MillionairesTest is Test {
             _defaultVerifierCommitment()
         );
 
+        vm.prank(alice);
+        mp.publishOpenedOtPayloadHashes(0, payloads);
+
         vm.prank(bob);
         vm.expectRevert("Invalid verifier seed");
-        mp.disputeObliviousTransfer(0, wrongVerifierSeed, 0, 0, payloadHash, proof);
+        mp.disputePublishedObliviousTransfer(0, wrongVerifierSeed, 0, 0);
     }
 
     function test_PublishOpenedOtPayloadHashes_Success() public {
@@ -1019,20 +947,26 @@ contract MillionairesTest is Test {
         mp.submitCommitments(commits);
     }
 
-    function test_DisputeObliviousTransfer_SlashesBobForBobAuthoredMismatch() public {
+    function test_DisputePublishedObliviousTransfer_SlashesBobForBobAuthoredMismatch() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
+        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
+        bytes32 badPayloadHash =
+            bytes32(uint256(mp.computeOtPayloadHash(garblerSeed, verifierSeed, 0, 0, 1)) ^ 1);
+        payloads[1] = badPayloadHash;
+
         bytes32[] memory badLeaves = _otLeaves(garblerSeed, verifierSeed, 0);
-        bytes32 badPayloadHash = bytes32(uint256(mp.computeOtPayloadHash(garblerSeed, verifierSeed, 0, 0, 1)) ^ 1);
         badLeaves[1] = mp.computeOtLeafHash(0, 1, 1, badPayloadHash);
         bytes32 rootOT = _rootFromLeaves(badLeaves);
-        bytes32[] memory proof = _merkleProof(badLeaves, 1);
 
         _toDisputeWithRoots(garblerSeed, bytes32(0), rootOT, 9, _defaultVerifierCommitment());
 
+        vm.prank(alice);
+        mp.publishOpenedOtPayloadHashes(0, payloads);
+
         uint256 aliceBefore = alice.balance;
         vm.prank(alice);
-        mp.disputeObliviousTransfer(0, verifierSeed, 0, 1, badPayloadHash, proof);
+        mp.disputePublishedObliviousTransfer(0, verifierSeed, 0, 1);
 
         assertEq(alice.balance, aliceBefore + 2 ether);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
