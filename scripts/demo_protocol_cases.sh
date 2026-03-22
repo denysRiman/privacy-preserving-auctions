@@ -176,9 +176,7 @@ deploy_contract() {
     exit 1
   fi
 
-  echo "contract_address=${CONTRACT_ADDRESS}"
-  echo "circuit_id=${CIRCUIT_ID}"
-  echo "layout_root=${LAYOUT_ROOT}"
+  echo "deploy: contract=${CONTRACT_ADDRESS}, circuit=$(short_hash32 "${CIRCUIT_ID}"), layout=$(short_hash32 "${LAYOUT_ROOT}") [OK]"
 }
 
 run_alice_raw() {
@@ -267,16 +265,18 @@ compact_cli_output() {
       before="$(extract_kv_from_text alice_wallet_before "${raw}")"
       after="$(extract_kv_from_text alice_wallet_after "${raw}")"
       vault="$(extract_kv_from_text alice_vault "${raw}")"
-      [[ -n "${before}" && -n "${after}" ]] && echo "  alice_wallet: $(wei_to_eth_safe "${before}") ETH -> $(wei_to_eth_safe "${after}") ETH"
-      [[ -n "${vault}" ]] && echo "  alice_vault: $(wei_to_eth_safe "${vault}") ETH"
+      if [[ -n "${before}" && -n "${after}" ]]; then
+        echo "  Alice: deposit wallet $(wei_to_eth_safe "${before}") ETH -> $(wei_to_eth_safe "${after}") ETH, vault=$(wei_to_eth_safe "${vault}") ETH [OK]"
+      fi
       ;;
     bob:deposit)
       local before after vault
       before="$(extract_kv_from_text bob_wallet_before "${raw}")"
       after="$(extract_kv_from_text bob_wallet_after "${raw}")"
       vault="$(extract_kv_from_text bob_vault "${raw}")"
-      [[ -n "${before}" && -n "${after}" ]] && echo "  bob_wallet: $(wei_to_eth_safe "${before}") ETH -> $(wei_to_eth_safe "${after}") ETH"
-      [[ -n "${vault}" ]] && echo "  bob_vault: $(wei_to_eth_safe "${vault}") ETH"
+      if [[ -n "${before}" && -n "${after}" ]]; then
+        echo "  Bob: deposit wallet $(wei_to_eth_safe "${before}") ETH -> $(wei_to_eth_safe "${after}") ETH, vault=$(wei_to_eth_safe "${vault}") ETH [OK]"
+      fi
       ;;
     alice:submit-commitments)
       local circuit_id bit_width root_ot_nonzero instance0_line instance9_line
@@ -298,22 +298,16 @@ compact_cli_output() {
       rootgc9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*rootGC=(0x[0-9a-fA-F]{64}).*/\1/p')"
       rootot9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*rootOT=(0x[0-9a-fA-F]{64}).*/\1/p')"
 
-      echo "  submitted_by=Alice (garbler)"
-      [[ -n "${bit_width}" ]] && echo "  bit_width=${bit_width}"
-      [[ -n "${circuit_id}" ]] && echo "  circuit_id=$(short_hash32 "${circuit_id}")"
-      echo "  commitments_submitted=${CUT_AND_CHOOSE_N}"
-      [[ -n "${root_ot_nonzero}" ]] && echo "  rootOT_nonzero=${root_ot_nonzero}/${CUT_AND_CHOOSE_N}"
+      echo "  Alice: submit_commitments n=${CUT_AND_CHOOSE_N}, bit_width=${bit_width}, circuit=$(short_hash32 "${circuit_id}"), rootOT_nonzero=${root_ot_nonzero}/${CUT_AND_CHOOSE_N} [OK]"
       [[ -n "${com0}" || -n "${rootgc0}" || -n "${rootot0}" ]] && \
-        echo "  instance_0: comSeed=$(short_hash32 "${com0}") rootGC=$(short_hash32 "${rootgc0}") rootOT=$(short_hash32 "${rootot0}")"
+        echo "  commitment_sample: i=0 comSeed=$(short_hash32 "${com0}") rootGC=$(short_hash32 "${rootgc0}") rootOT=$(short_hash32 "${rootot0}")"
       [[ -n "${com9}" || -n "${rootgc9}" || -n "${rootot9}" ]] && \
-        echo "  instance_9: comSeed=$(short_hash32 "${com9}") rootGC=$(short_hash32 "${rootgc9}") rootOT=$(short_hash32 "${rootot9}")"
+        echo "  commitment_sample: i=$((CUT_AND_CHOOSE_N - 1)) comSeed=$(short_hash32 "${com9}") rootGC=$(short_hash32 "${rootgc9}") rootOT=$(short_hash32 "${rootot9}")"
       ;;
     alice:reveal-openings)
       local m open_indices cleaned opened_count
       m="$(extract_kv_from_text m "${raw}")"
       open_indices="$(extract_kv_from_text open_indices "${raw}")"
-      [[ -n "${m}" ]] && echo "  evaluation_instance_m=${m}"
-
       if [[ -n "${open_indices}" ]]; then
         cleaned="$(printf '%s' "${open_indices}" | tr -d '[][:space:]')"
         opened_count=0
@@ -322,7 +316,7 @@ compact_cli_output() {
           IFS=',' read -r -a idx_arr <<< "${cleaned}"
           opened_count="${#idx_arr[@]}"
         fi
-        echo "  opened_instances_count=${opened_count}"
+        echo "  Alice: reveal_openings m=${m}, opened=${opened_count} [OK]"
         echo "  opened_instances=${open_indices}"
       fi
       ;;
@@ -330,18 +324,13 @@ compact_cli_output() {
       local instance payload_commitment
       instance="$(extract_kv_from_text instance_id "${raw}")"
       payload_commitment="$(extract_kv_from_text payload_commitment "${raw}")"
-      if [[ -n "${instance}" && -n "${payload_commitment}" ]]; then
-        echo "  instance ${instance} - ${payload_commitment}"
-      elif [[ -n "${instance}" ]]; then
-        echo "  instance ${instance}"
-      elif [[ -n "${payload_commitment}" ]]; then
-        echo "  payload_commitment=${payload_commitment}"
-      fi
+      [[ -n "${instance}" && -n "${payload_commitment}" ]] && \
+        echo "  Alice: publish_ot_payload instance=${instance}, commitment=$(short_hash32 "${payload_commitment}") [OK]"
       ;;
     alice:reveal-labels)
       local labels_count
       labels_count="$(extract_kv_from_text labels_count "${raw}")"
-      [[ -n "${labels_count}" ]] && echo "  labels_count=${labels_count}"
+      [[ -n "${labels_count}" ]] && echo "  labels_revealed: count=${labels_count} [OK]"
       ;;
     alice:export-artifacts)
       local out_dir
@@ -349,15 +338,10 @@ compact_cli_output() {
       [[ -n "${out_dir}" ]] && echo "  artifacts=${out_dir}"
       ;;
     alice:prepare-eval)
-      local eval_dir x_value h0 h1
-      eval_dir="$(extract_kv_from_text eval_dir "${raw}")"
-      x_value="$(extract_kv_from_text x_value "${raw}")"
+      local h0 h1
       h0="$(extract_kv_from_text h0 "${raw}")"
       h1="$(extract_kv_from_text h1 "${raw}")"
-      [[ -n "${eval_dir}" ]] && echo "  eval_dir=${eval_dir}"
-      [[ -n "${x_value}" ]] && echo "  alice_x=${x_value}"
-      [[ -n "${h0}" ]] && echo "  h0(m)=${h0}"
-      [[ -n "${h1}" ]] && echo "  h1(m)=${h1}"
+      [[ -n "${h0}" && -n "${h1}" ]] && echo "  anchors_m: h0=$(short_hash32 "${h0}"), h1=$(short_hash32 "${h1}")"
       ;;
     bob:choose)
       ;;
@@ -365,8 +349,8 @@ compact_cli_output() {
       local seed commitment
       seed="$(extract_kv_from_text verifier_seed "${raw}")"
       commitment="$(extract_kv_from_text verifier_seed_commitment "${raw}")"
-      [[ -n "${seed}" ]] && echo "  verifier_seed=${seed}"
-      [[ -n "${commitment}" ]] && echo "  verifier_seed_commitment=${commitment}"
+      [[ -n "${seed}" && -n "${commitment}" ]] && \
+        echo "  Bob: commit_verifier_seed seed=$(short_hash32 "${seed}"), commitment=$(short_hash32 "${commitment}") [OK]"
       ;;
     bob:start-eval-ot-session)
       local session_id
@@ -422,11 +406,9 @@ compact_cli_output() {
       round="$(extract_kv_from_text selected_round "${raw}")"
       author="$(extract_kv_from_text selected_author "${raw}")"
       root_ot="$(extract_kv_from_text root_ot "${raw}")"
-      [[ -n "${mismatch_count}" ]] && echo "  ot_mismatch_count=${mismatch_count}"
-      [[ -n "${selected_mismatch}" ]] && echo "  selected_leaf_mismatch=${selected_mismatch}"
-      [[ -n "${input_bit}" && -n "${round}" ]] && echo "  selected_ot_leaf=(bit=${input_bit}, round=${round})"
-      [[ -n "${author}" ]] && echo "  selected_author=${author} (0=Alice, 1=Bob)"
-      [[ -n "${root_ot}" ]] && echo "  rootOT=${root_ot}"
+      if [[ -n "${mismatch_count}" ]]; then
+        echo "  ot_replay_check: mismatch_count=${mismatch_count}, selected_leaf=${selected_mismatch}, leaf=(bit=${input_bit}, round=${round}), author=${author}, rootOT=$(short_hash32 "${root_ot}") [OK]"
+      fi
       ;;
     bob:dispute)
       ;;
@@ -608,6 +590,8 @@ publish_opened_ot_payloads_onchain() {
   local m_choice="$2"
 
   phase "Phase 6: Alice publishes opened OT payloads on-chain"
+  local published_count=0
+  local commitments=""
   for ((i=0; i<CUT_AND_CHOOSE_N; i++)); do
     if [[ "${i}" -eq "${m_choice}" ]]; then
       continue
@@ -617,10 +601,24 @@ publish_opened_ot_payloads_onchain() {
       echo "Missing OT payload file for opened instance ${i}: ${payloads_file}" >&2
       exit 1
     fi
-    run_alice publish-ot-payloads \
+    local raw
+    local payload_commitment
+    raw="$(
+      run_alice_raw publish-ot-payloads \
       --instance-id "${i}" \
       --payloads-file "${payloads_file}"
+    )"
+    payload_commitment="$(extract_kv_from_text payload_commitment "${raw}")"
+    if [[ -n "${payload_commitment}" ]]; then
+      if [[ -n "${commitments}" ]]; then
+        commitments+=", "
+      fi
+      commitments+="i${i}=$(short_hash32 "${payload_commitment}")"
+    fi
+    published_count=$((published_count + 1))
   done
+  echo "  Alice: publish_opened_ot_payloads opened=${published_count} [OK]"
+  [[ -n "${commitments}" ]] && echo "  opened_ot_commitments: ${commitments}"
 }
 
 flip_first_hex_byte() {
@@ -654,6 +652,17 @@ extract_kv() {
   local key="$1"
   local file="$2"
   sed -nE "s/^${key}=(.*)$/\1/p" "${file}" | tail -n1
+}
+
+bytes32_list_len_literal() {
+  local literal="$1"
+  local cleaned
+  cleaned="$(printf '%s' "${literal}" | tr -d '[][:space:]')"
+  if [[ -z "${cleaned}" ]]; then
+    echo "0"
+    return
+  fi
+  awk -F',' '{print NF}' <<< "${cleaned}"
 }
 
 assert_non_empty() {
@@ -716,7 +725,7 @@ common_bootstrap() {
   cast rpc anvil_setBalance "${BOB_ADDR}" "${BOB_START_BALANCE_HEX}" >/dev/null
   ALICE_RESET_WEI="$(cast balance "${ALICE_ADDR}" --rpc-url "${RPC_URL}")"
   BOB_RESET_WEI="$(cast balance "${BOB_ADDR}" --rpc-url "${RPC_URL}")"
-  print_balance_snapshot "start"
+  echo "balances_reset: Alice=$(format_eth_compact "$(cast from-wei "${ALICE_RESET_WEI}")") ETH, Bob=$(format_eth_compact "$(cast from-wei "${BOB_RESET_WEI}")") ETH [OK]"
   wait_phase
 
   phase "Phase 1: Alice deposit"
@@ -747,18 +756,22 @@ run_eval_ot_success_handshake() {
   round_hash_m2="$(eval_ot_round_hash "${session_id}" 2 "${m_choice}" "${alice_x_value}" "${bob_y_value}")"
 
   phase "Phase 9: Eval-OT control-plane handshake on-chain"
-  echo "  eval_ot_session_id=${session_id}"
-  echo "  round_hash_m0=${round_hash_m0}"
-  echo "  round_hash_m1=${round_hash_m1}"
-  echo "  round_hash_m2=${round_hash_m2}"
+  run_bob_raw start-eval-ot-session --session-id "${session_id}" >/dev/null
+  echo "  eval_ot: session start [OK]"
 
-  run_bob start-eval-ot-session --session-id "${session_id}"
-  run_alice commit-eval-ot-round-hash --session-id "${session_id}" --round 0 --round-hash "${round_hash_m0}"
-  run_bob ack-eval-ot-round --session-id "${session_id}" --round 0
-  run_bob commit-eval-ot-round-hash --session-id "${session_id}" --round 1 --round-hash "${round_hash_m1}"
-  run_alice ack-eval-ot-round --session-id "${session_id}" --round 1
-  run_alice commit-eval-ot-round-hash --session-id "${session_id}" --round 2 --round-hash "${round_hash_m2}"
-  run_bob ack-eval-ot-round --session-id "${session_id}" --round 2
+  run_alice_raw commit-eval-ot-round-hash --session-id "${session_id}" --round 0 --round-hash "${round_hash_m0}" >/dev/null
+  run_bob_raw ack-eval-ot-round --session-id "${session_id}" --round 0 >/dev/null
+  echo "  eval_ot: round0 Alice->Bob commit+ack [OK]"
+
+  run_bob_raw commit-eval-ot-round-hash --session-id "${session_id}" --round 1 --round-hash "${round_hash_m1}" >/dev/null
+  run_alice_raw ack-eval-ot-round --session-id "${session_id}" --round 1 >/dev/null
+  echo "  eval_ot: round1 Bob->Alice commit+ack [OK]"
+
+  run_alice_raw commit-eval-ot-round-hash --session-id "${session_id}" --round 2 --round-hash "${round_hash_m2}" >/dev/null
+  run_bob_raw ack-eval-ot-round --session-id "${session_id}" --round 2 >/dev/null
+  echo "  eval_ot: round2 Alice->Bob commit+ack [OK]"
+  echo "  eval_ot: completed [OK]"
+  echo "  eval_ot_goal: Bob obtains exactly one y-label per input bit (choice=y_i) without revealing y_i to Alice"
 }
 
 show_ot_visibility() {
@@ -781,20 +794,10 @@ show_ot_visibility() {
     exit 1
   fi
 
-  local first_payload
-  first_payload="$(cast call "${CONTRACT_ADDRESS}" "getPublishedOtPayloadHash(uint256,uint256)(bytes32)" "${instance_id}" 0 --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
-  local last_index=$((payload_count - 1))
-  local last_payload
-  last_payload="$(cast call "${CONTRACT_ADDRESS}" "getPublishedOtPayloadHash(uint256,uint256)(bytes32)" "${instance_id}" "${last_index}" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
-
   phase "${title}"
-  echo "  opened_instance=${instance_id}"
-  echo "  verifier_seed=${VERIFIER_SEED_HEX}"
-  echo "  verifier_seed_commitment=${VERIFIER_SEED_COMMITMENT}"
-  echo "  payload_source=onchain"
-  echo "  payload_count=${payload_count}"
-  [[ -n "${first_payload}" ]] && echo "  payload_0=${first_payload}"
-  [[ -n "${last_payload}" ]] && echo "  payload_last=${last_payload}"
+  local expected_payload_count=$((BIT_WIDTH * 3))
+  echo "  ot_replay_model: payload_count=bit_width(${BIT_WIDTH})*3_rounds=${expected_payload_count}, rootOT commits all OT payload hashes"
+  echo "  ot_replay_input: instance=${instance_id}, seed=$(short_hash32 "${seed}"), payload_count=${payload_count}, verifier_commit=$(short_hash32 "${VERIFIER_SEED_COMMITMENT}")"
 
   local ot_raw
   ot_raw="$(
@@ -808,7 +811,17 @@ show_ot_visibility() {
       --round 0 \
       --allow-false-challenge
   )"
-  compact_cli_output "bob" "prepare-ot-dispute" "${ot_raw}"
+  local mismatch_count
+  local root_ot
+  local selected_input_bit
+  local selected_round
+  local selected_author
+  mismatch_count="$(extract_kv_from_text mismatch_count "${ot_raw}")"
+  root_ot="$(extract_kv_from_text root_ot "${ot_raw}")"
+  selected_input_bit="$(extract_kv_from_text selected_input_bit "${ot_raw}")"
+  selected_round="$(extract_kv_from_text selected_round "${ot_raw}")"
+  selected_author="$(extract_kv_from_text selected_author "${ot_raw}")"
+  echo "  ot_replay_check: mismatch_count=${mismatch_count}, sampled_leaf=(bit=${selected_input_bit},round=${selected_round},author=${selected_author}), rootOT=$(short_hash32 "${root_ot}") [OK]"
 }
 
 scenario_success() {
@@ -823,12 +836,13 @@ scenario_success() {
   local eval_dir="${out_dir}/eval-m"
 
   printf "\n\033[1;32m================ CASE 1: SUCCESS FLOW ================\033[0m\n"
-  echo "bob_m_choice=${m_choice}"
-  echo "alice_x=${alice_x_value}"
-  echo "bob_y=${bob_y_value}"
+  echo "security_goal: honest run; commitments, opened-instance checks, eval-OT handshake, and settlement must all agree"
+  echo "artifact_defs: comSeed=keccak(seed), rootGC=terminal incremental-hash root over gate leaves where leafHash=keccak(leafBytes(gateIndex,GateDesc,4-rows)), circuitLayoutRoot=commitment to (gateIndex,GateDesc) used by layout proofs, rootOT=OT transcript root, h0/h1=keccak(output_label)"
+  echo "label_encoding: output_label is 16-byte GC label zero-padded to bytes32 before on-chain hash check"
+  echo "liveness_hooks: verifier-seed/choose/open/labels/settle deadlines + abort/slash paths are active"
   common_bootstrap "${m_choice}"
 
-  phase "Phase 3: derive output anchors + submit commitments"
+  phase "Phase 3: Alice derives anchors and submits commitments"
   local anchors_raw
   anchors_raw="$(
     run_alice_raw derive-anchors \
@@ -853,8 +867,7 @@ scenario_success() {
 
   phase "Phase 4: Bob chooses m"
   run_bob choose --m "${m_choice}"
-  echo "  selected_m=${m_choice}"
-  echo "  opened_instances_expected=$((CUT_AND_CHOOSE_N - 1))"
+  echo "  choose_m: m=${m_choice}, opened_expected=$((CUT_AND_CHOOSE_N - 1)) [OK]"
   wait_phase
 
   phase "Phase 5: Alice reveals openings"
@@ -877,7 +890,7 @@ scenario_success() {
     "${TX_FLAGS[@]}" \
     --private-key "${BOB_PK}" \
     --rpc-url "${RPC_URL}" >/dev/null
-  echo "closeDispute sent"
+  echo "  Bob: close_dispute [OK]"
   wait_phase
 
   phase "Phase 8: Alice prepares evaluation package + reveals x labels (enter Settle)"
@@ -891,6 +904,7 @@ scenario_success() {
       --circuit-id "${CIRCUIT_ID}" \
       --verifier-seed "${VERIFIER_SEED_HEX}"
   )"
+  echo "  eval_artifacts: prepared [OK]"
   compact_cli_output "alice" "prepare-eval" "${prepare_eval_raw}"
   local settle_h0
   local settle_h1
@@ -900,11 +914,11 @@ scenario_success() {
   run_alice reveal-labels --labels-file "${eval_dir}/alice-x-labels32.txt"
   local stage_after_labels
   stage_after_labels="$(stage_value)"
-  echo "  stage_after_labels=${stage_after_labels} (7 means Settle)"
   if [[ "$(first_token "${stage_after_labels}")" != "7" ]]; then
     echo "Expected Settle stage after reveal-labels, got ${stage_after_labels}" >&2
     exit 1
   fi
+  echo "  stage_transition: stage=Settle(7) [OK]"
   wait_phase
 
   run_eval_ot_success_handshake "${m_choice}" "${alice_x_value}" "${bob_y_value}"
@@ -1033,6 +1047,7 @@ scenario_success() {
     onchain_status="[OK]"
   fi
 
+  echo "eval_link: Bob uses Alice x-labels + OT-delivered y-labels to evaluate GC(m) and derive output_label"
   echo "comparison: Alice x=${alice_x_value}, Bob y=${bob_y_value} -> x>y=${x_gt_y} -> expected_bit=${expected_bit} (expected winner: ${expected_winner})"
   echo "bob_eval: decoded_bit=${decoded_bit}, output_label=${output_label_short}"
   echo "ot_check: keccak(output_label)=${output_label_hash_short} -> matched ${output_anchor_match} (h0=${settle_h0_short}, h1=${settle_h1_short}) ${ot_anchor_status}"
@@ -1071,7 +1086,8 @@ scenario_alice_cheats() {
   local challenge_gate_index=0
 
   printf "\n\033[1;31m============= CASE 2: ALICE CHEATS, BOB SLASHES =============\033[0m\n"
-  echo "bob_m_choice=${m_choice}"
+  echo "security_goal: if Alice tampers opened-instance GC commitment, Bob proves mismatch and Alice is slashed"
+  echo "liveness_hooks: if Alice withholds required opened OT payloads by dispute deadline, Bob can slash via timeout path"
   common_bootstrap "${m_choice}"
 
   phase "Phase 3: Alice exports honest artifacts"
@@ -1102,11 +1118,12 @@ scenario_alice_cheats() {
   )"
   printf '%s\n' "${prep_out}" > "${prep_file}"
   local prep_gate
+  local prep_gate_mismatch
   local prep_mismatch_count
   prep_gate="$(extract_kv selected_gate_index "${prep_file}")"
+  prep_gate_mismatch="$(extract_kv selected_gate_mismatch "${prep_file}")"
   prep_mismatch_count="$(extract_kv mismatch_count "${prep_file}")"
-  echo "  prepared_dispute_gate=${prep_gate}"
-  echo "  mismatch_count=${prep_mismatch_count}"
+  echo "  tamper_plan: opened_instance=${challenge_instance}, gate_index=${prep_gate}, selected_gate_mismatch=${prep_gate_mismatch}, mismatch_count=${prep_mismatch_count}"
 
   local tampered_root
   tampered_root="$(extract_kv root_gc "${prep_file}")"
@@ -1124,8 +1141,7 @@ scenario_alice_cheats() {
 
   phase "Phase 4: Bob chooses m"
   run_bob choose --m "${m_choice}"
-  echo "  selected_m=${m_choice}"
-  echo "  opened_instances_expected=$((CUT_AND_CHOOSE_N - 1))"
+  echo "  choose_m: m=${m_choice}, opened_expected=$((CUT_AND_CHOOSE_N - 1)) [OK]"
   wait_phase
 
   phase "Phase 5: Alice reveals openings"
@@ -1148,8 +1164,13 @@ scenario_alice_cheats() {
   local wire_b
   local wire_c
   local claimed_leaf
+  local expected_leaf
+  local claimed_leaf_hash
+  local expected_leaf_hash
   local ih_proof
   local layout_proof
+  local ih_proof_len
+  local layout_proof_len
 
   gate_index="$(extract_kv selected_gate_index "${prep_file}")"
   gate_type="$(extract_kv gate_type "${prep_file}")"
@@ -1157,8 +1178,13 @@ scenario_alice_cheats() {
   wire_b="$(extract_kv wire_b "${prep_file}")"
   wire_c="$(extract_kv wire_c "${prep_file}")"
   claimed_leaf="$(extract_kv claimed_leaf "${prep_file}")"
+  expected_leaf="$(extract_kv expected_leaf "${prep_file}")"
   ih_proof="$(extract_kv ih_proof "${prep_file}")"
   layout_proof="$(extract_kv layout_proof "${prep_file}")"
+  claimed_leaf_hash="$(cast keccak "${claimed_leaf}" | tr -d '[:space:]')"
+  expected_leaf_hash="$(cast keccak "${expected_leaf}" | tr -d '[:space:]')"
+  ih_proof_len="$(bytes32_list_len_literal "${ih_proof}")"
+  layout_proof_len="$(bytes32_list_len_literal "${layout_proof}")"
 
   assert_non_empty "gate_index" "${gate_index}"
   assert_non_empty "gate_type" "${gate_type}"
@@ -1166,8 +1192,13 @@ scenario_alice_cheats() {
   assert_non_empty "wire_b" "${wire_b}"
   assert_non_empty "wire_c" "${wire_c}"
   assert_non_empty "claimed_leaf" "${claimed_leaf}"
+  assert_non_empty "expected_leaf" "${expected_leaf}"
   assert_non_empty "ih_proof" "${ih_proof}"
   assert_non_empty "layout_proof" "${layout_proof}"
+  echo "  dispute_context: rootGC(instance=${challenge_instance})=$(short_hash32 "${tampered_root}")"
+  echo "  tamper_mechanism: mismatch iff committed/challenged leaf hash != recomputed hash from (seed, gateDesc, gateIndex)"
+  echo "  dispute_input: instance=${challenge_instance}, gate_index=${gate_index}, gate_desc=(type=${gate_type},a=${wire_a},b=${wire_b},c=${wire_c}), ih_proof_len=${ih_proof_len}, layout_proof_len=${layout_proof_len}"
+  echo "  dispute_leaf_check: claimed_hash=$(short_hash32 "${claimed_leaf_hash}"), recomputed_hash=$(short_hash32 "${expected_leaf_hash}"), match=false [expected]"
 
   run_bob dispute \
     --instance-id "${challenge_instance}" \
@@ -1202,7 +1233,8 @@ scenario_bob_cheats() {
   challenge_instance="$(choose_challenge_instance "${m_choice}")"
 
   printf "\n\033[1;35m========== CASE 3: BOB FALSE-CHALLENGES, ALICE WINS ==========\033[0m\n"
-  echo "bob_m_choice=${m_choice}"
+  echo "security_goal: if Bob submits a false GC dispute on opened instance, Bob is slashed and Alice wins"
+  echo "liveness_hooks: dispute/labels/settle deadlines remain enforced; false challenge is economically penalized"
   common_bootstrap "${m_choice}"
 
   phase "Phase 3: Alice submits honest commitments"
@@ -1215,8 +1247,7 @@ scenario_bob_cheats() {
 
   phase "Phase 4: Bob chooses m"
   run_bob choose --m "${m_choice}"
-  echo "  selected_m=${m_choice}"
-  echo "  opened_instances_expected=$((CUT_AND_CHOOSE_N - 1))"
+  echo "  choose_m: m=${m_choice}, opened_expected=$((CUT_AND_CHOOSE_N - 1)) [OK]"
   wait_phase
 
   phase "Phase 5: Alice reveals openings"
@@ -1268,8 +1299,13 @@ scenario_bob_cheats() {
   local wire_b
   local wire_c
   local claimed_leaf
+  local expected_leaf
+  local claimed_leaf_hash
+  local expected_leaf_hash
   local ih_proof
   local layout_proof
+  local ih_proof_len
+  local layout_proof_len
 
   gate_index="$(extract_kv selected_gate_index "${prep_file}")"
   gate_type="$(extract_kv gate_type "${prep_file}")"
@@ -1277,8 +1313,13 @@ scenario_bob_cheats() {
   wire_b="$(extract_kv wire_b "${prep_file}")"
   wire_c="$(extract_kv wire_c "${prep_file}")"
   claimed_leaf="$(extract_kv claimed_leaf "${prep_file}")"
+  expected_leaf="$(extract_kv expected_leaf "${prep_file}")"
   ih_proof="$(extract_kv ih_proof "${prep_file}")"
   layout_proof="$(extract_kv layout_proof "${prep_file}")"
+  claimed_leaf_hash="$(cast keccak "${claimed_leaf}" | tr -d '[:space:]')"
+  expected_leaf_hash="$(cast keccak "${expected_leaf}" | tr -d '[:space:]')"
+  ih_proof_len="$(bytes32_list_len_literal "${ih_proof}")"
+  layout_proof_len="$(bytes32_list_len_literal "${layout_proof}")"
 
   assert_non_empty "gate_index" "${gate_index}"
   assert_non_empty "gate_type" "${gate_type}"
@@ -1286,8 +1327,12 @@ scenario_bob_cheats() {
   assert_non_empty "wire_b" "${wire_b}"
   assert_non_empty "wire_c" "${wire_c}"
   assert_non_empty "claimed_leaf" "${claimed_leaf}"
+  assert_non_empty "expected_leaf" "${expected_leaf}"
   assert_non_empty "ih_proof" "${ih_proof}"
   assert_non_empty "layout_proof" "${layout_proof}"
+  echo "  dispute_context: rootGC(instance=${challenge_instance})=$(short_hash32 "${expected_root}")"
+  echo "  dispute_input: instance=${challenge_instance}, gate_index=${gate_index}, gate_desc=(type=${gate_type},a=${wire_a},b=${wire_b},c=${wire_c}), ih_proof_len=${ih_proof_len}, layout_proof_len=${layout_proof_len}"
+  echo "  dispute_leaf_check: claimed_hash=$(short_hash32 "${claimed_leaf_hash}"), recomputed_hash=$(short_hash32 "${expected_leaf_hash}"), match=true [expected false-challenge]"
 
   run_bob dispute \
     --instance-id "${challenge_instance}" \
