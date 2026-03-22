@@ -368,6 +368,43 @@ compact_cli_output() {
       [[ -n "${seed}" ]] && echo "  verifier_seed=${seed}"
       [[ -n "${commitment}" ]] && echo "  verifier_seed_commitment=${commitment}"
       ;;
+    bob:start-eval-ot-session)
+      local session_id
+      session_id="$(extract_kv_from_text session_id "${raw}")"
+      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
+      ;;
+    alice:commit-eval-ot-round-hash|bob:commit-eval-ot-round-hash)
+      local session_id round round_hash
+      session_id="$(extract_kv_from_text session_id "${raw}")"
+      round="$(extract_kv_from_text round "${raw}")"
+      round_hash="$(extract_kv_from_text round_hash "${raw}")"
+      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
+      [[ -n "${round}" ]] && echo "  round=${round}"
+      [[ -n "${round_hash}" ]] && echo "  round_hash=${round_hash}"
+      ;;
+    alice:ack-eval-ot-round|bob:ack-eval-ot-round)
+      local session_id round
+      session_id="$(extract_kv_from_text session_id "${raw}")"
+      round="$(extract_kv_from_text round "${raw}")"
+      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
+      [[ -n "${round}" ]] && echo "  round=${round}"
+      ;;
+    alice:force-deliver-eval-ot-round|bob:force-deliver-eval-ot-round)
+      local session_id round payload_count payload_commitment
+      session_id="$(extract_kv_from_text session_id "${raw}")"
+      round="$(extract_kv_from_text round "${raw}")"
+      payload_count="$(extract_kv_from_text payload_count "${raw}")"
+      payload_commitment="$(extract_kv_from_text payload_commitment "${raw}")"
+      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
+      [[ -n "${round}" ]] && echo "  round=${round}"
+      [[ -n "${payload_count}" ]] && echo "  payload_count=${payload_count}"
+      [[ -n "${payload_commitment}" ]] && echo "  payload_commitment=${payload_commitment}"
+      ;;
+    bob:slash-eval-ot-timeout)
+      local session_id
+      session_id="$(extract_kv_from_text session_id "${raw}")"
+      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
+      ;;
     bob:evaluate-m)
       local y_value decoded output_label
       y_value="$(extract_kv_from_text y_value "${raw}")"
@@ -519,6 +556,23 @@ resolve_private_value() {
     exit 1
   fi
   echo "${value}"
+}
+
+eval_ot_session_id() {
+  local m_choice="$1"
+  echo $((1000 + m_choice))
+}
+
+eval_ot_round_hash() {
+  local session_id="$1"
+  local round="$2"
+  local m_choice="$3"
+  local alice_x_value="$4"
+  local bob_y_value="$5"
+
+  cast keccak \
+    "eval-ot-demo|session=${session_id}|round=${round}|m=${m_choice}|x=${alice_x_value}|y=${bob_y_value}|bit_width=${BIT_WIDTH}" \
+    | tr -d '[:space:]'
 }
 
 winner_from_bit() {
@@ -678,6 +732,35 @@ common_bootstrap() {
   wait_phase
 }
 
+run_eval_ot_success_handshake() {
+  local m_choice="$1"
+  local alice_x_value="$2"
+  local bob_y_value="$3"
+  local session_id
+  local round_hash_m0
+  local round_hash_m1
+  local round_hash_m2
+
+  session_id="$(eval_ot_session_id "${m_choice}")"
+  round_hash_m0="$(eval_ot_round_hash "${session_id}" 0 "${m_choice}" "${alice_x_value}" "${bob_y_value}")"
+  round_hash_m1="$(eval_ot_round_hash "${session_id}" 1 "${m_choice}" "${alice_x_value}" "${bob_y_value}")"
+  round_hash_m2="$(eval_ot_round_hash "${session_id}" 2 "${m_choice}" "${alice_x_value}" "${bob_y_value}")"
+
+  phase "Phase 9: Eval-OT control-plane handshake on-chain"
+  echo "  eval_ot_session_id=${session_id}"
+  echo "  round_hash_m0=${round_hash_m0}"
+  echo "  round_hash_m1=${round_hash_m1}"
+  echo "  round_hash_m2=${round_hash_m2}"
+
+  run_bob start-eval-ot-session --session-id "${session_id}"
+  run_alice commit-eval-ot-round-hash --session-id "${session_id}" --round 0 --round-hash "${round_hash_m0}"
+  run_bob ack-eval-ot-round --session-id "${session_id}" --round 0
+  run_bob commit-eval-ot-round-hash --session-id "${session_id}" --round 1 --round-hash "${round_hash_m1}"
+  run_alice ack-eval-ot-round --session-id "${session_id}" --round 1
+  run_alice commit-eval-ot-round-hash --session-id "${session_id}" --round 2 --round-hash "${round_hash_m2}"
+  run_bob ack-eval-ot-round --session-id "${session_id}" --round 2
+}
+
 show_ot_visibility() {
   local instance_id="$1"
   local title="${2:-OT visibility check}"
@@ -797,31 +880,66 @@ scenario_success() {
   echo "closeDispute sent"
   wait_phase
 
-  phase "Phase 8: Alice prepares evaluation package (OT-simulated) + reveals x labels"
-  run_alice prepare-eval \
-    --m "${m_choice}" \
-    --x "${alice_x_value}" \
-    --out-dir "${eval_dir}" \
-    --bit-width "${BIT_WIDTH}" \
-    --circuit-id "${CIRCUIT_ID}" \
-    --verifier-seed "${VERIFIER_SEED_HEX}"
+  phase "Phase 8: Alice prepares evaluation package + reveals x labels (enter Settle)"
+  local prepare_eval_raw
+  prepare_eval_raw="$(
+    run_alice_raw prepare-eval \
+      --m "${m_choice}" \
+      --x "${alice_x_value}" \
+      --out-dir "${eval_dir}" \
+      --bit-width "${BIT_WIDTH}" \
+      --circuit-id "${CIRCUIT_ID}" \
+      --verifier-seed "${VERIFIER_SEED_HEX}"
+  )"
+  compact_cli_output "alice" "prepare-eval" "${prepare_eval_raw}"
+  local settle_h0
+  local settle_h1
+  settle_h0="$(extract_kv_from_text h0 "${prepare_eval_raw}")"
+  settle_h1="$(extract_kv_from_text h1 "${prepare_eval_raw}")"
 
   run_alice reveal-labels --labels-file "${eval_dir}/alice-x-labels32.txt"
+  local stage_after_labels
+  stage_after_labels="$(stage_value)"
+  echo "  stage_after_labels=${stage_after_labels} (7 means Settle)"
+  if [[ "$(first_token "${stage_after_labels}")" != "7" ]]; then
+    echo "Expected Settle stage after reveal-labels, got ${stage_after_labels}" >&2
+    exit 1
+  fi
   wait_phase
 
-  phase "Phase 9: Bob evaluates GC_m with y (OT-simulated) and submits output label"
+  run_eval_ot_success_handshake "${m_choice}" "${alice_x_value}" "${bob_y_value}"
+  wait_phase
+
+  phase "Phase 10: Settlement (Bob evaluates m and settles)"
   local eval_raw
   eval_raw="$(
     run_bob_raw evaluate-m \
       --eval-dir "${eval_dir}" \
       --y "${bob_y_value}"
   )"
-  compact_cli_output "bob" "evaluate-m" "${eval_raw}"
   local output_label
   output_label="$(extract_kv_from_text output_label "${eval_raw}")"
   local decoded_bit
   decoded_bit="$(extract_kv_from_text decoded_bit "${eval_raw}")"
+  local decoded_anchor
+  local output_anchor_match
+  local output_label_hash
   assert_non_empty "output_label" "${output_label}"
+  if [[ "${decoded_bit}" == "1" ]]; then
+    decoded_anchor="h0"
+  elif [[ "${decoded_bit}" == "0" ]]; then
+    decoded_anchor="h1"
+  else
+    decoded_anchor="unknown"
+  fi
+
+  output_label_hash="$(cast keccak "${output_label}" | tr -d '[:space:]')"
+  output_anchor_match="unknown"
+  if [[ -n "${settle_h0}" && "${output_label_hash}" == "${settle_h0}" ]]; then
+    output_anchor_match="h0"
+  elif [[ -n "${settle_h1}" && "${output_label_hash}" == "${settle_h1}" ]]; then
+    output_anchor_match="h1"
+  fi
 
   cast send "${CONTRACT_ADDRESS}" "settle(bytes32)" "${output_label}" \
     "${TX_FLAGS[@]}" \
@@ -831,17 +949,75 @@ scenario_success() {
   local stage
   local result
   local expected_bit
+  local expected_result
+  local expected_winner
   local winner_by_gc
   local winner_by_contract
+  local x_gt_y
+  local output_label_short
+  local output_label_hash_short
+  local settle_h0_short
+  local settle_h1_short
+  local result_token
+  local stage_token
+  local ot_anchor_ok=0
+  local ot_anchor_status="[FAIL]"
+  local bit_consistency_ok=0
+  local bit_consistency_status="[FAIL]"
+  local onchain_ok=0
+  local onchain_status="[FAIL]"
+  local expected_alice_wei
+  local expected_bob_wei
+  local actual_alice_wei
+  local actual_bob_wei
+  local alice_payout_status="[FAIL]"
+  local bob_payout_status="[FAIL]"
+  local payout_ok=0
+  local payout_status="[FAIL]"
   stage="$(stage_value)"
   result="$(cast call "${CONTRACT_ADDRESS}" "result()(bool)" --rpc-url "${RPC_URL}")"
   if (( alice_x_value > bob_y_value )); then
+    x_gt_y="true"
     expected_bit=1
+    expected_result="true"
+    expected_winner="Alice"
   else
+    x_gt_y="false"
     expected_bit=0
+    expected_result="false"
+    expected_winner="Bob"
   fi
+  expected_alice_wei="${ALICE_RESET_WEI}"
+  expected_bob_wei="${BOB_RESET_WEI}"
   winner_by_gc="$(winner_from_bit "${decoded_bit}")"
   winner_by_contract="$(winner_from_contract_result "${result}")"
+  output_label_short="$(short_hash32 "${output_label}")"
+  output_label_hash_short="$(short_hash32 "${output_label_hash}")"
+  settle_h0_short="$(short_hash32 "${settle_h0}")"
+  settle_h1_short="$(short_hash32 "${settle_h1}")"
+  result_token="$(first_token "${result}")"
+  stage_token="$(first_token "${stage}")"
+  actual_alice_wei="$(cast balance "${ALICE_ADDR}" --rpc-url "${RPC_URL}")"
+  actual_bob_wei="$(cast balance "${BOB_ADDR}" --rpc-url "${RPC_URL}")"
+
+  if [[ "${output_anchor_match}" == "h0" || "${output_anchor_match}" == "h1" ]]; then
+    ot_anchor_ok=1
+    ot_anchor_status="[OK]"
+  fi
+  if [[ "${decoded_bit}" == "${expected_bit}" ]]; then
+    bit_consistency_ok=1
+    bit_consistency_status="[OK]"
+  fi
+  if [[ "${actual_alice_wei}" == "${expected_alice_wei}" && "${actual_bob_wei}" == "${expected_bob_wei}" ]]; then
+    payout_ok=1
+    payout_status="[OK]"
+  fi
+  if [[ "${actual_alice_wei}" == "${expected_alice_wei}" ]]; then
+    alice_payout_status="[OK]"
+  fi
+  if [[ "${actual_bob_wei}" == "${expected_bob_wei}" ]]; then
+    bob_payout_status="[OK]"
+  fi
 
   if [[ "${winner_by_gc}" == "Unknown" || "${winner_by_contract}" == "Unknown" ]]; then
     echo "Failed to determine winner from outputs." >&2
@@ -852,14 +1028,37 @@ scenario_success() {
     exit 1
   fi
 
-  echo "final_stage=${stage} (8 means Closed)"
-  echo "input_x=${alice_x_value}"
-  echo "input_y=${bob_y_value}"
-  echo "decoded_bit=${decoded_bit} (from Bob GC evaluation)"
-  echo "expected_bit=${expected_bit} (x>y)"
-  echo "result=${result} (contract bool: h0-match => true)"
-  echo "winner=${winner_by_contract}"
-  report_and_assert_final_balances "${ALICE_RESET_WEI}" "${BOB_RESET_WEI}"
+  if [[ "${stage_token}" == "8" && "${result_token}" == "${expected_result}" && "${winner_by_contract}" == "${expected_winner}" ]]; then
+    onchain_ok=1
+    onchain_status="[OK]"
+  fi
+
+  echo "comparison: Alice x=${alice_x_value}, Bob y=${bob_y_value} -> x>y=${x_gt_y} -> expected_bit=${expected_bit} (expected winner: ${expected_winner})"
+  echo "bob_eval: decoded_bit=${decoded_bit}, output_label=${output_label_short}"
+  echo "ot_check: keccak(output_label)=${output_label_hash_short} -> matched ${output_anchor_match} (h0=${settle_h0_short}, h1=${settle_h1_short}) ${ot_anchor_status}"
+  echo "consistency: decoded_bit == expected_bit -> ${decoded_bit} == ${expected_bit} ${bit_consistency_status}"
+  echo "onchain_settle: result=${result_token} -> winner=${winner_by_contract} ${onchain_status}, final_stage=Closed"
+  echo "payouts: Alice=$(format_eth_compact "$(cast from-wei "${actual_alice_wei}")") ETH (exp $(format_eth_compact "$(cast from-wei "${expected_alice_wei}")")) ${alice_payout_status}, Bob=$(format_eth_compact "$(cast from-wei "${actual_bob_wei}")") ETH (exp $(format_eth_compact "$(cast from-wei "${expected_bob_wei}")")) ${bob_payout_status}"
+
+  if [[ "${ot_anchor_ok}" -ne 1 ]]; then
+    echo "Output label hash did not match committed anchors h0/h1." >&2
+    exit 1
+  fi
+  if [[ "${bit_consistency_ok}" -ne 1 ]]; then
+    echo "Decoded bit mismatch: decoded_bit=${decoded_bit}, expected_bit=${expected_bit}" >&2
+    exit 1
+  fi
+  if [[ "${onchain_ok}" -ne 1 ]]; then
+    echo "On-chain settle verification failed: result=${result_token}, stage=${stage_token}, winner=${winner_by_contract}, expected_result=${expected_result}, expected_winner=${expected_winner}" >&2
+    exit 1
+  fi
+  if is_truthy "${STRICT_BALANCE_CHECK}"; then
+    if [[ "${payout_ok}" -ne 1 ]]; then
+      echo "Balance check failed. Expected exact demo balances did not match." >&2
+      echo "Hint: restart with ./scripts/start_anvil.sh (zero-gas defaults) or set STRICT_BALANCE_CHECK=0." >&2
+      exit 1
+    fi
+  fi
 }
 
 scenario_alice_cheats() {

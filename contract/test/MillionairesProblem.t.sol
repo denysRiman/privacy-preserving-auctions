@@ -26,6 +26,10 @@ contract MillionairesProblemHarness is MillionairesProblem {
     {
         return _otTranscriptLeafHash(inputBit, round, author, payloadHash);
     }
+
+    function setSettleDeadlineForTest(uint256 newDeadline) external {
+        deadlines.settle = newDeadline;
+    }
 }
 
 contract MillionairesTest is Test {
@@ -102,6 +106,70 @@ contract MillionairesTest is Test {
 
     function _commutativeNodeHash(bytes32 a, bytes32 b) internal pure returns (bytes32) {
         return a <= b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
+    }
+
+    function _toSettleStage(bytes32 h0, bytes32 h1) internal {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+        for (uint256 i = 0; i < 10; i++) {
+            commits[i] = MillionairesProblem.InstanceCommitment({
+                comSeed: keccak256(abi.encodePacked(keccak256(abi.encodePacked("seed", i)))),
+                rootGC: bytes32(0),
+                blobHashGC: bytes32(0),
+                rootXG: bytes32(0),
+                rootOT: bytes32(0),
+                h0: h0,
+                h1: h1
+            });
+        }
+
+        _commitDefaultVerifierSeed();
+        vm.prank(alice);
+        mp.submitCommitments(commits);
+
+        vm.prank(bob);
+        mp.choose(0);
+
+        uint256[] memory indices = new uint256[](9);
+        bytes32[] memory seeds = new bytes32[](9);
+        for (uint256 i = 1; i < 10; i++) {
+            indices[i - 1] = i;
+            seeds[i - 1] = keccak256(abi.encodePacked("seed", i));
+        }
+
+        vm.prank(alice);
+        mp.revealOpenings(indices, seeds);
+
+        vm.prank(bob);
+        mp.closeDispute();
+
+        bytes32[] memory mockLabels = new bytes32[](32);
+        vm.prank(alice);
+        mp.revealGarblerLabels(mockLabels);
+    }
+
+    function _completeEvalOtSession(uint256 sessionId) internal {
+        vm.prank(bob);
+        mp.startEvaluationOtSession(sessionId);
+
+        vm.prank(alice);
+        mp.commitEvaluationOtRoundHash(sessionId, 0, keccak256("m0"));
+        vm.prank(bob);
+        mp.ackEvaluationOtRound(sessionId, 0);
+
+        vm.prank(bob);
+        mp.commitEvaluationOtRoundHash(sessionId, 1, keccak256("m1"));
+        vm.prank(alice);
+        mp.ackEvaluationOtRound(sessionId, 1);
+
+        vm.prank(alice);
+        mp.commitEvaluationOtRoundHash(sessionId, 2, keccak256("m2"));
+        vm.prank(bob);
+        mp.ackEvaluationOtRound(sessionId, 2);
     }
 
     function test_SuccessfulDeposits() public {
@@ -450,53 +518,13 @@ contract MillionairesTest is Test {
     }
 
     function test_FinalSettlement_AliceWins_RefundsBothDeposits() public {
-        // --- Phase 1: Deposits ---
-        vm.prank(alice);
-        mp.deposit{value: 1 ether}();
-        vm.prank(bob);
-        mp.deposit{value: 1 ether}();
-
-        // --- Phase 2: Commitments ---
         bytes32 aliceWinningLabel = keccak256(abi.encodePacked("alice_is_richer_label"));
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        _toSettleStage(
+            keccak256(abi.encodePacked(aliceWinningLabel)),
+            keccak256(abi.encodePacked("bob_wins_label"))
+        );
+        _completeEvalOtSession(1);
 
-        for (uint256 i = 0; i < 10; i++) {
-            commits[i] = MillionairesProblem.InstanceCommitment({
-                comSeed: keccak256(abi.encodePacked(keccak256(abi.encodePacked("seed", i)))),
-                rootGC: bytes32(0),
-                blobHashGC: bytes32(0),
-                rootXG: bytes32(0),
-                rootOT: bytes32(0),
-                h0: keccak256(abi.encodePacked(aliceWinningLabel)),
-                h1: keccak256(abi.encodePacked("bob_wins_label"))
-            });
-        }
-        _commitDefaultVerifierSeed();
-        vm.prank(alice);
-        mp.submitCommitments(commits);
-
-        // --- Phase 3 & 4: Choose & Reveal ---
-        vm.prank(bob);
-        mp.choose(0);
-
-        uint256[] memory indices = new uint256[](9);
-        bytes32[] memory seeds = new bytes32[](9);
-        for (uint256 i = 1; i < 10; i++) {
-            indices[i-1] = i;
-            seeds[i-1] = keccak256(abi.encodePacked("seed", i));
-        }
-        vm.prank(alice);
-        mp.revealOpenings(indices, seeds);
-
-        vm.prank(bob);
-        mp.closeDispute();
-
-        // --- Phase 5: Reveal Garbler Labels ---
-        bytes32[] memory mockLabels = new bytes32[](32);
-        vm.prank(alice);
-        mp.revealGarblerLabels(mockLabels);
-
-        // --- Phase 6: Settle ---
         uint256 aliceBalanceBefore = alice.balance;
         uint256 bobBalanceBefore = bob.balance;
         vm.prank(bob);
@@ -510,53 +538,13 @@ contract MillionairesTest is Test {
     }
 
     function test_FinalSettlement_BobWins_RefundsBothDeposits() public {
-        // --- Phase 1: Deposits ---
-        vm.prank(alice);
-        mp.deposit{value: 1 ether}();
-        vm.prank(bob);
-        mp.deposit{value: 1 ether}();
-
-        // --- Phase 2: Commitments ---
         bytes32 bobWinningLabel = keccak256(abi.encodePacked("bob_wins_label"));
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        _toSettleStage(
+            keccak256(abi.encodePacked("alice_wins_label")),
+            keccak256(abi.encodePacked(bobWinningLabel))
+        );
+        _completeEvalOtSession(1);
 
-        for (uint256 i = 0; i < 10; i++) {
-            commits[i] = MillionairesProblem.InstanceCommitment({
-                comSeed: keccak256(abi.encodePacked(keccak256(abi.encodePacked("seed", i)))),
-                rootGC: bytes32(0),
-                blobHashGC: bytes32(0),
-                rootXG: bytes32(0),
-                rootOT: bytes32(0),
-                h0: keccak256(abi.encodePacked("alice_wins_label")),
-                h1: keccak256(abi.encodePacked(bobWinningLabel))
-            });
-        }
-        _commitDefaultVerifierSeed();
-        vm.prank(alice);
-        mp.submitCommitments(commits);
-
-        // --- Phase 3 & 4: Choose & Reveal ---
-        vm.prank(bob);
-        mp.choose(0);
-
-        uint256[] memory indices = new uint256[](9);
-        bytes32[] memory seeds = new bytes32[](9);
-        for (uint256 i = 1; i < 10; i++) {
-            indices[i - 1] = i;
-            seeds[i - 1] = keccak256(abi.encodePacked("seed", i));
-        }
-        vm.prank(alice);
-        mp.revealOpenings(indices, seeds);
-
-        vm.prank(bob);
-        mp.closeDispute();
-
-        // --- Phase 5: Reveal Garbler Labels ---
-        bytes32[] memory mockLabels = new bytes32[](32);
-        vm.prank(alice);
-        mp.revealGarblerLabels(mockLabels);
-
-        // --- Phase 6: Settle ---
         uint256 aliceBalanceBefore = alice.balance;
         uint256 bobBalanceBefore = bob.balance;
         vm.prank(bob);
@@ -567,6 +555,162 @@ contract MillionairesTest is Test {
         assertEq(bob.balance, bobBalanceBefore + 1 ether);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
         assertFalse(mp.result());
+    }
+
+    function test_StartEvaluationOtSession_Success() public {
+        _toSettleStage(bytes32(0), bytes32(0));
+
+        vm.prank(bob);
+        mp.startEvaluationOtSession(7);
+
+        (
+            uint256 sessionId,
+            MillionairesProblem.EvalOtStep step,
+            uint256 stepDeadline
+        ) = mp.evalOtSession();
+        (, , , , , , , uint256 settleDeadline) = mp.deadlines();
+
+        assertEq(sessionId, 7);
+        assertEq(uint256(step), uint256(MillionairesProblem.EvalOtStep.AwaitingM0Commit));
+        assertEq(stepDeadline, block.timestamp + 20 minutes);
+        assertEq(settleDeadline, 0);
+    }
+
+    function test_StartEvaluationOtSession_Unauthorized_Reverts() public {
+        _toSettleStage(bytes32(0), bytes32(0));
+
+        vm.prank(alice);
+        vm.expectRevert("Only Evaluator");
+        mp.startEvaluationOtSession(7);
+    }
+
+    function test_StartEvaluationOtSession_Duplicate_Reverts() public {
+        _toSettleStage(bytes32(0), bytes32(0));
+
+        vm.prank(bob);
+        mp.startEvaluationOtSession(7);
+
+        mp.setSettleDeadlineForTest(block.timestamp + 1);
+
+        vm.prank(bob);
+        vm.expectRevert("Eval OT session already started");
+        mp.startEvaluationOtSession(8);
+    }
+
+    function test_StartEvaluationOtSession_ZeroSessionId_Reverts() public {
+        _toSettleStage(bytes32(0), bytes32(0));
+
+        vm.prank(bob);
+        vm.expectRevert("Bad sessionId");
+        mp.startEvaluationOtSession(0);
+    }
+
+    function test_EvaluationOtRoundRoleChecks_M0_M1_M2() public {
+        _toSettleStage(bytes32(0), bytes32(0));
+
+        vm.prank(bob);
+        mp.startEvaluationOtSession(7);
+
+        vm.prank(bob);
+        vm.expectRevert("Wrong round sender");
+        mp.commitEvaluationOtRoundHash(7, 0, keccak256("m0"));
+
+        vm.prank(alice);
+        mp.commitEvaluationOtRoundHash(7, 0, keccak256("m0"));
+
+        vm.prank(alice);
+        vm.expectRevert("Wrong round acknowledger");
+        mp.ackEvaluationOtRound(7, 0);
+
+        vm.prank(bob);
+        mp.ackEvaluationOtRound(7, 0);
+
+        vm.prank(alice);
+        vm.expectRevert("Wrong round sender");
+        mp.commitEvaluationOtRoundHash(7, 1, keccak256("m1"));
+
+        vm.prank(bob);
+        mp.commitEvaluationOtRoundHash(7, 1, keccak256("m1"));
+
+        vm.prank(bob);
+        vm.expectRevert("Wrong round acknowledger");
+        mp.ackEvaluationOtRound(7, 1);
+
+        vm.prank(alice);
+        mp.ackEvaluationOtRound(7, 1);
+
+        vm.prank(bob);
+        vm.expectRevert("Wrong round sender");
+        mp.commitEvaluationOtRoundHash(7, 2, keccak256("m2"));
+
+        vm.prank(alice);
+        mp.commitEvaluationOtRoundHash(7, 2, keccak256("m2"));
+
+        vm.prank(alice);
+        vm.expectRevert("Wrong round acknowledger");
+        mp.ackEvaluationOtRound(7, 2);
+
+        vm.prank(bob);
+        mp.ackEvaluationOtRound(7, 2);
+
+        (, MillionairesProblem.EvalOtStep step, ) = mp.evalOtSession();
+        assertEq(uint256(step), uint256(MillionairesProblem.EvalOtStep.Completed));
+    }
+
+    function test_SlashEvaluationOtTimeout_MissingSenderCommit_SlashesAlice() public {
+        _toSettleStage(bytes32(0), bytes32(0));
+
+        vm.prank(bob);
+        mp.startEvaluationOtSession(7);
+
+        vm.warp(block.timestamp + 20 minutes + 1);
+
+        uint256 bobBefore = bob.balance;
+        vm.prank(bob);
+        mp.slashEvaluationOtTimeout(7);
+
+        assertEq(bob.balance, bobBefore + 2 ether);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+    }
+
+    function test_ForceDeliverEvaluationOtRound_AckTimeout_AdvancesStep() public {
+        _toSettleStage(bytes32(0), bytes32(0));
+
+        vm.prank(bob);
+        mp.startEvaluationOtSession(7);
+
+        bytes32[] memory payloadHashes = new bytes32[](2);
+        payloadHashes[0] = keccak256("m0-payload-0");
+        payloadHashes[1] = keccak256("m0-payload-1");
+        bytes32 roundHash = keccak256(abi.encodePacked(payloadHashes));
+
+        vm.prank(alice);
+        mp.commitEvaluationOtRoundHash(7, 0, roundHash);
+        (, , uint256 ackDeadline) = mp.evalOtSession();
+
+        vm.warp(block.timestamp + 20 minutes + 1);
+
+        vm.prank(alice);
+        mp.forceDeliverEvaluationOtRound(7, 0, payloadHashes);
+
+        (, MillionairesProblem.EvalOtStep step, uint256 stepDeadline) = mp.evalOtSession();
+        assertEq(uint256(step), uint256(MillionairesProblem.EvalOtStep.AwaitingM1Commit));
+        assertEq(stepDeadline, ackDeadline + 20 minutes + 1);
+        assertEq(mp.getPublishedEvalOtPayloadCount(0), payloadHashes.length);
+        assertEq(mp.getPublishedEvalOtPayloadHash(0, 0), payloadHashes[0]);
+        assertEq(mp.getPublishedEvalOtPayloadHash(0, 1), payloadHashes[1]);
+    }
+
+    function test_Settle_RevertsWhenEvalOtNotCompleted() public {
+        bytes32 aliceWinningLabel = keccak256(abi.encodePacked("alice_is_richer_label"));
+        _toSettleStage(
+            keccak256(abi.encodePacked(aliceWinningLabel)),
+            keccak256(abi.encodePacked("bob_wins_label"))
+        );
+
+        vm.prank(bob);
+        vm.expectRevert("Eval OT session not completed");
+        mp.settle(aliceWinningLabel);
     }
 
     function test_ChallengeGateLeaf_FalseChallenge_SlashesBob() public {

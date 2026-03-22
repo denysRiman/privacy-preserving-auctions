@@ -117,6 +117,47 @@ fn read_claimed_leaves_file(path: &Path) -> AppResult<Vec<[u8; 71]>> {
     Ok(leaves)
 }
 
+fn read_bytes32_lines_file(path: &Path) -> AppResult<Vec<[u8; 32]>> {
+    let raw = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+
+    for (line_idx, line) in raw.lines().enumerate() {
+        let mut value = line
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_end_matches(',')
+            .trim()
+            .trim_matches('"')
+            .trim();
+
+        if value.is_empty() {
+            continue;
+        }
+
+        value = value.trim_start_matches('[').trim_end_matches(']');
+        if value.is_empty() {
+            continue;
+        }
+
+        let parsed = parse_bytes32(value).map_err(|e| {
+            format!(
+                "invalid bytes32 line at {}:{}: {}",
+                path.display(),
+                line_idx + 1,
+                e
+            )
+        })?;
+        out.push(parsed);
+    }
+
+    if out.is_empty() {
+        return Err(format!("No bytes32 values found in {}", path.display()).into());
+    }
+    Ok(out)
+}
+
 fn fetch_onchain_ot_payload_hashes(
     contract_address: &str,
     rpc_url: &str,
@@ -668,6 +709,146 @@ fn cmd_choose(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_start_eval_ot_session(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let session_id = parse_u64(&required_flag_value(args, "--session-id")?, "session-id")?;
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "startEvaluationOtSession(uint256)".to_string(),
+        session_id.to_string(),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+
+    print_tx_summary("start_eval_ot_session", &tx_result);
+    println!("session_id={session_id}");
+    Ok(())
+}
+
+fn cmd_commit_eval_ot_round_hash(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let session_id = parse_u64(&required_flag_value(args, "--session-id")?, "session-id")?;
+    let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
+    let round_hash = parse_bytes32(&required_flag_value(args, "--round-hash")?)?;
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "commitEvaluationOtRoundHash(uint256,uint8,bytes32)".to_string(),
+        session_id.to_string(),
+        round.to_string(),
+        hex32(round_hash),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+
+    print_tx_summary("commit_eval_ot_round_hash", &tx_result);
+    println!("session_id={session_id}");
+    println!("round={round}");
+    println!("round_hash={}", hex32(round_hash));
+    Ok(())
+}
+
+fn cmd_ack_eval_ot_round(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let session_id = parse_u64(&required_flag_value(args, "--session-id")?, "session-id")?;
+    let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "ackEvaluationOtRound(uint256,uint8)".to_string(),
+        session_id.to_string(),
+        round.to_string(),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+
+    print_tx_summary("ack_eval_ot_round", &tx_result);
+    println!("session_id={session_id}");
+    println!("round={round}");
+    Ok(())
+}
+
+fn cmd_force_deliver_eval_ot_round(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let session_id = parse_u64(&required_flag_value(args, "--session-id")?, "session-id")?;
+    let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
+    let payloads = if let Some(raw) = parse_flag_value(args, "--payloads") {
+        parse_bytes32_list_csv(&raw)?
+    } else if let Some(path) = parse_flag_value(args, "--payloads-file") {
+        read_bytes32_lines_file(Path::new(&path))?
+    } else {
+        return Err("Provide --payloads or --payloads-file".into());
+    };
+    let payloads_arg = bytes32_vec_literal(&payloads);
+    let payload_refs = payloads.iter().map(|payload| payload.as_slice()).collect::<Vec<_>>();
+    let payload_commitment = keccak256(&payload_refs);
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "forceDeliverEvaluationOtRound(uint256,uint8,bytes32[])".to_string(),
+        session_id.to_string(),
+        round.to_string(),
+        payloads_arg,
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+
+    print_tx_summary("force_deliver_eval_ot_round", &tx_result);
+    println!("session_id={session_id}");
+    println!("round={round}");
+    println!("payload_count={}", payloads.len());
+    println!("payload_commitment={}", hex32(payload_commitment));
+    Ok(())
+}
+
+fn cmd_slash_eval_ot_timeout(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let session_id = parse_u64(&required_flag_value(args, "--session-id")?, "session-id")?;
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "slashEvaluationOtTimeout(uint256)".to_string(),
+        session_id.to_string(),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+
+    print_tx_summary("slash_eval_ot_timeout", &tx_result);
+    println!("session_id={session_id}");
+    Ok(())
+}
+
 fn cmd_evaluate_m(args: &[String]) -> AppResult<()> {
     let eval_dir = Path::new(&required_flag_value(args, "--eval-dir")?).to_path_buf();
     let y_value = parse_u64(&required_flag_value(args, "--y")?, "y")?;
@@ -1023,6 +1204,13 @@ fn print_help() {
     println!("  deposit");
     println!("  commit-verifier-seed [--seed <0x..32>]");
     println!("  choose --m <index>");
+    println!("  start-eval-ot-session --session-id <id>");
+    println!("  commit-eval-ot-round-hash --session-id <id> --round <0|1|2> --round-hash <0x..32>");
+    println!("  ack-eval-ot-round --session-id <id> --round <0|1|2>");
+    println!(
+        "  force-deliver-eval-ot-round --session-id <id> --round <0|1|2> (--payloads <0x..,0x..> | --payloads-file <path>)"
+    );
+    println!("  slash-eval-ot-timeout --session-id <id>");
     println!("  evaluate-m --eval-dir <path> --y <u64>");
     println!(
         "  prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]"
@@ -1049,6 +1237,11 @@ fn main() -> AppResult<()> {
         "deposit" => cmd_deposit(),
         "commit-verifier-seed" => cmd_commit_verifier_seed(tail),
         "choose" => cmd_choose(tail),
+        "start-eval-ot-session" => cmd_start_eval_ot_session(tail),
+        "commit-eval-ot-round-hash" => cmd_commit_eval_ot_round_hash(tail),
+        "ack-eval-ot-round" => cmd_ack_eval_ot_round(tail),
+        "force-deliver-eval-ot-round" => cmd_force_deliver_eval_ot_round(tail),
+        "slash-eval-ot-timeout" => cmd_slash_eval_ot_timeout(tail),
         "evaluate-m" => cmd_evaluate_m(tail),
         "prepare-dispute" => cmd_prepare_dispute(tail),
         "prepare-ot-dispute" => cmd_prepare_ot_dispute(tail),
@@ -1065,7 +1258,16 @@ fn main() -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_path(prefix: &str) -> PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_millis();
+        env::temp_dir().join(format!("{prefix}-{millis}.txt"))
+    }
 
     #[test]
     fn decode_hex_roundtrip_bytes32() {
@@ -1137,18 +1339,69 @@ mod tests {
     #[test]
     fn reads_claimed_leaves_file() {
         let leaf = [0xabu8; 71];
-        let path = {
-            let millis = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time")
-                .as_millis();
-            env::temp_dir().join(format!("claimed-leaves-{millis}.txt"))
-        };
+        let path = temp_test_path("claimed-leaves");
 
         fs::write(&path, format!("{}\n", hex_prefixed(&leaf))).expect("write temp file");
         let parsed = read_claimed_leaves_file(&path).expect("parse leaves");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], leaf);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reads_bytes32_lines_file_supports_comments_quotes_and_brackets() {
+        let path = temp_test_path("bytes32-lines");
+        fs::write(
+            &path,
+            concat!(
+                "# leading comment\n",
+                "  [0x1111111111111111111111111111111111111111111111111111111111111111],  # inline comment\n",
+                "\"0x2222222222222222222222222222222222222222222222222222222222222222\"\n",
+                "   \n",
+            ),
+        )
+        .expect("write temp file");
+
+        let parsed = read_bytes32_lines_file(&path).expect("read bytes32 lines");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            hex32(parsed[0]),
+            "0x1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            hex32(parsed[1]),
+            "0x2222222222222222222222222222222222222222222222222222222222222222"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reads_bytes32_lines_file_rejects_empty_files() {
+        let path = temp_test_path("bytes32-empty");
+        fs::write(&path, "  # nothing here\n\n").expect("write temp file");
+
+        let err = read_bytes32_lines_file(&path).expect_err("empty file should fail");
+        assert!(err.to_string().contains("No bytes32 values found"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reads_bytes32_lines_file_reports_invalid_line_number() {
+        let path = temp_test_path("bytes32-invalid");
+        fs::write(
+            &path,
+            concat!(
+                "0x1111111111111111111111111111111111111111111111111111111111111111\n",
+                "0x2222\n",
+            ),
+        )
+        .expect("write temp file");
+
+        let err = read_bytes32_lines_file(&path).expect_err("invalid line should fail");
+        let rendered = err.to_string();
+        assert!(rendered.contains("invalid bytes32 line"));
+        assert!(rendered.contains(":2:"));
+        assert!(rendered.contains("expected 32 bytes"));
         let _ = fs::remove_file(path);
     }
 
