@@ -3,6 +3,8 @@
 
 pub mod cli;
 pub mod consensus;
+pub mod eip4844;
+pub mod eval_blob;
 pub mod evaluation;
 pub mod garble;
 pub mod ih;

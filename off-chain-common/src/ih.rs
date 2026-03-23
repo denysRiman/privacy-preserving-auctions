@@ -40,7 +40,10 @@ pub fn incremental_root(leaves: &[[u8; 71]]) -> [u8; 32] {
 ///   - `proof[0] = IH_{index-1}` (prefix state before challenged block),
 ///   - `proof[1..] = block_hash_{index+1..end}` (ordered suffix blocks).
 pub fn ih_proof_from_hashes(block_hashes: &[[u8; 32]], index: usize) -> Vec<[u8; 32]> {
-    assert!(!block_hashes.is_empty(), "cannot build IH proof for empty chain");
+    assert!(
+        !block_hashes.is_empty(),
+        "cannot build IH proof for empty chain"
+    );
     assert!(index < block_hashes.len(), "IH proof index out of range");
 
     if block_hashes.len() == 1 {

@@ -16,6 +16,7 @@ Bob backend CLI for the protocol flow:
 - `deposit` (default if no command is provided)
 - `commit-verifier-seed [--seed <0x..32>]`
 - `choose --m <index>`
+- `evaluate-m --y <u64> [--payload-file <path>] [--eval-dir <path>] [--alice-labels-file <path>]`
 - `prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]`
 - `prepare-ot-dispute --instance-id <id> --verifier-seed <0x..32> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>] [--allow-false-challenge]`
 - `dispute --instance-id <id> --seed <0x..32> --gate-index <k> --gate-type <0|1|2> --wire-a <u16> --wire-b <u16> --wire-c <u16> --leaf-bytes <0x..71> --ih-proof <0x..,0x..> --layout-proof <0x..,0x..>`
@@ -56,6 +57,12 @@ cargo run --offline -- prepare-ot-dispute \
   --garbler-seed 0x... \
   --verifier-seed 0x... \
   --bit-width 8
+
+# 6) Evaluate the chosen m from canonical blob payload + Alice labels
+cargo run --offline -- evaluate-m \
+  --payload-file /tmp/eval/eval-m-blob.bin \
+  --alice-labels-file /tmp/eval/alice-x-labels16.txt \
+  --y 42
 ```
 
 `prepare-dispute` prints:
@@ -79,3 +86,4 @@ cargo run --offline -- prepare-ot-dispute \
 ## Notes
 - OT dispute evidence is single-mode in this repo: Alice publishes opened OT payload hashes on-chain.
 - Use `prepare-ot-dispute + dispute-ot` for the OT dispute flow.
+- `evaluate-m` prefers canonical blob payload (`eval-m-blob.bin` / `--payload-file`) and falls back to legacy split files when blob payload is absent.

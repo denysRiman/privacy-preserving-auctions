@@ -4,7 +4,9 @@ use off_chain_common::ih::{
     gc_block_hash, ih_proof_from_hashes, incremental_root_from_hashes, verify_ih_proof,
 };
 use off_chain_common::merkle::{merkle_proof_from_hashes, merkle_root_from_hashes, verify_proof};
-use off_chain_common::scenario::{build_millionaires_layout, com_seed, derive_instance_seed, CUT_AND_CHOOSE_N};
+use off_chain_common::scenario::{
+    CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed,
+};
 use off_chain_common::types::{CircuitLayout, GateDesc, GateType};
 
 /// Per-instance artifacts used to print Solidity-ready challenge data.
@@ -152,7 +154,10 @@ async fn main() {
     } else {
         challenge_instance_arg
     };
-    assert!(challenge_instance < n, "challenge-instance must be in [0, N)");
+    assert!(
+        challenge_instance < n,
+        "challenge-instance must be in [0, N)"
+    );
     assert!(
         challenge_instance != m,
         "challenge-instance must be in opened set (cannot be m)"
@@ -226,12 +231,22 @@ async fn main() {
     println!("layoutProofValid = {}", layout_proof_ok);
 
     // Direct copy-paste helper for Solidity tests.
-    let fn_name = format!("_rustVectorDefault{}Gate{}", gate_type_label(gate.gate_type), gate_index);
+    let fn_name = format!(
+        "_rustVectorDefault{}Gate{}",
+        gate_type_label(gate.gate_type),
+        gate_index
+    );
     println!();
     println!("=== Solidity Paste Snippet ===");
-    println!("function {}() internal pure returns (RustGateChallengeVector memory v) {{", fn_name);
+    println!(
+        "function {}() internal pure returns (RustGateChallengeVector memory v) {{",
+        fn_name
+    );
     println!("    v.circuitId = {};", solidity_hex_literal(&circuit_id));
-    println!("    v.circuitLayoutRoot = {};", solidity_hex_literal(&circuit_layout_root));
+    println!(
+        "    v.circuitLayoutRoot = {};",
+        solidity_hex_literal(&circuit_layout_root)
+    );
     println!();
     println!("    v.mChoice = {};", m);
     println!("    v.challengeInstanceId = {};", challenge_instance);

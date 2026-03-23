@@ -21,7 +21,9 @@ pub fn label16_to_bytes32(label: [u8; 16]) -> [u8; 32] {
 
 /// Little-endian bit decomposition: bit 0 is LSB and maps to wire 0.
 pub fn u64_to_bits_le(value: u64, bit_width: usize) -> Vec<u8> {
-    (0..bit_width).map(|idx| ((value >> idx) & 1) as u8).collect()
+    (0..bit_width)
+        .map(|idx| ((value >> idx) & 1) as u8)
+        .collect()
 }
 
 /// Returns output wire id for a layout (the last gate output in this MVP circuit format).
@@ -76,8 +78,7 @@ pub fn derive_alice_input_labels(
     x_value: u64,
 ) -> Vec<[u8; 16]> {
     let bits = u64_to_bits_le(x_value, bit_width);
-    bits
-        .iter()
+    bits.iter()
         .enumerate()
         .map(|(bit_idx, bit)| {
             derive_wire_label(circuit_id, instance_id, bit_idx as u16, *bit, seed)
@@ -107,8 +108,10 @@ pub fn derive_not_gate_hints(seed: [u8; 32], layout: &CircuitLayout) -> Vec<NotG
                 return None;
             }
 
-            let in0 = derive_wire_label(layout.circuit_id, layout.instance_id, gate.wire_a, 0, seed);
-            let in1 = derive_wire_label(layout.circuit_id, layout.instance_id, gate.wire_a, 1, seed);
+            let in0 =
+                derive_wire_label(layout.circuit_id, layout.instance_id, gate.wire_a, 0, seed);
+            let in1 =
+                derive_wire_label(layout.circuit_id, layout.instance_id, gate.wire_a, 1, seed);
             let out_if_in0 =
                 derive_wire_label(layout.circuit_id, layout.instance_id, gate.wire_c, 1, seed);
             let out_if_in1 =
@@ -180,13 +183,20 @@ pub fn evaluate_garbled_circuit(
     }
 
     for (gate_idx, gate) in gates.iter().enumerate() {
-        let label_a = wire_labels[gate.wire_a as usize]
-            .ok_or_else(|| format!("missing wire label for wireA={} gate={}", gate.wire_a, gate_idx))?;
+        let label_a = wire_labels[gate.wire_a as usize].ok_or_else(|| {
+            format!(
+                "missing wire label for wireA={} gate={}",
+                gate.wire_a, gate_idx
+            )
+        })?;
 
         let out_label = match gate.gate_type {
             GateType::And | GateType::Xor => {
                 let label_b = wire_labels[gate.wire_b as usize].ok_or_else(|| {
-                    format!("missing wire label for wireB={} gate={}", gate.wire_b, gate_idx)
+                    format!(
+                        "missing wire label for wireB={} gate={}",
+                        gate.wire_b, gate_idx
+                    )
                 })?;
                 let perm_a = label_a[0] & 1;
                 let perm_b = label_b[0] & 1;

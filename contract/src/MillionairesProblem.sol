@@ -356,14 +356,8 @@ contract MillionairesProblem {
         require(block.timestamp <= deadlines.labels, "Label reveal deadline missed");
 
         bytes32 bHash = blobhash(0);
-
-        // test network only
-        if (block.chainid != 31337) {
-            require(bHash != bytes32(0), "Garbled Table Blob missing");
-            require(bHash == instanceCommitments[m].blobHashGC, "Blob does not match Phase 2 commitment");
-        } else {
-            bHash = instanceCommitments[m].blobHashGC;
-        }
+        require(bHash != bytes32(0), "Garbled Table Blob missing");
+        require(bHash == instanceCommitments[m].blobHashGC, "Blob does not match Phase 2 commitment");
 
         evaluationTableBlobHash = bHash;
         garblerLabels = _labels;

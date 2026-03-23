@@ -3,9 +3,13 @@
 
 use off_chain_common::consensus::{keccak256, layout_leaf_hash};
 use off_chain_common::garble::garble_circuit;
-use off_chain_common::ih::{gc_block_hash, ih_proof_from_hashes, incremental_root_from_hashes, verify_ih_proof};
+use off_chain_common::ih::{
+    gc_block_hash, ih_proof_from_hashes, incremental_root_from_hashes, verify_ih_proof,
+};
 use off_chain_common::merkle::{merkle_proof_from_hashes, merkle_root_from_hashes, verify_proof};
-use off_chain_common::scenario::{build_millionaires_layout, com_seed, derive_instance_seed, CUT_AND_CHOOSE_N};
+use off_chain_common::scenario::{
+    CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed,
+};
 use off_chain_common::types::CircuitLayout;
 
 #[test]

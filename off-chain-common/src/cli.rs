@@ -45,7 +45,7 @@ pub fn cast_args_with_tx_overrides(args: &[String]) -> Vec<String> {
         out.push("--legacy".to_string());
     }
 
-    if !out.iter().any(|arg| arg == "--gas-price") {
+    if !has_blob_tx && !out.iter().any(|arg| arg == "--gas-price") {
         if let Ok(gas_price_wei) = env::var("TX_GAS_PRICE_WEI") {
             let trimmed = gas_price_wei.trim();
             if !trimmed.is_empty() {
@@ -161,10 +161,7 @@ pub fn parse_bytes32_list_csv(value: &str) -> CliResult<Vec<[u8; 32]>> {
         return Ok(Vec::new());
     }
 
-    let normalized = trimmed
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim();
+    let normalized = trimmed.trim_start_matches('[').trim_end_matches(']').trim();
     if normalized.is_empty() {
         return Ok(Vec::new());
     }
@@ -194,8 +191,7 @@ pub fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
 }
 
 pub fn required_flag_value(args: &[String], flag: &str) -> CliResult<String> {
-    parse_flag_value(args, flag)
-        .ok_or_else(|| format!("Missing required argument: {flag}").into())
+    parse_flag_value(args, flag).ok_or_else(|| format!("Missing required argument: {flag}").into())
 }
 
 pub fn parse_u64(value: &str, name: &str) -> CliResult<u64> {

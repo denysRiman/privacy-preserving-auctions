@@ -4,6 +4,8 @@ use off_chain_common::cli::{
     run_cast,
 };
 use off_chain_common::consensus::{derive_wire_label, keccak256};
+use off_chain_common::eip4844::eval_payload_versioned_blob_hash;
+use off_chain_common::eval_blob::CanonicalEvalBlobPayload;
 use off_chain_common::evaluation::{
     derive_alice_input_labels, derive_bob_label_offers, derive_not_gate_hints,
     derive_output_labels, label16_to_bytes32, millionaires_gt_output_wire,
@@ -246,6 +248,7 @@ fn write_instance_files(
         let com_file = out_dir.join(format!("instance-{}-com-seed.txt", inst.instance_id));
         let root_file = out_dir.join(format!("instance-{}-root-gc.txt", inst.instance_id));
         let leaves_file = out_dir.join(format!("instance-{}-leaves.txt", inst.instance_id));
+        let eval_blob_file = out_dir.join(format!("instance-{}-eval-blob.bin", inst.instance_id));
         let mut root_ot_manifest = None::<String>;
         let mut payloads_manifest = None::<String>;
 
@@ -259,6 +262,13 @@ fn write_instance_files(
             leaves_raw.push('\n');
         }
         fs::write(&leaves_file, leaves_raw)?;
+        let eval_payload = build_eval_blob_payload_for_instance(
+            config,
+            inst.instance_id,
+            inst.seed,
+            inst.leaves.clone(),
+        )?;
+        let eval_blob_hash = write_eval_blob_payload(&eval_blob_file, &eval_payload)?;
 
         if let Some(verifier_seed) = verifier_seed {
             let root_ot = recompute_ot_root(
@@ -297,11 +307,13 @@ fn write_instance_files(
         }
 
         manifest.push_str(&format!(
-            "instance {}:\n  seed={}\n  comSeed={}\n  rootGC={}\n",
+            "instance {}:\n  seed={}\n  comSeed={}\n  rootGC={}\n  blobHashGC={}\n  evalBlob={}\n",
             inst.instance_id,
             seed_file.display(),
             com_file.display(),
-            root_file.display()
+            root_file.display(),
+            hex32(eval_blob_hash),
+            eval_blob_file.display()
         ));
         if let Some(root_ot_file) = root_ot_manifest {
             manifest.push_str(&format!("  rootOT={}\n", root_ot_file));
@@ -355,6 +367,113 @@ fn derive_anchor_lists(config: &SessionConfig) -> AppResult<(Vec<[u8; 32]>, Vec<
     Ok((h0, h1))
 }
 
+fn build_eval_blob_payload_for_instance(
+    config: &SessionConfig,
+    instance_id: usize,
+    seed: [u8; 32],
+    leaves: Vec<[u8; 71]>,
+) -> AppResult<CanonicalEvalBlobPayload> {
+    let gates = build_millionaires_layout(config.bit_width);
+    let output_wire = millionaires_gt_output_wire(&gates, config.bit_width)
+        .map_err(|e| format!("failed to resolve millionaire output wire: {e}"))?;
+    let layout = CircuitLayout {
+        circuit_id: config.circuit_id,
+        instance_id: instance_id as u64,
+        gates,
+    };
+
+    let (l0, l1) = derive_output_labels(seed, &layout, output_wire)
+        .map_err(|e| format!("failed to derive output labels: {e}"))?;
+    let l_true_32 = label16_to_bytes32(l1);
+    let l_false_32 = label16_to_bytes32(l0);
+    let h0 = keccak256(&[&l_true_32]);
+    let h1 = keccak256(&[&l_false_32]);
+
+    let y_offers = derive_bob_label_offers(
+        seed,
+        config.circuit_id,
+        instance_id as u64,
+        config.bit_width,
+    );
+    let not_hints = derive_not_gate_hints(seed, &layout);
+    let block_hashes = leaves
+        .iter()
+        .enumerate()
+        .map(|(idx, leaf)| gc_block_hash(idx as u64, leaf))
+        .collect::<Vec<_>>();
+    let root_gc = incremental_root_from_hashes(&block_hashes);
+
+    Ok(CanonicalEvalBlobPayload {
+        circuit_id: config.circuit_id,
+        instance_id: instance_id as u64,
+        bit_width: config.bit_width as u16,
+        output_wire,
+        h0,
+        h1,
+        lout_true: l_true_32,
+        lout_false: l_false_32,
+        root_gc,
+        block_hashes,
+        gc_leaves: leaves,
+        y_offers,
+        not_hints,
+    })
+}
+
+fn write_eval_blob_payload(path: &Path, payload: &CanonicalEvalBlobPayload) -> AppResult<[u8; 32]> {
+    let encoded = payload
+        .encode()
+        .map_err(|e| format!("failed to encode eval payload: {e}"))?;
+    fs::write(path, &encoded)?;
+    eval_payload_versioned_blob_hash(&encoded).map_err(|e| {
+        format!(
+            "failed to derive EIP-4844 versioned blob hash for {}: {e}",
+            path.display()
+        )
+        .into()
+    })
+}
+
+fn derive_blob_hashes_from_exported_payloads(
+    out_dir: &Path,
+    instances: &[InstanceArtifacts],
+) -> AppResult<Vec<[u8; 32]>> {
+    let mut out = vec![[0u8; 32]; CUT_AND_CHOOSE_N];
+    for inst in instances {
+        let path = out_dir.join(format!("instance-{}-eval-blob.bin", inst.instance_id));
+        let encoded = fs::read(&path).map_err(|e| {
+            format!(
+                "failed to read eval blob payload for instance {} at {}: {e}",
+                inst.instance_id,
+                path.display()
+            )
+        })?;
+        let payload = CanonicalEvalBlobPayload::decode(&encoded).map_err(|e| {
+            format!(
+                "failed to decode eval blob payload for instance {} at {}: {e}",
+                inst.instance_id,
+                path.display()
+            )
+        })?;
+        if payload.instance_id != inst.instance_id as u64 {
+            return Err(format!(
+                "eval blob payload instance mismatch at {}: expected {}, got {}",
+                path.display(),
+                inst.instance_id,
+                payload.instance_id
+            )
+            .into());
+        }
+        out[inst.instance_id] = eval_payload_versioned_blob_hash(&encoded).map_err(|e| {
+            format!(
+                "failed to derive versioned blob hash from eval payload at {}: {e}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(out)
+}
+
 fn cmd_derive_anchors(args: &[String]) -> AppResult<()> {
     let config = parse_session_config(args)?;
     let (h0, h1) = derive_anchor_lists(&config)?;
@@ -380,21 +499,13 @@ fn cmd_prepare_eval(args: &[String]) -> AppResult<()> {
 
     let instances = build_instances(&config);
     let inst = &instances[m];
-    let gates = build_millionaires_layout(config.bit_width);
-    let layout = CircuitLayout {
-        circuit_id: config.circuit_id,
-        instance_id: m as u64,
-        gates: gates.clone(),
-    };
-
-    let out_wire = millionaires_gt_output_wire(&gates, config.bit_width)
-        .map_err(|e| format!("failed to resolve millionaire output wire: {e}"))?;
-    let (l0, l1) = derive_output_labels(inst.seed, &layout, out_wire)
-        .map_err(|e| format!("failed to derive output labels: {e}"))?;
-    let l_true_32 = label16_to_bytes32(l1);
-    let l_false_32 = label16_to_bytes32(l0);
-    let h0 = keccak256(&[&l_true_32]);
-    let h1 = keccak256(&[&l_false_32]);
+    let eval_payload =
+        build_eval_blob_payload_for_instance(&config, m, inst.seed, inst.leaves.clone())?;
+    let out_wire = eval_payload.output_wire;
+    let l_true_32 = eval_payload.lout_true;
+    let l_false_32 = eval_payload.lout_false;
+    let h0 = eval_payload.h0;
+    let h1 = eval_payload.h1;
 
     let alice_labels16 = derive_alice_input_labels(
         inst.seed,
@@ -408,11 +519,13 @@ fn cmd_prepare_eval(args: &[String]) -> AppResult<()> {
         .map(|label| label16_to_bytes32(*label))
         .collect::<Vec<_>>();
 
-    let y_offers =
-        derive_bob_label_offers(inst.seed, config.circuit_id, m as u64, config.bit_width);
-    let not_hints = derive_not_gate_hints(inst.seed, &layout);
+    let y_offers = eval_payload.y_offers.clone();
+    let not_hints = eval_payload.not_hints.clone();
 
     fs::create_dir_all(&out_dir)?;
+
+    let blob_file = out_dir.join("eval-m-blob.bin");
+    let blob_hash = write_eval_blob_payload(&blob_file, &eval_payload)?;
 
     let leaves_file = out_dir.join("gc-m-leaves.txt");
     let mut leaves_raw = String::new();
@@ -499,6 +612,8 @@ fn cmd_prepare_eval(args: &[String]) -> AppResult<()> {
 
     println!("status=prepared_eval");
     println!("eval_dir={}", out_dir.display());
+    println!("eval_blob_file={}", blob_file.display());
+    println!("eval_blob_hash={}", hex32(blob_hash));
     println!("instance_id={m}");
     println!("x_value={x_value}");
     println!("output_wire={out_wire}");
@@ -598,6 +713,7 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     let config = parse_session_config(args)?;
     let instances = build_instances(&config);
     let zero = [0u8; 32];
+    let export_dir = parse_flag_value(args, "--export-dir").map(PathBuf::from);
     let verifier_seed = parse_optional_verifier_seed(args)?;
     let derive_default_anchors =
         parse_flag_value(args, "--h0").is_none() || parse_flag_value(args, "--h1").is_none();
@@ -625,6 +741,11 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
             .collect::<Vec<_>>()
     };
 
+    if let Some(path) = export_dir.as_ref() {
+        write_instance_files(path, &config, &instances, verifier_seed)?;
+        println!("artifacts_exported={}", path.display());
+    }
+
     let blob_hashes = if let Some(raw) = parse_flag_value(args, "--blob-hashes") {
         let parsed = parse_bytes32_list_csv(&raw)?;
         if parsed.len() != CUT_AND_CHOOSE_N {
@@ -636,6 +757,8 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
             .into());
         }
         parsed
+    } else if let Some(path) = export_dir.as_ref() {
+        derive_blob_hashes_from_exported_payloads(path, &instances)?
     } else {
         vec![zero; CUT_AND_CHOOSE_N]
     };
@@ -696,11 +819,6 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
             .1
             .clone()
     };
-
-    if let Some(path) = parse_flag_value(args, "--export-dir") {
-        write_instance_files(Path::new(&path), &config, &instances, verifier_seed)?;
-        println!("artifacts_exported={path}");
-    }
 
     let tuple_items = instances
         .iter()
@@ -826,7 +944,10 @@ fn cmd_publish_ot_payloads(args: &[String]) -> AppResult<()> {
     ])?;
 
     print_tx_summary("publish_ot_payloads", &tx_result);
-    let payload_refs = payloads.iter().map(|payload| payload.as_slice()).collect::<Vec<_>>();
+    let payload_refs = payloads
+        .iter()
+        .map(|payload| payload.as_slice())
+        .collect::<Vec<_>>();
     let payload_commitment = keccak256(&payload_refs);
     println!("instance_id={instance_id}");
     println!("payload_count={}", payloads.len());
@@ -848,7 +969,7 @@ fn cmd_reveal_labels(args: &[String]) -> AppResult<()> {
     };
 
     let labels_arg = bytes32_vec_literal(&labels);
-    let tx_result = run_cast(&[
+    let mut tx_args = vec![
         "send".to_string(),
         contract_address,
         "revealGarblerLabels(bytes32[])".to_string(),
@@ -857,10 +978,20 @@ fn cmd_reveal_labels(args: &[String]) -> AppResult<()> {
         alice_private_key,
         "--rpc-url".to_string(),
         rpc_url,
-    ])?;
+    ];
+    let use_blob = args.iter().any(|arg| arg == "--blob");
+    if use_blob {
+        let blob_path = required_flag_value(args, "--path")?;
+        tx_args.push("--blob".to_string());
+        tx_args.push("--path".to_string());
+        tx_args.push(blob_path.clone());
+    }
+
+    let tx_result = run_cast(&tx_args)?;
 
     print_tx_summary("reveal_labels", &tx_result);
     println!("labels_count={}", labels.len());
+    println!("blob_enabled={use_blob}");
     Ok(())
 }
 
@@ -934,7 +1065,10 @@ fn cmd_force_deliver_eval_ot_round(args: &[String]) -> AppResult<()> {
         return Err("Provide --payloads or --payloads-file".into());
     };
     let payloads_arg = bytes32_vec_literal(&payloads);
-    let payload_refs = payloads.iter().map(|payload| payload.as_slice()).collect::<Vec<_>>();
+    let payload_refs = payloads
+        .iter()
+        .map(|payload| payload.as_slice())
+        .collect::<Vec<_>>();
     let payload_commitment = keccak256(&payload_refs);
 
     let tx_result = run_cast(&[
@@ -979,7 +1113,9 @@ fn print_help() {
     println!(
         "  publish-ot-payloads --instance-id <id> (--payloads <0x..,0x..> | --payloads-file <path>)"
     );
-    println!("  reveal-labels (--labels <0x..,0x..> | --labels-file <path>)");
+    println!(
+        "  reveal-labels (--labels <0x..,0x..> | --labels-file <path>) [--blob --path <payload-file>]"
+    );
     println!("  commit-eval-ot-round-hash --session-id <id> --round <0|1|2> --round-hash <0x..32>");
     println!("  ack-eval-ot-round --session-id <id> --round <0|1|2>");
     println!(
@@ -1106,8 +1242,10 @@ mod tests {
         write_instance_files(&path, &config, &instances, Some(verifier_seed)).expect("export");
         let root_ot_path = path.join("instance-0-root-ot.txt");
         let payloads_path = path.join("instance-0-ot-payloads.txt");
+        let eval_blob_path = path.join("instance-0-eval-blob.bin");
         assert!(root_ot_path.exists());
         assert!(payloads_path.exists());
+        assert!(eval_blob_path.exists());
 
         let root_ot = fs::read_to_string(&root_ot_path).expect("read rootOT");
         assert!(root_ot.trim_start().starts_with("0x"));

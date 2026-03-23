@@ -22,6 +22,7 @@ BOB_Y_VALUE="${BOB_Y_VALUE:-random}"
 TX_LEGACY="${TX_LEGACY:-1}"
 TX_GAS_PRICE_WEI="${TX_GAS_PRICE_WEI:-0}"
 STRICT_BALANCE_CHECK="${STRICT_BALANCE_CHECK:-1}"
+EVAL_BLOB_FEE_TOLERANCE_WEI="${EVAL_BLOB_FEE_TOLERANCE_WEI:-10000000000000000}" # 0.01 ETH
 VERIFIER_SEED_OVERRIDE="${VERIFIER_SEED_OVERRIDE:-${VERIFIER_SEED:-}}"
 
 CUT_AND_CHOOSE_N=10
@@ -254,6 +255,29 @@ short_hash32() {
   fi
 }
 
+file_size_bytes() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    return 1
+  fi
+  wc -c < "${path}" | tr -d '[:space:]'
+}
+
+bytes_to_kib_tenths() {
+  local bytes="$1"
+  if [[ ! "${bytes}" =~ ^[0-9]+$ ]]; then
+    echo "n/a"
+    return
+  fi
+  local kib_tenths
+  local whole
+  local tenths
+  kib_tenths=$(( (bytes * 10 + 512) / 1024 ))
+  whole=$(( kib_tenths / 10 ))
+  tenths=$(( kib_tenths % 10 ))
+  echo "${whole}.${tenths}"
+}
+
 compact_cli_output() {
   local actor="$1"
   local command="$2"
@@ -279,13 +303,18 @@ compact_cli_output() {
       fi
       ;;
     alice:submit-commitments)
-      local circuit_id bit_width root_ot_nonzero instance0_line instance9_line
-      local com0 rootgc0 rootot0 com9 rootgc9 rootot9
+      local circuit_id bit_width root_ot_nonzero blob_nonzero instance0_line instance9_line
+      local com0 rootgc0 rootot0 blob0 com9 rootgc9 rootot9 blob9
       circuit_id="$(extract_kv_from_text circuit_id "${raw}")"
       bit_width="$(extract_kv_from_text bit_width "${raw}")"
       root_ot_nonzero="$(
         printf '%s\n' "${raw}" \
           | sed -nE 's/.* rootOT=(0x[0-9a-fA-F]{64}).*/\1/p' \
+          | grep -Evc '^0x0{64}$' || true
+      )"
+      blob_nonzero="$(
+        printf '%s\n' "${raw}" \
+          | sed -nE 's/.* blobHashGC=(0x[0-9a-fA-F]{64}).*/\1/p' \
           | grep -Evc '^0x0{64}$' || true
       )"
       instance0_line="$(printf '%s\n' "${raw}" | sed -nE '/^instance=0 /p' | head -n1)"
@@ -294,15 +323,17 @@ compact_cli_output() {
       com0="$(printf '%s\n' "${instance0_line}" | sed -nE 's/.*comSeed=(0x[0-9a-fA-F]{64}).*/\1/p')"
       rootgc0="$(printf '%s\n' "${instance0_line}" | sed -nE 's/.*rootGC=(0x[0-9a-fA-F]{64}).*/\1/p')"
       rootot0="$(printf '%s\n' "${instance0_line}" | sed -nE 's/.*rootOT=(0x[0-9a-fA-F]{64}).*/\1/p')"
+      blob0="$(printf '%s\n' "${instance0_line}" | sed -nE 's/.*blobHashGC=(0x[0-9a-fA-F]{64}).*/\1/p')"
       com9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*comSeed=(0x[0-9a-fA-F]{64}).*/\1/p')"
       rootgc9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*rootGC=(0x[0-9a-fA-F]{64}).*/\1/p')"
       rootot9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*rootOT=(0x[0-9a-fA-F]{64}).*/\1/p')"
+      blob9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*blobHashGC=(0x[0-9a-fA-F]{64}).*/\1/p')"
 
-      echo "  Alice: submit_commitments n=${CUT_AND_CHOOSE_N}, bit_width=${bit_width}, circuit=$(short_hash32 "${circuit_id}"), rootOT_nonzero=${root_ot_nonzero}/${CUT_AND_CHOOSE_N} [OK]"
-      [[ -n "${com0}" || -n "${rootgc0}" || -n "${rootot0}" ]] && \
-        echo "  commitment_sample: i=0 comSeed=$(short_hash32 "${com0}") rootGC=$(short_hash32 "${rootgc0}") rootOT=$(short_hash32 "${rootot0}")"
-      [[ -n "${com9}" || -n "${rootgc9}" || -n "${rootot9}" ]] && \
-        echo "  commitment_sample: i=$((CUT_AND_CHOOSE_N - 1)) comSeed=$(short_hash32 "${com9}") rootGC=$(short_hash32 "${rootgc9}") rootOT=$(short_hash32 "${rootot9}")"
+      echo "  Alice: submit_commitments n=${CUT_AND_CHOOSE_N}, bit_width=${bit_width}, circuit=$(short_hash32 "${circuit_id}"), rootOT_nonzero=${root_ot_nonzero}/${CUT_AND_CHOOSE_N}, blobHashGC_nonzero=${blob_nonzero}/${CUT_AND_CHOOSE_N} [OK]"
+      [[ -n "${com0}" || -n "${rootgc0}" || -n "${rootot0}" || -n "${blob0}" ]] && \
+        echo "  commitment_sample: i=0 comSeed=$(short_hash32 "${com0}") rootGC=$(short_hash32 "${rootgc0}") rootOT=$(short_hash32 "${rootot0}") blobHashGC=$(short_hash32 "${blob0}")"
+      [[ -n "${com9}" || -n "${rootgc9}" || -n "${rootot9}" || -n "${blob9}" ]] && \
+        echo "  commitment_sample: i=$((CUT_AND_CHOOSE_N - 1)) comSeed=$(short_hash32 "${com9}") rootGC=$(short_hash32 "${rootgc9}") rootOT=$(short_hash32 "${rootot9}") blobHashGC=$(short_hash32 "${blob9}")"
       ;;
     alice:reveal-openings)
       local m open_indices cleaned opened_count
@@ -328,9 +359,11 @@ compact_cli_output() {
         echo "  Alice: publish_ot_payload instance=${instance}, commitment=$(short_hash32 "${payload_commitment}") [OK]"
       ;;
     alice:reveal-labels)
-      local labels_count
+      local labels_count blob_enabled
       labels_count="$(extract_kv_from_text labels_count "${raw}")"
+      blob_enabled="$(extract_kv_from_text blob_enabled "${raw}")"
       [[ -n "${labels_count}" ]] && echo "  labels_revealed: count=${labels_count} [OK]"
+      [[ -n "${blob_enabled}" ]] && echo "  reveal_labels_blob_tx=${blob_enabled}"
       ;;
     alice:export-artifacts)
       local out_dir
@@ -338,10 +371,20 @@ compact_cli_output() {
       [[ -n "${out_dir}" ]] && echo "  artifacts=${out_dir}"
       ;;
     alice:prepare-eval)
-      local h0 h1
+      local h0 h1 eval_blob_file eval_blob_hash eval_blob_size eval_blob_kib
       h0="$(extract_kv_from_text h0 "${raw}")"
       h1="$(extract_kv_from_text h1 "${raw}")"
+      eval_blob_file="$(extract_kv_from_text eval_blob_file "${raw}")"
+      eval_blob_hash="$(extract_kv_from_text eval_blob_hash "${raw}")"
       [[ -n "${h0}" && -n "${h1}" ]] && echo "  anchors_m: h0=$(short_hash32 "${h0}"), h1=$(short_hash32 "${h1}")"
+      if [[ -n "${eval_blob_file}" && -n "${eval_blob_hash}" ]]; then
+        if eval_blob_size="$(file_size_bytes "${eval_blob_file}")"; then
+          eval_blob_kib="$(bytes_to_kib_tenths "${eval_blob_size}")"
+          echo "  eval_blob: file=${eval_blob_file}, hash=$(short_hash32 "${eval_blob_hash}"), size=${eval_blob_size} bytes (${eval_blob_kib} KiB)"
+        else
+          echo "  eval_blob: file=${eval_blob_file}, hash=$(short_hash32 "${eval_blob_hash}")"
+        fi
+      fi
       ;;
     bob:choose)
       ;;
@@ -856,13 +899,24 @@ scenario_success() {
   assert_non_empty "h0_list" "${h0_list}"
   assert_non_empty "h1_list" "${h1_list}"
 
-  run_alice submit-commitments \
-    --bit-width "${BIT_WIDTH}" \
-    --circuit-id "${CIRCUIT_ID}" \
-    --verifier-seed "${VERIFIER_SEED_HEX}" \
-    --h0 "${h0_list}" \
-    --h1 "${h1_list}" \
-    --export-dir "${out_dir}"
+  local submit_raw
+  submit_raw="$(
+    run_alice_raw submit-commitments \
+      --bit-width "${BIT_WIDTH}" \
+      --circuit-id "${CIRCUIT_ID}" \
+      --verifier-seed "${VERIFIER_SEED_HEX}" \
+      --h0 "${h0_list}" \
+      --h1 "${h1_list}" \
+      --export-dir "${out_dir}"
+  )"
+  compact_cli_output "alice" "submit-commitments" "${submit_raw}"
+  local committed_blob_hash
+  committed_blob_hash="$(
+    printf '%s\n' "${submit_raw}" \
+      | sed -nE "/^instance=${m_choice} /s/.*blobHashGC=(0x[0-9a-fA-F]{64}).*/\\1/p" \
+      | tail -n1
+  )"
+  assert_non_empty "committed_blob_hash(m)" "${committed_blob_hash}"
   wait_phase
 
   phase "Phase 4: Bob chooses m"
@@ -908,16 +962,33 @@ scenario_success() {
   compact_cli_output "alice" "prepare-eval" "${prepare_eval_raw}"
   local settle_h0
   local settle_h1
+  local eval_blob_file
+  local eval_blob_hash
+  local onchain_eval_blob_hash
+  local blob_link_status="[FAIL]"
   settle_h0="$(extract_kv_from_text h0 "${prepare_eval_raw}")"
   settle_h1="$(extract_kv_from_text h1 "${prepare_eval_raw}")"
+  eval_blob_file="$(extract_kv_from_text eval_blob_file "${prepare_eval_raw}")"
+  eval_blob_hash="$(extract_kv_from_text eval_blob_hash "${prepare_eval_raw}")"
+  assert_non_empty "eval_blob_file" "${eval_blob_file}"
+  assert_non_empty "eval_blob_hash" "${eval_blob_hash}"
+  assert_non_empty "committed_blob_hash" "${committed_blob_hash}"
 
-  run_alice reveal-labels --labels-file "${eval_dir}/alice-x-labels32.txt"
+  run_alice reveal-labels \
+    --labels-file "${eval_dir}/alice-x-labels32.txt" \
+    --blob \
+    --path "${eval_blob_file}"
   local stage_after_labels
   stage_after_labels="$(stage_value)"
   if [[ "$(first_token "${stage_after_labels}")" != "7" ]]; then
     echo "Expected Settle stage after reveal-labels, got ${stage_after_labels}" >&2
     exit 1
   fi
+  onchain_eval_blob_hash="$(cast call "${CONTRACT_ADDRESS}" "evaluationTableBlobHash()(bytes32)" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
+  if [[ "${eval_blob_hash}" == "${committed_blob_hash}" && "${onchain_eval_blob_hash}" == "${committed_blob_hash}" ]]; then
+    blob_link_status="[OK]"
+  fi
+  echo "  blob_link_m: committed=$(short_hash32 "${committed_blob_hash}"), prepared=$(short_hash32 "${eval_blob_hash}"), onchain=$(short_hash32 "${onchain_eval_blob_hash}") ${blob_link_status}"
   echo "  stage_transition: stage=Settle(7) [OK]"
   wait_phase
 
@@ -928,7 +999,8 @@ scenario_success() {
   local eval_raw
   eval_raw="$(
     run_bob_raw evaluate-m \
-      --eval-dir "${eval_dir}" \
+      --payload-file "${eval_blob_file}" \
+      --alice-labels-file "${eval_dir}/alice-x-labels16.txt" \
       --y "${bob_y_value}"
   )"
   local output_label
@@ -988,6 +1060,9 @@ scenario_success() {
   local bob_payout_status="[FAIL]"
   local payout_ok=0
   local payout_status="[FAIL]"
+  local blob_fee_mode=0
+  local alice_fee_drift=0
+  local bob_fee_drift=0
   stage="$(stage_value)"
   result="$(cast call "${CONTRACT_ADDRESS}" "result()(bool)" --rpc-url "${RPC_URL}")"
   if (( alice_x_value > bob_y_value )); then
@@ -1033,6 +1108,22 @@ scenario_success() {
     bob_payout_status="[OK]"
   fi
 
+  if [[ "${blob_link_status}" == "[OK]" ]]; then
+    blob_fee_mode=1
+    alice_fee_drift=$((expected_alice_wei - actual_alice_wei))
+    bob_fee_drift=$((expected_bob_wei - actual_bob_wei))
+    if (( alice_fee_drift >= 0 && alice_fee_drift <= EVAL_BLOB_FEE_TOLERANCE_WEI )); then
+      alice_payout_status="[OK~fees]"
+    fi
+    if (( bob_fee_drift >= 0 && bob_fee_drift <= EVAL_BLOB_FEE_TOLERANCE_WEI )); then
+      bob_payout_status="[OK~fees]"
+    fi
+    if [[ "${alice_payout_status}" != "[FAIL]" && "${bob_payout_status}" != "[FAIL]" ]]; then
+      payout_ok=1
+      payout_status="[OK~fees]"
+    fi
+  fi
+
   if [[ "${winner_by_gc}" == "Unknown" || "${winner_by_contract}" == "Unknown" ]]; then
     echo "Failed to determine winner from outputs." >&2
     exit 1
@@ -1047,13 +1138,16 @@ scenario_success() {
     onchain_status="[OK]"
   fi
 
-  echo "eval_link: Bob uses Alice x-labels + OT-delivered y-labels to evaluate GC(m) and derive output_label"
+  echo "eval_link: Bob uses Alice x-labels + OT-delivered y-labels from blob payload to evaluate GC(m) and derive output_label"
   echo "comparison: Alice x=${alice_x_value}, Bob y=${bob_y_value} -> x>y=${x_gt_y} -> expected_bit=${expected_bit} (expected winner: ${expected_winner})"
   echo "bob_eval: decoded_bit=${decoded_bit}, output_label=${output_label_short}"
   echo "ot_check: keccak(output_label)=${output_label_hash_short} -> matched ${output_anchor_match} (h0=${settle_h0_short}, h1=${settle_h1_short}) ${ot_anchor_status}"
   echo "consistency: decoded_bit == expected_bit -> ${decoded_bit} == ${expected_bit} ${bit_consistency_status}"
   echo "onchain_settle: result=${result_token} -> winner=${winner_by_contract} ${onchain_status}, final_stage=Closed"
   echo "payouts: Alice=$(format_eth_compact "$(cast from-wei "${actual_alice_wei}")") ETH (exp $(format_eth_compact "$(cast from-wei "${expected_alice_wei}")")) ${alice_payout_status}, Bob=$(format_eth_compact "$(cast from-wei "${actual_bob_wei}")") ETH (exp $(format_eth_compact "$(cast from-wei "${expected_bob_wei}")")) ${bob_payout_status}"
+  if (( blob_fee_mode )); then
+    echo "payouts_note: blob tx fees accounted (tolerance=$(format_eth_compact "$(cast from-wei "${EVAL_BLOB_FEE_TOLERANCE_WEI}")") ETH)"
+  fi
 
   if [[ "${ot_anchor_ok}" -ne 1 ]]; then
     echo "Output label hash did not match committed anchors h0/h1." >&2

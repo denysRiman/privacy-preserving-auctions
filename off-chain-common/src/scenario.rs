@@ -5,7 +5,13 @@ use crate::types::{GateDesc, GateType};
 pub const CUT_AND_CHOOSE_N: usize = 10;
 
 /// Internal helper: append one gate and allocate a fresh output wire.
-fn push_gate(gates: &mut Vec<GateDesc>, next_wire: &mut u16, gate_type: GateType, a: u16, b: u16) -> u16 {
+fn push_gate(
+    gates: &mut Vec<GateDesc>,
+    next_wire: &mut u16,
+    gate_type: GateType,
+    a: u16,
+    b: u16,
+) -> u16 {
     let out = *next_wire;
     // New gate writes into the next free wire index.
     gates.push(GateDesc::new(gate_type, a, b, out));
@@ -90,7 +96,11 @@ pub fn build_millionaires_layout(bit_width: usize) -> Vec<GateDesc> {
 
 /// Derives one per-instance seed from a master seed and circuit context.
 /// Domain separation uses `"SEED"`.
-pub fn derive_instance_seed(master_seed: [u8; 32], circuit_id: [u8; 32], instance_id: u64) -> [u8; 32] {
+pub fn derive_instance_seed(
+    master_seed: [u8; 32],
+    circuit_id: [u8; 32],
+    instance_id: u64,
+) -> [u8; 32] {
     let instance = uint256_from_u64(instance_id);
     keccak256(&[b"SEED", &circuit_id, &instance, &master_seed])
 }

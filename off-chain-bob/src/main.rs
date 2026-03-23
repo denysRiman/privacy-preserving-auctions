@@ -4,6 +4,7 @@ use off_chain_common::cli::{
     required_flag_value, rpc_url, run_cast,
 };
 use off_chain_common::consensus::{keccak256, layout_leaf_hash};
+use off_chain_common::eval_blob::CanonicalEvalBlobPayload;
 use off_chain_common::evaluation::{
     NotGateHint, evaluate_garbled_circuit, label16_to_bytes32, u64_to_bits_le,
 };
@@ -20,7 +21,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -850,35 +851,89 @@ fn cmd_slash_eval_ot_timeout(args: &[String]) -> AppResult<()> {
 }
 
 fn cmd_evaluate_m(args: &[String]) -> AppResult<()> {
-    let eval_dir = Path::new(&required_flag_value(args, "--eval-dir")?).to_path_buf();
     let y_value = parse_u64(&required_flag_value(args, "--y")?, "y")?;
+    let eval_dir = parse_flag_value(args, "--eval-dir").map(|dir| Path::new(&dir).to_path_buf());
+    let payload_file = parse_flag_value(args, "--payload-file").map(PathBuf::from);
+    let alice_labels_file = parse_flag_value(args, "--alice-labels-file").map(PathBuf::from);
 
-    let meta = read_eval_meta(&eval_dir.join("eval-meta.txt"))?;
-    if meta.bit_width < 64 && y_value >= (1u64 << meta.bit_width) {
+    let payload_path = if let Some(path) = payload_file {
+        Some(path)
+    } else {
+        eval_dir.as_ref().and_then(|dir| {
+            let p = dir.join("eval-m-blob.bin");
+            if p.exists() { Some(p) } else { None }
+        })
+    };
+
+    let (bit_width, circuit_id, instance_id, output_wire, h0, h1, lout_true, lout_false, leaves, y_offers, not_hints) =
+        if let Some(path) = payload_path {
+            let bytes = fs::read(&path)
+                .map_err(|e| format!("failed to read eval payload {}: {e}", path.display()))?;
+            let payload = CanonicalEvalBlobPayload::decode(&bytes)
+                .map_err(|e| format!("invalid eval payload {}: {e}", path.display()))?;
+            (
+                payload.bit_width as usize,
+                payload.circuit_id,
+                payload.instance_id,
+                payload.output_wire,
+                payload.h0,
+                payload.h1,
+                payload.lout_true,
+                payload.lout_false,
+                payload.gc_leaves,
+                payload.y_offers,
+                payload.not_hints,
+            )
+        } else {
+            let Some(dir) = eval_dir.as_ref() else {
+                return Err(
+                    "Provide --payload-file <path> or --eval-dir <path> for evaluate-m".into(),
+                );
+            };
+            let meta = read_eval_meta(&dir.join("eval-meta.txt"))?;
+            (
+                meta.bit_width,
+                meta.circuit_id,
+                meta.instance_id,
+                meta.output_wire,
+                meta.h0,
+                meta.h1,
+                meta.lout_true,
+                meta.lout_false,
+                read_leaf71_lines(&dir.join("gc-m-leaves.txt"))?,
+                read_y_offers(&dir.join("bob-y-offers.txt"), meta.bit_width)?,
+                read_not_hints(&dir.join("not-hints.txt"))?,
+            )
+        };
+
+    if bit_width < 64 && y_value >= (1u64 << bit_width) {
         return Err(format!(
             "y={} does not fit bit-width {} (max={})",
             y_value,
-            meta.bit_width,
-            (1u64 << meta.bit_width) - 1
+            bit_width,
+            (1u64 << bit_width) - 1
         )
         .into());
     }
 
-    let leaves = read_leaf71_lines(&eval_dir.join("gc-m-leaves.txt"))?;
-    let alice_labels = read_label16_lines(&eval_dir.join("alice-x-labels16.txt"))?;
-    let y_offers = read_y_offers(&eval_dir.join("bob-y-offers.txt"), meta.bit_width)?;
-    let not_hints = read_not_hints(&eval_dir.join("not-hints.txt"))?;
-
-    if alice_labels.len() != meta.bit_width {
+    let alice_labels_path = if let Some(path) = alice_labels_file {
+        path
+    } else if let Some(dir) = eval_dir.as_ref() {
+        dir.join("alice-x-labels16.txt")
+    } else {
+        return Err("Provide --alice-labels-file <path> when evaluating from --payload-file".into());
+    };
+    let alice_labels = read_label16_lines(&alice_labels_path)?;
+    if alice_labels.len() != bit_width {
         return Err(format!(
             "alice label count {} does not match bit-width {}",
             alice_labels.len(),
-            meta.bit_width
+            bit_width
         )
         .into());
     }
 
-    let y_bits = u64_to_bits_le(y_value, meta.bit_width);
+    let y_bits = u64_to_bits_le(y_value, bit_width);
     let bob_labels = y_bits
         .iter()
         .enumerate()
@@ -891,10 +946,10 @@ fn cmd_evaluate_m(args: &[String]) -> AppResult<()> {
         })
         .collect::<Vec<_>>();
 
-    let gates = build_millionaires_layout(meta.bit_width);
+    let gates = build_millionaires_layout(bit_width);
     let layout = CircuitLayout {
-        circuit_id: meta.circuit_id,
-        instance_id: meta.instance_id,
+        circuit_id,
+        instance_id,
         gates,
     };
 
@@ -904,31 +959,31 @@ fn cmd_evaluate_m(args: &[String]) -> AppResult<()> {
         &alice_labels,
         &bob_labels,
         &not_hints,
-        meta.output_wire,
+        output_wire,
     )
     .map_err(|e| format!("evaluate-m failed: {e}"))?;
     let evaluated_label32 = label16_to_bytes32(evaluated_label16);
 
-    let decoded_bit = if evaluated_label32 == meta.lout_true {
+    let decoded_bit = if evaluated_label32 == lout_true {
         Some(1u8)
-    } else if evaluated_label32 == meta.lout_false {
+    } else if evaluated_label32 == lout_false {
         Some(0u8)
     } else {
         None
     };
 
     println!("status=evaluated");
-    println!("instance_id={}", meta.instance_id);
-    println!("bit_width={}", meta.bit_width);
+    println!("instance_id={instance_id}");
+    println!("bit_width={bit_width}");
     println!("y_value={y_value}");
     println!("selected_y_labels={}", bob_labels.len());
     println!("not_hint_count={}", not_hints.len());
-    println!("output_wire={}", meta.output_wire);
+    println!("output_wire={output_wire}");
     println!("output_label={}", hex32(evaluated_label32));
-    println!("h0={}", hex32(meta.h0));
-    println!("h1={}", hex32(meta.h1));
-    println!("matches_h0={}", keccak256(&[&evaluated_label32]) == meta.h0);
-    println!("matches_h1={}", keccak256(&[&evaluated_label32]) == meta.h1);
+    println!("h0={}", hex32(h0));
+    println!("h1={}", hex32(h1));
+    println!("matches_h0={}", keccak256(&[&evaluated_label32]) == h0);
+    println!("matches_h1={}", keccak256(&[&evaluated_label32]) == h1);
     if let Some(bit) = decoded_bit {
         println!("decoded_bit={bit}");
     } else {
@@ -1211,7 +1266,9 @@ fn print_help() {
         "  force-deliver-eval-ot-round --session-id <id> --round <0|1|2> (--payloads <0x..,0x..> | --payloads-file <path>)"
     );
     println!("  slash-eval-ot-timeout --session-id <id>");
-    println!("  evaluate-m --eval-dir <path> --y <u64>");
+    println!(
+        "  evaluate-m --y <u64> [--payload-file <path>] [--eval-dir <path>] [--alice-labels-file <path>]"
+    );
     println!(
         "  prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]"
     );

@@ -115,11 +115,12 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
 
         MillionairesProblem.InstanceCommitment[10] memory commits;
+        bytes32 evalBlobHash = keccak256("eval-blob-hash-to-settle-stage");
         for (uint256 i = 0; i < 10; i++) {
             commits[i] = MillionairesProblem.InstanceCommitment({
                 comSeed: keccak256(abi.encodePacked(keccak256(abi.encodePacked("seed", i)))),
                 rootGC: bytes32(0),
-                blobHashGC: bytes32(0),
+                blobHashGC: i == 0 ? evalBlobHash : bytes32(0),
                 rootXG: bytes32(0),
                 rootOT: bytes32(0),
                 h0: h0,
@@ -148,6 +149,9 @@ contract MillionairesTest is Test {
         mp.closeDispute();
 
         bytes32[] memory mockLabels = new bytes32[](32);
+        bytes32[] memory txBlobHashes = new bytes32[](1);
+        txBlobHashes[0] = evalBlobHash;
+        vm.blobhashes(txBlobHashes);
         vm.prank(alice);
         mp.revealGarblerLabels(mockLabels);
     }
@@ -494,11 +498,128 @@ contract MillionairesTest is Test {
             mockLabels[i] = keccak256(abi.encodePacked("alice_label_", i));
         }
 
+        bytes32[] memory txBlobHashes = new bytes32[](1);
+        txBlobHashes[0] = evalBlobHash;
+        vm.blobhashes(txBlobHashes);
         vm.prank(alice);
         mp.revealGarblerLabels(mockLabels);
 
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Settle));
         assertEq(mp.evaluationTableBlobHash(), evalBlobHash);
+    }
+
+    function test_Fail_RevealGarblerLabels_WhenBlobMissing() public {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        uint256 chosenM = 5;
+        bytes32 evalRootGc = keccak256("eval-root-gc");
+        bytes32 evalBlobHash = keccak256("eval-blob-hash");
+        bytes32[] memory realSeeds = new bytes32[](10);
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+
+        for (uint256 i = 0; i < 10; i++) {
+            realSeeds[i] = keccak256(abi.encodePacked("secret_seed_", i));
+            commits[i] = MillionairesProblem.InstanceCommitment({
+                comSeed: keccak256(abi.encodePacked(realSeeds[i])),
+                rootGC: i == chosenM ? evalRootGc : bytes32(0),
+                blobHashGC: i == chosenM ? evalBlobHash : bytes32(0),
+                rootXG: bytes32(0),
+                rootOT: bytes32(0),
+                h0: bytes32(0),
+                h1: bytes32(0)
+            });
+        }
+
+        _commitDefaultVerifierSeed();
+        vm.prank(alice);
+        mp.submitCommitments(commits);
+
+        vm.prank(bob);
+        mp.choose(chosenM);
+
+        uint256[] memory indices = new uint256[](9);
+        bytes32[] memory seedsToReveal = new bytes32[](9);
+        uint256 counter = 0;
+        for (uint256 i = 0; i < 10; i++) {
+            if (i != chosenM) {
+                indices[counter] = i;
+                seedsToReveal[counter] = realSeeds[i];
+                counter++;
+            }
+        }
+
+        vm.prank(alice);
+        mp.revealOpenings(indices, seedsToReveal);
+
+        vm.prank(bob);
+        mp.closeDispute();
+
+        bytes32[] memory mockLabels = new bytes32[](32);
+        vm.prank(alice);
+        vm.expectRevert("Garbled Table Blob missing");
+        mp.revealGarblerLabels(mockLabels);
+    }
+
+    function test_Fail_RevealGarblerLabels_WhenBlobHashMismatchesCommitment() public {
+        vm.prank(alice);
+        mp.deposit{value: 1 ether}();
+        vm.prank(bob);
+        mp.deposit{value: 1 ether}();
+
+        uint256 chosenM = 5;
+        bytes32 evalRootGc = keccak256("eval-root-gc");
+        bytes32 evalBlobHash = keccak256("eval-blob-hash");
+        bytes32[] memory realSeeds = new bytes32[](10);
+        MillionairesProblem.InstanceCommitment[10] memory commits;
+
+        for (uint256 i = 0; i < 10; i++) {
+            realSeeds[i] = keccak256(abi.encodePacked("secret_seed_", i));
+            commits[i] = MillionairesProblem.InstanceCommitment({
+                comSeed: keccak256(abi.encodePacked(realSeeds[i])),
+                rootGC: i == chosenM ? evalRootGc : bytes32(0),
+                blobHashGC: i == chosenM ? evalBlobHash : bytes32(0),
+                rootXG: bytes32(0),
+                rootOT: bytes32(0),
+                h0: bytes32(0),
+                h1: bytes32(0)
+            });
+        }
+
+        _commitDefaultVerifierSeed();
+        vm.prank(alice);
+        mp.submitCommitments(commits);
+
+        vm.prank(bob);
+        mp.choose(chosenM);
+
+        uint256[] memory indices = new uint256[](9);
+        bytes32[] memory seedsToReveal = new bytes32[](9);
+        uint256 counter = 0;
+        for (uint256 i = 0; i < 10; i++) {
+            if (i != chosenM) {
+                indices[counter] = i;
+                seedsToReveal[counter] = realSeeds[i];
+                counter++;
+            }
+        }
+
+        vm.prank(alice);
+        mp.revealOpenings(indices, seedsToReveal);
+
+        vm.prank(bob);
+        mp.closeDispute();
+
+        bytes32[] memory mockLabels = new bytes32[](32);
+        bytes32[] memory txBlobHashes = new bytes32[](1);
+        txBlobHashes[0] = bytes32(uint256(evalBlobHash) ^ 1);
+        vm.blobhashes(txBlobHashes);
+
+        vm.prank(alice);
+        vm.expectRevert("Blob does not match Phase 2 commitment");
+        mp.revealGarblerLabels(mockLabels);
     }
 
     function test_AbortPhase5_AlicePenalty() public {

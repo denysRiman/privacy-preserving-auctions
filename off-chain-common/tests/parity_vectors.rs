@@ -6,7 +6,9 @@ use off_chain_common::consensus::{
     layout_leaf_hash,
 };
 use off_chain_common::garble::{garble_circuit, recompute_gate_leaf};
-use off_chain_common::ih::{gc_block_hash, ih_proof_from_hashes, incremental_root, verify_ih_proof};
+use off_chain_common::ih::{
+    gc_block_hash, ih_proof_from_hashes, incremental_root, verify_ih_proof,
+};
 use off_chain_common::labels::get_permutation_bit;
 use off_chain_common::types::{CircuitLayout, GateDesc, GateType};
 
