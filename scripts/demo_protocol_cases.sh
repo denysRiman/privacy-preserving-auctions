@@ -35,7 +35,6 @@ BOB_ADDR=""
 ALICE_RESET_WEI=""
 BOB_RESET_WEI=""
 VERIFIER_SEED_HEX=""
-VERIFIER_SEED_COMMITMENT=""
 TX_FLAGS=()
 
 is_truthy() {
@@ -351,13 +350,6 @@ compact_cli_output() {
         echo "  opened_instances=${open_indices}"
       fi
       ;;
-    alice:publish-ot-payloads)
-      local instance payload_commitment
-      instance="$(extract_kv_from_text instance_id "${raw}")"
-      payload_commitment="$(extract_kv_from_text payload_commitment "${raw}")"
-      [[ -n "${instance}" && -n "${payload_commitment}" ]] && \
-        echo "  Alice: publish_ot_payload instance=${instance}, commitment=$(short_hash32 "${payload_commitment}") [OK]"
-      ;;
     alice:reveal-labels)
       local labels_count blob_enabled
       labels_count="$(extract_kv_from_text labels_count "${raw}")"
@@ -388,49 +380,11 @@ compact_cli_output() {
       ;;
     bob:choose)
       ;;
-    bob:commit-verifier-seed)
-      local seed commitment
+    bob:reveal-verifier-seed)
+      local seed
       seed="$(extract_kv_from_text verifier_seed "${raw}")"
-      commitment="$(extract_kv_from_text verifier_seed_commitment "${raw}")"
-      [[ -n "${seed}" && -n "${commitment}" ]] && \
-        echo "  Bob: commit_verifier_seed seed=$(short_hash32 "${seed}"), commitment=$(short_hash32 "${commitment}") [OK]"
-      ;;
-    bob:start-eval-ot-session)
-      local session_id
-      session_id="$(extract_kv_from_text session_id "${raw}")"
-      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
-      ;;
-    alice:commit-eval-ot-round-hash|bob:commit-eval-ot-round-hash)
-      local session_id round round_hash
-      session_id="$(extract_kv_from_text session_id "${raw}")"
-      round="$(extract_kv_from_text round "${raw}")"
-      round_hash="$(extract_kv_from_text round_hash "${raw}")"
-      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
-      [[ -n "${round}" ]] && echo "  round=${round}"
-      [[ -n "${round_hash}" ]] && echo "  round_hash=${round_hash}"
-      ;;
-    alice:ack-eval-ot-round|bob:ack-eval-ot-round)
-      local session_id round
-      session_id="$(extract_kv_from_text session_id "${raw}")"
-      round="$(extract_kv_from_text round "${raw}")"
-      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
-      [[ -n "${round}" ]] && echo "  round=${round}"
-      ;;
-    alice:force-deliver-eval-ot-round|bob:force-deliver-eval-ot-round)
-      local session_id round payload_count payload_commitment
-      session_id="$(extract_kv_from_text session_id "${raw}")"
-      round="$(extract_kv_from_text round "${raw}")"
-      payload_count="$(extract_kv_from_text payload_count "${raw}")"
-      payload_commitment="$(extract_kv_from_text payload_commitment "${raw}")"
-      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
-      [[ -n "${round}" ]] && echo "  round=${round}"
-      [[ -n "${payload_count}" ]] && echo "  payload_count=${payload_count}"
-      [[ -n "${payload_commitment}" ]] && echo "  payload_commitment=${payload_commitment}"
-      ;;
-    bob:slash-eval-ot-timeout)
-      local session_id
-      session_id="$(extract_kv_from_text session_id "${raw}")"
-      [[ -n "${session_id}" ]] && echo "  session_id=${session_id}"
+      [[ -n "${seed}" ]] && \
+        echo "  Bob: reveal_verifier_seed seed=$(short_hash32 "${seed}") [OK]"
       ;;
     bob:evaluate-m)
       local y_value decoded output_label
@@ -442,15 +396,14 @@ compact_cli_output() {
       [[ -n "${output_label}" ]] && echo "  output_label=${output_label}"
       ;;
     bob:prepare-ot-dispute)
-      local mismatch_count selected_mismatch input_bit round author root_ot
-      mismatch_count="$(extract_kv_from_text mismatch_count "${raw}")"
-      selected_mismatch="$(extract_kv_from_text selected_leaf_mismatch "${raw}")"
+      local input_bit round author root_ot root_match
       input_bit="$(extract_kv_from_text selected_input_bit "${raw}")"
       round="$(extract_kv_from_text selected_round "${raw}")"
       author="$(extract_kv_from_text selected_author "${raw}")"
       root_ot="$(extract_kv_from_text root_ot "${raw}")"
-      if [[ -n "${mismatch_count}" ]]; then
-        echo "  ot_replay_check: mismatch_count=${mismatch_count}, selected_leaf=${selected_mismatch}, leaf=(bit=${input_bit}, round=${round}), author=${author}, rootOT=$(short_hash32 "${root_ot}") [OK]"
+      root_match="$(extract_kv_from_text root_match "${raw}")"
+      if [[ -n "${root_ot}" ]]; then
+        echo "  ot_replay_check: sampled_leaf=(bit=${input_bit},round=${round},author=${author}), recomputed_rootOT=$(short_hash32 "${root_ot}"), root_match=${root_match} [OK]"
       fi
       ;;
     bob:dispute)
@@ -474,19 +427,16 @@ run_bob() {
   compact_cli_output "bob" "${command}" "${raw}"
 }
 
-commit_bob_verifier_seed() {
-  local raw
+reveal_bob_verifier_seed() {
+  local reveal_raw
   if [[ -n "${VERIFIER_SEED_OVERRIDE}" ]]; then
-    raw="$(run_bob_raw commit-verifier-seed --seed "${VERIFIER_SEED_OVERRIDE}")"
+    reveal_raw="$(run_bob_raw reveal-verifier-seed --seed "${VERIFIER_SEED_OVERRIDE}")"
   else
-    raw="$(run_bob_raw commit-verifier-seed)"
+    reveal_raw="$(run_bob_raw reveal-verifier-seed)"
   fi
-  compact_cli_output "bob" "commit-verifier-seed" "${raw}"
-
-  VERIFIER_SEED_HEX="$(extract_kv_from_text verifier_seed "${raw}")"
-  VERIFIER_SEED_COMMITMENT="$(extract_kv_from_text verifier_seed_commitment "${raw}")"
+  compact_cli_output "bob" "reveal-verifier-seed" "${reveal_raw}"
+  VERIFIER_SEED_HEX="$(extract_kv_from_text verifier_seed "${reveal_raw}")"
   assert_non_empty "verifier_seed" "${VERIFIER_SEED_HEX}"
-  assert_non_empty "verifier_seed_commitment" "${VERIFIER_SEED_COMMITMENT}"
 }
 
 stage_value() {
@@ -583,23 +533,6 @@ resolve_private_value() {
   echo "${value}"
 }
 
-eval_ot_session_id() {
-  local m_choice="$1"
-  echo $((1000 + m_choice))
-}
-
-eval_ot_round_hash() {
-  local session_id="$1"
-  local round="$2"
-  local m_choice="$3"
-  local alice_x_value="$4"
-  local bob_y_value="$5"
-
-  cast keccak \
-    "eval-ot-demo|session=${session_id}|round=${round}|m=${m_choice}|x=${alice_x_value}|y=${bob_y_value}|bit_width=${BIT_WIDTH}" \
-    | tr -d '[:space:]'
-}
-
 winner_from_bit() {
   local bit="$1"
   case "${bit}" in
@@ -626,42 +559,6 @@ choose_challenge_instance() {
   else
     echo "0"
   fi
-}
-
-publish_opened_ot_payloads_onchain() {
-  local out_dir="$1"
-  local m_choice="$2"
-
-  phase "Phase 6: Alice publishes opened OT payloads on-chain"
-  local published_count=0
-  local commitments=""
-  for ((i=0; i<CUT_AND_CHOOSE_N; i++)); do
-    if [[ "${i}" -eq "${m_choice}" ]]; then
-      continue
-    fi
-    local payloads_file="${out_dir}/instance-${i}-ot-payloads.txt"
-    if [[ ! -f "${payloads_file}" ]]; then
-      echo "Missing OT payload file for opened instance ${i}: ${payloads_file}" >&2
-      exit 1
-    fi
-    local raw
-    local payload_commitment
-    raw="$(
-      run_alice_raw publish-ot-payloads \
-      --instance-id "${i}" \
-      --payloads-file "${payloads_file}"
-    )"
-    payload_commitment="$(extract_kv_from_text payload_commitment "${raw}")"
-    if [[ -n "${payload_commitment}" ]]; then
-      if [[ -n "${commitments}" ]]; then
-        commitments+=", "
-      fi
-      commitments+="i${i}=$(short_hash32 "${payload_commitment}")"
-    fi
-    published_count=$((published_count + 1))
-  done
-  echo "  Alice: publish_opened_ot_payloads opened=${published_count} [OK]"
-  [[ -n "${commitments}" ]] && echo "  opened_ot_commitments: ${commitments}"
 }
 
 flip_first_hex_byte() {
@@ -779,68 +676,37 @@ common_bootstrap() {
   run_bob deposit
   wait_phase
 
-  phase "Phase 2: Bob commits verifier seed for OT replay"
-  commit_bob_verifier_seed
+  phase "Phase 2: Bob reveals verifier seed"
+  reveal_bob_verifier_seed
   wait_phase
-}
-
-run_eval_ot_success_handshake() {
-  local m_choice="$1"
-  local alice_x_value="$2"
-  local bob_y_value="$3"
-  local session_id
-  local round_hash_m0
-  local round_hash_m1
-  local round_hash_m2
-
-  session_id="$(eval_ot_session_id "${m_choice}")"
-  round_hash_m0="$(eval_ot_round_hash "${session_id}" 0 "${m_choice}" "${alice_x_value}" "${bob_y_value}")"
-  round_hash_m1="$(eval_ot_round_hash "${session_id}" 1 "${m_choice}" "${alice_x_value}" "${bob_y_value}")"
-  round_hash_m2="$(eval_ot_round_hash "${session_id}" 2 "${m_choice}" "${alice_x_value}" "${bob_y_value}")"
-
-  phase "Phase 9: Eval-OT control-plane handshake on-chain"
-  run_bob_raw start-eval-ot-session --session-id "${session_id}" >/dev/null
-  echo "  eval_ot: session start [OK]"
-
-  run_alice_raw commit-eval-ot-round-hash --session-id "${session_id}" --round 0 --round-hash "${round_hash_m0}" >/dev/null
-  run_bob_raw ack-eval-ot-round --session-id "${session_id}" --round 0 >/dev/null
-  echo "  eval_ot: round0 Alice->Bob commit+ack [OK]"
-
-  run_bob_raw commit-eval-ot-round-hash --session-id "${session_id}" --round 1 --round-hash "${round_hash_m1}" >/dev/null
-  run_alice_raw ack-eval-ot-round --session-id "${session_id}" --round 1 >/dev/null
-  echo "  eval_ot: round1 Bob->Alice commit+ack [OK]"
-
-  run_alice_raw commit-eval-ot-round-hash --session-id "${session_id}" --round 2 --round-hash "${round_hash_m2}" >/dev/null
-  run_bob_raw ack-eval-ot-round --session-id "${session_id}" --round 2 >/dev/null
-  echo "  eval_ot: round2 Alice->Bob commit+ack [OK]"
-  echo "  eval_ot: completed [OK]"
-  echo "  eval_ot_goal: Bob obtains exactly one y-label per input bit (choice=y_i) without revealing y_i to Alice"
 }
 
 show_ot_visibility() {
   local instance_id="$1"
-  local title="${2:-OT visibility check}"
+  local _unused_dir="$2"
+  local title="${3:-Phase 6 (off-chain): OT visibility check}"
 
   local seed
+  local expected_root_ot
+  local commitment_raw
   seed="$(cast call "${CONTRACT_ADDRESS}" "revealedSeeds(uint256)(bytes32)" "${instance_id}" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
   if [[ ! "${seed}" =~ ^0x[0-9a-fA-F]{64}$ ]] || [[ "${seed}" == "0x0000000000000000000000000000000000000000000000000000000000000000" ]]; then
     echo "Missing on-chain revealed seed for opened instance ${instance_id}" >&2
     exit 1
   fi
 
-  local payload_count_raw
-  payload_count_raw="$(cast call "${CONTRACT_ADDRESS}" "getPublishedOtPayloadCount(uint256)(uint256)" "${instance_id}" --rpc-url "${RPC_URL}")"
-  local payload_count
-  payload_count="$(first_token "${payload_count_raw}")"
-  if ! [[ "${payload_count}" =~ ^[0-9]+$ ]] || [[ "${payload_count}" -eq 0 ]]; then
-    echo "No on-chain OT payload hashes published for opened instance ${instance_id}" >&2
-    exit 1
-  fi
+  commitment_raw="$(cast call "${CONTRACT_ADDRESS}" "instanceCommitments(uint256)(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32)" "${instance_id}" --rpc-url "${RPC_URL}")"
+  expected_root_ot="$(
+    printf '%s\n' "${commitment_raw}" \
+      | grep -Eo '0x[0-9a-fA-F]{64}' \
+      | sed -n '5p'
+  )"
+  assert_non_empty "expected_root_ot(instance=${instance_id})" "${expected_root_ot}"
 
   phase "${title}"
-  local expected_payload_count=$((BIT_WIDTH * 3))
-  echo "  ot_replay_model: payload_count=bit_width(${BIT_WIDTH})*3_rounds=${expected_payload_count}, rootOT commits all OT payload hashes"
-  echo "  ot_replay_input: instance=${instance_id}, seed=$(short_hash32 "${seed}"), payload_count=${payload_count}, verifier_commit=$(short_hash32 "${VERIFIER_SEED_COMMITMENT}")"
+  echo "  ot_replay_execution: off-chain recompute (no on-chain tx in this step)"
+  echo "  ot_replay_model: rootOT commits bit_width(${BIT_WIDTH})*3_rounds transcript leaves"
+  echo "  ot_replay_input: instance=${instance_id}, garbler_seed=$(short_hash32 "${seed}"), verifier_seed=$(short_hash32 "${VERIFIER_SEED_HEX}")"
 
   local ot_raw
   ot_raw="$(
@@ -852,19 +718,19 @@ show_ot_visibility() {
       --circuit-id "${CIRCUIT_ID}" \
       --input-bit 0 \
       --round 0 \
-      --allow-false-challenge
+      --expected-root-ot "${expected_root_ot}"
   )"
-  local mismatch_count
   local root_ot
+  local root_match
   local selected_input_bit
   local selected_round
   local selected_author
-  mismatch_count="$(extract_kv_from_text mismatch_count "${ot_raw}")"
   root_ot="$(extract_kv_from_text root_ot "${ot_raw}")"
+  root_match="$(extract_kv_from_text root_match "${ot_raw}")"
   selected_input_bit="$(extract_kv_from_text selected_input_bit "${ot_raw}")"
   selected_round="$(extract_kv_from_text selected_round "${ot_raw}")"
   selected_author="$(extract_kv_from_text selected_author "${ot_raw}")"
-  echo "  ot_replay_check: mismatch_count=${mismatch_count}, sampled_leaf=(bit=${selected_input_bit},round=${selected_round},author=${selected_author}), rootOT=$(short_hash32 "${root_ot}") [OK]"
+  echo "  ot_replay_check: sampled_leaf=(bit=${selected_input_bit},round=${selected_round},author=${selected_author}), recomputed_rootOT=$(short_hash32 "${root_ot}"), committed_match=${root_match} [OK]"
 }
 
 scenario_success() {
@@ -879,7 +745,7 @@ scenario_success() {
   local eval_dir="${out_dir}/eval-m"
 
   printf "\n\033[1;32m================ CASE 1: SUCCESS FLOW ================\033[0m\n"
-  echo "security_goal: honest run; commitments, opened-instance checks, eval-OT handshake, and settlement must all agree"
+  echo "security_goal: honest run; commitments, opened-instance OT root replay checks, and settlement must all agree"
   echo "artifact_defs: comSeed=keccak(seed), rootGC=terminal incremental-hash root over gate leaves where leafHash=keccak(leafBytes(gateIndex,GateDesc,4-rows)), circuitLayoutRoot=commitment to (gateIndex,GateDesc) used by layout proofs, rootOT=OT transcript root, h0/h1=keccak(output_label)"
   echo "label_encoding: output_label is 16-byte GC label zero-padded to bytes32 before on-chain hash check"
   echo "liveness_hooks: verifier-seed/choose/open/labels/settle deadlines + abort/slash paths are active"
@@ -931,12 +797,9 @@ scenario_success() {
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  publish_opened_ot_payloads_onchain "${out_dir}" "${m_choice}"
-  wait_phase
-
   local challenge_instance
   challenge_instance="$(choose_challenge_instance "${m_choice}")"
-  show_ot_visibility "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
+  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 6 (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
   phase "Phase 7: Bob closes dispute window"
@@ -992,10 +855,7 @@ scenario_success() {
   echo "  stage_transition: stage=Settle(7) [OK]"
   wait_phase
 
-  run_eval_ot_success_handshake "${m_choice}" "${alice_x_value}" "${bob_y_value}"
-  wait_phase
-
-  phase "Phase 10: Settlement (Bob evaluates m and settles)"
+  phase "Phase 9: Settlement (Bob evaluates m and settles)"
   local eval_raw
   eval_raw="$(
     run_bob_raw evaluate-m \
@@ -1138,7 +998,7 @@ scenario_success() {
     onchain_status="[OK]"
   fi
 
-  echo "eval_link: Bob uses Alice x-labels + OT-delivered y-labels from blob payload to evaluate GC(m) and derive output_label"
+  echo "eval_link: Bob uses Alice x-labels plus y-label offers in eval blob (PoC OT model) to evaluate GC(m) and derive output_label"
   echo "comparison: Alice x=${alice_x_value}, Bob y=${bob_y_value} -> x>y=${x_gt_y} -> expected_bit=${expected_bit} (expected winner: ${expected_winner})"
   echo "bob_eval: decoded_bit=${decoded_bit}, output_label=${output_label_short}"
   echo "ot_check: keccak(output_label)=${output_label_hash_short} -> matched ${output_anchor_match} (h0=${settle_h0_short}, h1=${settle_h1_short}) ${ot_anchor_status}"
@@ -1181,7 +1041,7 @@ scenario_alice_cheats() {
 
   printf "\n\033[1;31m============= CASE 2: ALICE CHEATS, BOB SLASHES =============\033[0m\n"
   echo "security_goal: if Alice tampers opened-instance GC commitment, Bob proves mismatch and Alice is slashed"
-  echo "liveness_hooks: if Alice withholds required opened OT payloads by dispute deadline, Bob can slash via timeout path"
+  echo "liveness_hooks: verifier-seed/choose/open/dispute/labels/settle deadlines + abort/slash paths are active"
   common_bootstrap "${m_choice}"
 
   phase "Phase 3: Alice exports honest artifacts"
@@ -1245,10 +1105,7 @@ scenario_alice_cheats() {
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  publish_opened_ot_payloads_onchain "${out_dir}" "${m_choice}"
-  wait_phase
-
-  show_ot_visibility "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
+  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 6 (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
   phase "Phase 7: Bob disputes one tampered GC node"
@@ -1351,10 +1208,7 @@ scenario_bob_cheats() {
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  publish_opened_ot_payloads_onchain "${out_dir}" "${m_choice}"
-  wait_phase
-
-  show_ot_visibility "${challenge_instance}" "Phase 6b: Bob verifies opened OT transcript from contract"
+  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 6 (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
   phase "Phase 7: Bob submits false GC challenge"

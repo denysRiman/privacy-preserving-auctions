@@ -95,13 +95,9 @@ contract MillionairesTest is Test {
         return keccak256("verifier-seed");
     }
 
-    function _defaultVerifierCommitment() internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(_defaultVerifierSeed()));
-    }
-
     function _commitDefaultVerifierSeed() internal {
         vm.prank(bob);
-        mp.commitVerifierSeed(_defaultVerifierCommitment());
+        mp.revealVerifierSeed(_defaultVerifierSeed());
     }
 
     function _commutativeNodeHash(bytes32 a, bytes32 b) internal pure returns (bytes32) {
@@ -154,26 +150,6 @@ contract MillionairesTest is Test {
         vm.blobhashes(txBlobHashes);
         vm.prank(alice);
         mp.revealGarblerLabels(mockLabels);
-    }
-
-    function _completeEvalOtSession(uint256 sessionId) internal {
-        vm.prank(bob);
-        mp.startEvaluationOtSession(sessionId);
-
-        vm.prank(alice);
-        mp.commitEvaluationOtRoundHash(sessionId, 0, keccak256("m0"));
-        vm.prank(bob);
-        mp.ackEvaluationOtRound(sessionId, 0);
-
-        vm.prank(bob);
-        mp.commitEvaluationOtRoundHash(sessionId, 1, keccak256("m1"));
-        vm.prank(alice);
-        mp.ackEvaluationOtRound(sessionId, 1);
-
-        vm.prank(alice);
-        mp.commitEvaluationOtRoundHash(sessionId, 2, keccak256("m2"));
-        vm.prank(bob);
-        mp.ackEvaluationOtRound(sessionId, 2);
     }
 
     function test_SuccessfulDeposits() public {
@@ -257,33 +233,31 @@ contract MillionairesTest is Test {
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Choose));
     }
 
-    function test_CommitVerifierSeed_Success() public {
+    function test_RevealVerifierSeed_Success() public {
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
         vm.prank(bob);
         mp.deposit{value: 1 ether}();
 
-        bytes32 verifierCommitment = _defaultVerifierCommitment();
         vm.prank(bob);
-        mp.commitVerifierSeed(verifierCommitment);
+        mp.revealVerifierSeed(_defaultVerifierSeed());
 
-        assertEq(mp.verifierSeedCommitment(), verifierCommitment);
+        assertEq(mp.verifierSeed(), _defaultVerifierSeed());
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Commitments));
     }
 
-    function test_CommitVerifierSeed_Twice_Reverts() public {
+    function test_RevealVerifierSeed_Twice_Reverts() public {
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
         vm.prank(bob);
         mp.deposit{value: 1 ether}();
 
-        bytes32 verifierCommitment = _defaultVerifierCommitment();
         vm.prank(bob);
-        mp.commitVerifierSeed(verifierCommitment);
+        mp.revealVerifierSeed(_defaultVerifierSeed());
 
         vm.prank(bob);
         vm.expectRevert("Wrong stage");
-        mp.commitVerifierSeed(verifierCommitment);
+        mp.revealVerifierSeed(_defaultVerifierSeed());
     }
 
     function test_AbortVerifierSeedStage_AlicePenalty() public {
@@ -644,7 +618,6 @@ contract MillionairesTest is Test {
             keccak256(abi.encodePacked(aliceWinningLabel)),
             keccak256(abi.encodePacked("bob_wins_label"))
         );
-        _completeEvalOtSession(1);
 
         uint256 aliceBalanceBefore = alice.balance;
         uint256 bobBalanceBefore = bob.balance;
@@ -664,7 +637,6 @@ contract MillionairesTest is Test {
             keccak256(abi.encodePacked("alice_wins_label")),
             keccak256(abi.encodePacked(bobWinningLabel))
         );
-        _completeEvalOtSession(1);
 
         uint256 aliceBalanceBefore = alice.balance;
         uint256 bobBalanceBefore = bob.balance;
@@ -676,162 +648,6 @@ contract MillionairesTest is Test {
         assertEq(bob.balance, bobBalanceBefore + 1 ether);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
         assertFalse(mp.result());
-    }
-
-    function test_StartEvaluationOtSession_Success() public {
-        _toSettleStage(bytes32(0), bytes32(0));
-
-        vm.prank(bob);
-        mp.startEvaluationOtSession(7);
-
-        (
-            uint256 sessionId,
-            MillionairesProblem.EvalOtStep step,
-            uint256 stepDeadline
-        ) = mp.evalOtSession();
-        (, , , , , , , uint256 settleDeadline) = mp.deadlines();
-
-        assertEq(sessionId, 7);
-        assertEq(uint256(step), uint256(MillionairesProblem.EvalOtStep.AwaitingM0Commit));
-        assertEq(stepDeadline, block.timestamp + 20 minutes);
-        assertEq(settleDeadline, 0);
-    }
-
-    function test_StartEvaluationOtSession_Unauthorized_Reverts() public {
-        _toSettleStage(bytes32(0), bytes32(0));
-
-        vm.prank(alice);
-        vm.expectRevert("Only Evaluator");
-        mp.startEvaluationOtSession(7);
-    }
-
-    function test_StartEvaluationOtSession_Duplicate_Reverts() public {
-        _toSettleStage(bytes32(0), bytes32(0));
-
-        vm.prank(bob);
-        mp.startEvaluationOtSession(7);
-
-        mp.setSettleDeadlineForTest(block.timestamp + 1);
-
-        vm.prank(bob);
-        vm.expectRevert("Eval OT session already started");
-        mp.startEvaluationOtSession(8);
-    }
-
-    function test_StartEvaluationOtSession_ZeroSessionId_Reverts() public {
-        _toSettleStage(bytes32(0), bytes32(0));
-
-        vm.prank(bob);
-        vm.expectRevert("Bad sessionId");
-        mp.startEvaluationOtSession(0);
-    }
-
-    function test_EvaluationOtRoundRoleChecks_M0_M1_M2() public {
-        _toSettleStage(bytes32(0), bytes32(0));
-
-        vm.prank(bob);
-        mp.startEvaluationOtSession(7);
-
-        vm.prank(bob);
-        vm.expectRevert("Wrong round sender");
-        mp.commitEvaluationOtRoundHash(7, 0, keccak256("m0"));
-
-        vm.prank(alice);
-        mp.commitEvaluationOtRoundHash(7, 0, keccak256("m0"));
-
-        vm.prank(alice);
-        vm.expectRevert("Wrong round acknowledger");
-        mp.ackEvaluationOtRound(7, 0);
-
-        vm.prank(bob);
-        mp.ackEvaluationOtRound(7, 0);
-
-        vm.prank(alice);
-        vm.expectRevert("Wrong round sender");
-        mp.commitEvaluationOtRoundHash(7, 1, keccak256("m1"));
-
-        vm.prank(bob);
-        mp.commitEvaluationOtRoundHash(7, 1, keccak256("m1"));
-
-        vm.prank(bob);
-        vm.expectRevert("Wrong round acknowledger");
-        mp.ackEvaluationOtRound(7, 1);
-
-        vm.prank(alice);
-        mp.ackEvaluationOtRound(7, 1);
-
-        vm.prank(bob);
-        vm.expectRevert("Wrong round sender");
-        mp.commitEvaluationOtRoundHash(7, 2, keccak256("m2"));
-
-        vm.prank(alice);
-        mp.commitEvaluationOtRoundHash(7, 2, keccak256("m2"));
-
-        vm.prank(alice);
-        vm.expectRevert("Wrong round acknowledger");
-        mp.ackEvaluationOtRound(7, 2);
-
-        vm.prank(bob);
-        mp.ackEvaluationOtRound(7, 2);
-
-        (, MillionairesProblem.EvalOtStep step, ) = mp.evalOtSession();
-        assertEq(uint256(step), uint256(MillionairesProblem.EvalOtStep.Completed));
-    }
-
-    function test_SlashEvaluationOtTimeout_MissingSenderCommit_SlashesAlice() public {
-        _toSettleStage(bytes32(0), bytes32(0));
-
-        vm.prank(bob);
-        mp.startEvaluationOtSession(7);
-
-        vm.warp(block.timestamp + 20 minutes + 1);
-
-        uint256 bobBefore = bob.balance;
-        vm.prank(bob);
-        mp.slashEvaluationOtTimeout(7);
-
-        assertEq(bob.balance, bobBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
-    }
-
-    function test_ForceDeliverEvaluationOtRound_AckTimeout_AdvancesStep() public {
-        _toSettleStage(bytes32(0), bytes32(0));
-
-        vm.prank(bob);
-        mp.startEvaluationOtSession(7);
-
-        bytes32[] memory payloadHashes = new bytes32[](2);
-        payloadHashes[0] = keccak256("m0-payload-0");
-        payloadHashes[1] = keccak256("m0-payload-1");
-        bytes32 roundHash = keccak256(abi.encodePacked(payloadHashes));
-
-        vm.prank(alice);
-        mp.commitEvaluationOtRoundHash(7, 0, roundHash);
-        (, , uint256 ackDeadline) = mp.evalOtSession();
-
-        vm.warp(block.timestamp + 20 minutes + 1);
-
-        vm.prank(alice);
-        mp.forceDeliverEvaluationOtRound(7, 0, payloadHashes);
-
-        (, MillionairesProblem.EvalOtStep step, uint256 stepDeadline) = mp.evalOtSession();
-        assertEq(uint256(step), uint256(MillionairesProblem.EvalOtStep.AwaitingM1Commit));
-        assertEq(stepDeadline, ackDeadline + 20 minutes + 1);
-        assertEq(mp.getPublishedEvalOtPayloadCount(0), payloadHashes.length);
-        assertEq(mp.getPublishedEvalOtPayloadHash(0, 0), payloadHashes[0]);
-        assertEq(mp.getPublishedEvalOtPayloadHash(0, 1), payloadHashes[1]);
-    }
-
-    function test_Settle_RevertsWhenEvalOtNotCompleted() public {
-        bytes32 aliceWinningLabel = keccak256(abi.encodePacked("alice_is_richer_label"));
-        _toSettleStage(
-            keccak256(abi.encodePacked(aliceWinningLabel)),
-            keccak256(abi.encodePacked("bob_wins_label"))
-        );
-
-        vm.prank(bob);
-        vm.expectRevert("Eval OT session not completed");
-        mp.settle(aliceWinningLabel);
     }
 
     function test_ChallengeGateLeaf_FalseChallenge_SlashesBob() public {
@@ -991,7 +807,7 @@ contract MillionairesTest is Test {
         mp.disputeGarbledTable(0, wrongSeed, 0, g, leaf, proof, layoutProof);
     }
 
-    function test_DisputePublishedObliviousTransfer_RequiresPublishedPayloads_Reverts() public {
+    function test_CloseDispute_NoOtPayloadRequirement() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
         bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
@@ -1000,196 +816,48 @@ contract MillionairesTest is Test {
             garblerSeed,
             bytes32(0),
             rootOT,
-            9,
-            _defaultVerifierCommitment()
+            9
         );
-
-        vm.prank(bob);
-        vm.expectRevert("OT payloads not published");
-        mp.disputePublishedObliviousTransfer(0, verifierSeed, 0, 0);
-    }
-
-    function test_DisputePublishedObliviousTransfer_InvalidVerifierSeed_Reverts() public {
-        bytes32 garblerSeed = keccak256("garbler-seed");
-        bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 wrongVerifierSeed = keccak256("wrong-verifier-seed");
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
-        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
-
-        _toDisputeWithRoots(
-            garblerSeed,
-            bytes32(0),
-            rootOT,
-            9,
-            _defaultVerifierCommitment()
-        );
-
-        vm.prank(alice);
-        mp.publishOpenedOtPayloadHashes(0, payloads);
-
-        vm.prank(bob);
-        vm.expectRevert("Invalid verifier seed");
-        mp.disputePublishedObliviousTransfer(0, wrongVerifierSeed, 0, 0);
-    }
-
-    function test_PublishOpenedOtPayloadHashes_Success() public {
-        bytes32 garblerSeed = keccak256("garbler-seed");
-        bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
-        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
-
-        _toDisputeWithRoots(
-            garblerSeed,
-            bytes32(0),
-            rootOT,
-            9,
-            _defaultVerifierCommitment()
-        );
-
-        vm.prank(alice);
-        mp.publishOpenedOtPayloadHashes(0, payloads);
-
-        assertTrue(mp.otPayloadsPublished(0));
-        assertEq(mp.getPublishedOtPayloadCount(0), payloads.length);
-        assertEq(mp.getPublishedOtPayloadHash(0, 0), payloads[0]);
-        assertEq(mp.otPayloadsCommitment(0), keccak256(abi.encodePacked(payloads)));
-        assertTrue(mp.allRequiredOtPayloadsPublished());
-    }
-
-    function test_PublishOpenedOtPayloadHashes_BadRoot_Reverts() public {
-        bytes32 garblerSeed = keccak256("garbler-seed");
-        bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
-        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
-        payloads[0] = bytes32(uint256(payloads[0]) ^ 1);
-
-        _toDisputeWithRoots(
-            garblerSeed,
-            bytes32(0),
-            rootOT,
-            9,
-            _defaultVerifierCommitment()
-        );
-
-        vm.prank(alice);
-        vm.expectRevert("OT root mismatch");
-        mp.publishOpenedOtPayloadHashes(0, payloads);
-    }
-
-    function test_CloseDispute_AllowsOnChainOtEvidence() public {
-        bytes32 garblerSeed = keccak256("garbler-seed");
-        bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
-        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
-
-        _toDisputeWithRoots(
-            garblerSeed,
-            bytes32(0),
-            rootOT,
-            9,
-            _defaultVerifierCommitment()
-        );
-
-        vm.prank(alice);
-        mp.publishOpenedOtPayloadHashes(0, payloads);
 
         vm.prank(bob);
         mp.closeDispute();
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Labels));
     }
 
-    function test_CloseDispute_RequiresOtPayloadPublication() public {
+    function test_DisputeObliviousTransferRoot_SlashesAliceOnMismatch() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
+        bytes32 badRootOT = bytes32(uint256(_rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0))) ^ 1);
 
         _toDisputeWithRoots(
             garblerSeed,
             bytes32(0),
-            rootOT,
-            9,
-            _defaultVerifierCommitment()
+            badRootOT,
+            9
         );
-
-        vm.prank(bob);
-        vm.expectRevert("OT payloads not fully published");
-        mp.closeDispute();
-    }
-
-    function test_SlashForMissingOtPayloads_SlashesAlice() public {
-        bytes32 garblerSeed = keccak256("garbler-seed");
-        bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
-
-        _toDisputeWithRoots(
-            garblerSeed,
-            bytes32(0),
-            rootOT,
-            9,
-            _defaultVerifierCommitment()
-        );
-
-        vm.warp(block.timestamp + 2 hours);
 
         uint256 bobBefore = bob.balance;
         vm.prank(bob);
-        mp.slashForMissingOtPayloads();
-
+        mp.disputeObliviousTransferRoot(0);
         assertEq(bob.balance, bobBefore + 2 ether);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
-    function test_DisputePublishedObliviousTransfer_SlashesAliceOnMismatch() public {
-        bytes32 garblerSeed = keccak256("garbler-seed");
-        bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
-        bytes32 badPayloadHash = bytes32(uint256(payloads[0]) ^ 1);
-        payloads[0] = badPayloadHash;
-
-        bytes32[] memory badLeaves = _otLeaves(garblerSeed, verifierSeed, 0);
-        badLeaves[0] = mp.computeOtLeafHash(0, 0, 0, badPayloadHash);
-        bytes32 rootOT = _rootFromLeaves(badLeaves);
-
-        _toDisputeWithRoots(
-            garblerSeed,
-            bytes32(0),
-            rootOT,
-            9,
-            _defaultVerifierCommitment()
-        );
-
-        vm.prank(alice);
-        mp.publishOpenedOtPayloadHashes(0, payloads);
-
-        uint256 bobBefore = bob.balance;
-        vm.prank(bob);
-        mp.disputePublishedObliviousTransfer(0, verifierSeed, 0, 0);
-
-        assertEq(bob.balance, bobBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
-    }
-
-    function test_DisputePublishedObliviousTransfer_SlashesBobOnFalseChallenge() public {
+    function test_DisputeObliviousTransferRoot_SlashesBobOnFalseChallenge() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
         bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
-        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
 
         _toDisputeWithRoots(
             garblerSeed,
             bytes32(0),
             rootOT,
-            9,
-            _defaultVerifierCommitment()
+            9
         );
-
-        vm.prank(alice);
-        mp.publishOpenedOtPayloadHashes(0, payloads);
 
         uint256 aliceBefore = alice.balance;
         vm.prank(bob);
-        mp.disputePublishedObliviousTransfer(0, verifierSeed, 0, 0);
-
+        mp.disputeObliviousTransferRoot(0);
         assertEq(alice.balance, aliceBefore + 2 ether);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
@@ -1204,31 +872,6 @@ contract MillionairesTest is Test {
         vm.prank(alice);
         vm.expectRevert("Wrong stage");
         mp.submitCommitments(commits);
-    }
-
-    function test_DisputePublishedObliviousTransfer_SlashesBobForBobAuthoredMismatch() public {
-        bytes32 garblerSeed = keccak256("garbler-seed");
-        bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32[] memory payloads = _otPayloadHashes(garblerSeed, verifierSeed, 0);
-        bytes32 badPayloadHash =
-            bytes32(uint256(mp.computeOtPayloadHash(garblerSeed, verifierSeed, 0, 0, 1)) ^ 1);
-        payloads[1] = badPayloadHash;
-
-        bytes32[] memory badLeaves = _otLeaves(garblerSeed, verifierSeed, 0);
-        badLeaves[1] = mp.computeOtLeafHash(0, 1, 1, badPayloadHash);
-        bytes32 rootOT = _rootFromLeaves(badLeaves);
-
-        _toDisputeWithRoots(garblerSeed, bytes32(0), rootOT, 9, _defaultVerifierCommitment());
-
-        vm.prank(alice);
-        mp.publishOpenedOtPayloadHashes(0, payloads);
-
-        uint256 aliceBefore = alice.balance;
-        vm.prank(alice);
-        mp.disputePublishedObliviousTransfer(0, verifierSeed, 0, 1);
-
-        assertEq(alice.balance, aliceBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
     //Main test for checking if the implementation on Rust works
@@ -1410,25 +1053,22 @@ contract MillionairesTest is Test {
     }
 
     function _toDisputeWithRoot(bytes32 seed, bytes32 rootGC0, uint256 mChoice) internal {
-        _toDisputeWithRoots(seed, rootGC0, bytes32(0), mChoice, _defaultVerifierCommitment());
+        _toDisputeWithRoots(seed, rootGC0, bytes32(0), mChoice);
     }
 
     function _toDisputeWithRoots(
         bytes32 seed,
         bytes32 rootGC0,
         bytes32 rootOT0,
-        uint256 mChoice,
-        bytes32 verifierCommitment
+        uint256 mChoice
     ) internal {
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
         vm.prank(bob);
         mp.deposit{value: 1 ether}();
 
-        if (verifierCommitment != bytes32(0)) {
-            vm.prank(bob);
-            mp.commitVerifierSeed(verifierCommitment);
-        }
+        vm.prank(bob);
+        mp.revealVerifierSeed(_defaultVerifierSeed());
 
         // Commitments
         MillionairesProblem.InstanceCommitment[10] memory commits;

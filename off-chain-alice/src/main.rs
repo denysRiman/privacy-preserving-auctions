@@ -1,5 +1,5 @@
 use off_chain_common::cli::{
-    hex_prefixed, hex16, hex32, parse_bytes32, parse_bytes32_list_csv, parse_flag_value, parse_u8,
+    hex_prefixed, hex16, hex32, parse_bytes32, parse_bytes32_list_csv, parse_flag_value,
     parse_u64, print_tx_summary, required_env, required_env_any, required_flag_value, rpc_url,
     run_cast,
 };
@@ -913,48 +913,6 @@ fn cmd_reveal_openings(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
-fn cmd_publish_ot_payloads(args: &[String]) -> AppResult<()> {
-    let rpc_url = rpc_url();
-    let contract_address = required_env("CONTRACT_ADDRESS")?;
-    let alice_private_key = required_env_any(&["ALICE_PRIVATE_KEY", "ALICE_PK"])?;
-    let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
-
-    let payloads = if let Some(raw) = parse_flag_value(args, "--payloads") {
-        parse_bytes32_list_csv(&raw)?
-    } else if let Some(path) = parse_flag_value(args, "--payloads-file") {
-        read_bytes32_lines_file(Path::new(&path))?
-    } else {
-        return Err("Provide --payloads or --payloads-file".into());
-    };
-    if payloads.is_empty() {
-        return Err("OT payload list cannot be empty".into());
-    }
-
-    let payloads_arg = bytes32_vec_literal(&payloads);
-    let tx_result = run_cast(&[
-        "send".to_string(),
-        contract_address,
-        "publishOpenedOtPayloadHashes(uint256,bytes32[])".to_string(),
-        instance_id.to_string(),
-        payloads_arg,
-        "--private-key".to_string(),
-        alice_private_key,
-        "--rpc-url".to_string(),
-        rpc_url,
-    ])?;
-
-    print_tx_summary("publish_ot_payloads", &tx_result);
-    let payload_refs = payloads
-        .iter()
-        .map(|payload| payload.as_slice())
-        .collect::<Vec<_>>();
-    let payload_commitment = keccak256(&payload_refs);
-    println!("instance_id={instance_id}");
-    println!("payload_count={}", payloads.len());
-    println!("payload_commitment={}", hex32(payload_commitment));
-    Ok(())
-}
-
 fn cmd_reveal_labels(args: &[String]) -> AppResult<()> {
     let rpc_url = rpc_url();
     let contract_address = required_env("CONTRACT_ADDRESS")?;
@@ -995,103 +953,6 @@ fn cmd_reveal_labels(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
-fn cmd_commit_eval_ot_round_hash(args: &[String]) -> AppResult<()> {
-    let rpc_url = rpc_url();
-    let contract_address = required_env("CONTRACT_ADDRESS")?;
-    let alice_private_key = required_env_any(&["ALICE_PRIVATE_KEY", "ALICE_PK"])?;
-
-    let session_id = parse_u64(&required_flag_value(args, "--session-id")?, "session-id")?;
-    let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
-    let round_hash = parse_bytes32(&required_flag_value(args, "--round-hash")?)?;
-
-    let tx_result = run_cast(&[
-        "send".to_string(),
-        contract_address,
-        "commitEvaluationOtRoundHash(uint256,uint8,bytes32)".to_string(),
-        session_id.to_string(),
-        round.to_string(),
-        hex32(round_hash),
-        "--private-key".to_string(),
-        alice_private_key,
-        "--rpc-url".to_string(),
-        rpc_url,
-    ])?;
-
-    print_tx_summary("commit_eval_ot_round_hash", &tx_result);
-    println!("session_id={session_id}");
-    println!("round={round}");
-    println!("round_hash={}", hex32(round_hash));
-    Ok(())
-}
-
-fn cmd_ack_eval_ot_round(args: &[String]) -> AppResult<()> {
-    let rpc_url = rpc_url();
-    let contract_address = required_env("CONTRACT_ADDRESS")?;
-    let alice_private_key = required_env_any(&["ALICE_PRIVATE_KEY", "ALICE_PK"])?;
-
-    let session_id = parse_u64(&required_flag_value(args, "--session-id")?, "session-id")?;
-    let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
-
-    let tx_result = run_cast(&[
-        "send".to_string(),
-        contract_address,
-        "ackEvaluationOtRound(uint256,uint8)".to_string(),
-        session_id.to_string(),
-        round.to_string(),
-        "--private-key".to_string(),
-        alice_private_key,
-        "--rpc-url".to_string(),
-        rpc_url,
-    ])?;
-
-    print_tx_summary("ack_eval_ot_round", &tx_result);
-    println!("session_id={session_id}");
-    println!("round={round}");
-    Ok(())
-}
-
-fn cmd_force_deliver_eval_ot_round(args: &[String]) -> AppResult<()> {
-    let rpc_url = rpc_url();
-    let contract_address = required_env("CONTRACT_ADDRESS")?;
-    let alice_private_key = required_env_any(&["ALICE_PRIVATE_KEY", "ALICE_PK"])?;
-
-    let session_id = parse_u64(&required_flag_value(args, "--session-id")?, "session-id")?;
-    let round = parse_u8(&required_flag_value(args, "--round")?, "round")?;
-    let payloads = if let Some(raw) = parse_flag_value(args, "--payloads") {
-        parse_bytes32_list_csv(&raw)?
-    } else if let Some(path) = parse_flag_value(args, "--payloads-file") {
-        read_bytes32_lines_file(Path::new(&path))?
-    } else {
-        return Err("Provide --payloads or --payloads-file".into());
-    };
-    let payloads_arg = bytes32_vec_literal(&payloads);
-    let payload_refs = payloads
-        .iter()
-        .map(|payload| payload.as_slice())
-        .collect::<Vec<_>>();
-    let payload_commitment = keccak256(&payload_refs);
-
-    let tx_result = run_cast(&[
-        "send".to_string(),
-        contract_address,
-        "forceDeliverEvaluationOtRound(uint256,uint8,bytes32[])".to_string(),
-        session_id.to_string(),
-        round.to_string(),
-        payloads_arg,
-        "--private-key".to_string(),
-        alice_private_key,
-        "--rpc-url".to_string(),
-        rpc_url,
-    ])?;
-
-    print_tx_summary("force_deliver_eval_ot_round", &tx_result);
-    println!("session_id={session_id}");
-    println!("round={round}");
-    println!("payload_count={}", payloads.len());
-    println!("payload_commitment={}", hex32(payload_commitment));
-    Ok(())
-}
-
 fn print_help() {
     println!("off-chain-alice commands:");
     println!("  deposit");
@@ -1111,15 +972,7 @@ fn print_help() {
         "  reveal-openings --m <index> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]"
     );
     println!(
-        "  publish-ot-payloads --instance-id <id> (--payloads <0x..,0x..> | --payloads-file <path>)"
-    );
-    println!(
         "  reveal-labels (--labels <0x..,0x..> | --labels-file <path>) [--blob --path <payload-file>]"
-    );
-    println!("  commit-eval-ot-round-hash --session-id <id> --round <0|1|2> --round-hash <0x..32>");
-    println!("  ack-eval-ot-round --session-id <id> --round <0|1|2>");
-    println!(
-        "  force-deliver-eval-ot-round --session-id <id> --round <0|1|2> (--payloads <0x..,0x..> | --payloads-file <path>)"
     );
     println!();
     println!("Default command with no args: deposit");
@@ -1137,11 +990,7 @@ fn main() -> AppResult<()> {
         "export-artifacts" => cmd_export_artifacts(tail),
         "prepare-eval" => cmd_prepare_eval(tail),
         "reveal-openings" => cmd_reveal_openings(tail),
-        "publish-ot-payloads" => cmd_publish_ot_payloads(tail),
         "reveal-labels" => cmd_reveal_labels(tail),
-        "commit-eval-ot-round-hash" => cmd_commit_eval_ot_round_hash(tail),
-        "ack-eval-ot-round" => cmd_ack_eval_ot_round(tail),
-        "force-deliver-eval-ot-round" => cmd_force_deliver_eval_ot_round(tail),
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())

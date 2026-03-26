@@ -21,7 +21,7 @@ contract MillionairesProblem {
 
     struct Deadlines {
         uint256 deposit;          // Phase 1: Alice & Bob must lock funds
-        uint256 verifierSeed;    // Phase 2: Bob must commit verifier randomness for OT replay
+        uint256 verifierSeed;    // Phase 2: Bob must reveal verifier randomness for OT replay
         uint256 commit;          // Phase 3: Alice must submit GC + transcript commitments
         uint256 choose;          // Phase 4: Bob must pick index m
         uint256 open;            // Phase 5: Alice must reveal n-1 seeds
@@ -43,20 +43,8 @@ contract MillionairesProblem {
     enum Stage { Deposits, VerifierSeed, Commitments, Choose, Open, Dispute, Labels, Settle, Closed }
     Stage public currentStage;
 
-    enum EvalOtStep {
-        None,
-        AwaitingM0Commit,
-        AwaitingM0Ack,
-        AwaitingM1Commit,
-        AwaitingM1Ack,
-        AwaitingM2Commit,
-        AwaitingM2Ack,
-        Completed
-    }
-
     uint256 public constant DEPOSIT_GARBLER = 1 ether;
     uint256 public constant DEPOSIT_EVALUATOR = 1 ether;
-    uint256 public constant EVAL_OT_STEP_TIMEOUT = 20 minutes;
     uint8 private constant OT_ROUNDS_PER_INPUT = 3;
     uint8 private constant OT_DUMMY_CHOICE = 0;
 
@@ -65,23 +53,9 @@ contract MillionairesProblem {
 
     // Mapping to store revealed seeds for verification (index => seed)
     mapping(uint256 => bytes32) public revealedSeeds;
-    bytes32 public verifierSeedCommitment;
+    bytes32 public verifierSeed;
+    bool public verifierSeedRevealed;
     uint16 public bitWidth;
-
-    // Opened-instance OT transcript payloads published by Alice during Dispute.
-    mapping(uint256 => bytes32[]) private publishedOtPayloadHashes;
-    mapping(uint256 => bool) public otPayloadsPublished;
-    mapping(uint256 => bytes32) public otPayloadsCommitment;
-
-    struct EvalOtSession {
-        uint256 sessionId;
-        EvalOtStep step;
-        uint256 stepDeadline;
-    }
-
-    EvalOtSession public evalOtSession;
-    bytes32[OT_ROUNDS_PER_INPUT] public evalOtRoundCommitments;
-    mapping(uint8 => bytes32[]) private publishedEvalOtPayloadHashes;
 
     constructor(address _bob, bytes32 _circuitId, bytes32 _circuitLayoutRoot, uint16 _bitWidth) {
         require(_bitWidth > 0, "bitWidth must be > 0");
@@ -133,7 +107,7 @@ contract MillionairesProblem {
         require(currentStage == Stage.Commitments, "Wrong stage");
         require(msg.sender == alice, "Only Garbler");
         require(block.timestamp <= deadlines.commit, "Commitment deadline missed");
-        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
+        require(verifierSeedRevealed, "Verifier seed not revealed");
 
         for (uint256 i = 0; i < N; i++) {
             instanceCommitments[i] = _commitments[i];
@@ -144,23 +118,24 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 2: Bob commits to the randomness used for dummy-check OT executions.
-     * This explicit stage prevents Bob from choosing verifier randomness after seeing Alice's commitments.
+     * @dev Phase 2: Bob reveals verifier randomness used for opened-instance OT root replay.
+     * Alice uses this seed together with each opened garbler seed to derive rootOT commitments.
      */
-    function commitVerifierSeed(bytes32 _commitment) external {
+    function revealVerifierSeed(bytes32 _seed) external {
         require(currentStage == Stage.VerifierSeed, "Wrong stage");
         require(msg.sender == bob, "Only Evaluator");
         require(block.timestamp <= deadlines.verifierSeed, "Verifier seed deadline missed");
-        require(verifierSeedCommitment == bytes32(0), "Verifier seed already committed");
-        require(_commitment != bytes32(0), "Empty verifier seed commitment");
+        require(!verifierSeedRevealed, "Verifier seed already revealed");
+        require(_seed != bytes32(0), "Empty verifier seed");
 
-        verifierSeedCommitment = _commitment;
+        verifierSeed = _seed;
+        verifierSeedRevealed = true;
         currentStage = Stage.Commitments;
         deadlines.commit = block.timestamp + 1 hours;
     }
 
     /**
-     * @dev Phase 2 Timeout: If Bob fails to commit verifier randomness, Alice can claim the penalty.
+     * @dev Phase 2 Timeout: If Bob fails to reveal verifier randomness, Alice can claim the penalty.
      */
     function abortVerifierSeedStage() external {
         require(currentStage == Stage.VerifierSeed, "Not in verifier-seed stage");
@@ -287,65 +262,6 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 6: Alice publishes OT transcript payload hashes for one opened instance.
-     * The contract recomputes and verifies `rootOT` before storing payload hashes for Bob.
-     */
-    function publishOpenedOtPayloadHashes(uint256 instanceId, bytes32[] calldata payloadHashes) external {
-        require(currentStage == Stage.Dispute, "Wrong stage");
-        require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
-        require(msg.sender == alice, "Only Garbler");
-        require(_isOpenInstance(instanceId), "Not an opened instance");
-        require(!otPayloadsPublished[instanceId], "OT payloads already published");
-        require(instanceCommitments[instanceId].rootOT != bytes32(0), "Missing rootOT commitment");
-
-        uint256 expectedPayloadCount = uint256(bitWidth) * OT_ROUNDS_PER_INPUT;
-        require(payloadHashes.length == expectedPayloadCount, "Bad OT payload count");
-
-        bytes32 recomputedRoot = _otRootFromPayloadHashes(payloadHashes);
-        require(recomputedRoot == instanceCommitments[instanceId].rootOT, "OT root mismatch");
-
-        bytes32[] storage dst = publishedOtPayloadHashes[instanceId];
-        for (uint256 i = 0; i < payloadHashes.length; i++) {
-            dst.push(payloadHashes[i]);
-        }
-
-        bytes32 payloadCommitment = keccak256(abi.encodePacked(payloadHashes));
-        otPayloadsCommitment[instanceId] = payloadCommitment;
-        otPayloadsPublished[instanceId] = true;
-
-        emit OTPayloadsPublished(instanceId, payloadCommitment, payloadHashes.length);
-    }
-
-    function getPublishedOtPayloadCount(uint256 instanceId) external view returns (uint256) {
-        return publishedOtPayloadHashes[instanceId].length;
-    }
-
-    function getPublishedOtPayloadHashes(uint256 instanceId) external view returns (bytes32[] memory) {
-        return publishedOtPayloadHashes[instanceId];
-    }
-
-    function getPublishedOtPayloadHash(uint256 instanceId, uint256 leafIndex) external view returns (bytes32) {
-        require(leafIndex < publishedOtPayloadHashes[instanceId].length, "OT leaf out of range");
-        return publishedOtPayloadHashes[instanceId][leafIndex];
-    }
-
-    function allRequiredOtPayloadsPublished() external view returns (bool) {
-        return _allRequiredOtPayloadsPublished();
-    }
-
-    /**
-     * @dev Timeout in Dispute: if Alice does not publish required opened OT payloads, Bob slashes Alice.
-     */
-    function slashForMissingOtPayloads() external {
-        require(currentStage == Stage.Dispute, "Wrong stage");
-        require(block.timestamp > deadlines.dispute, "Dispute window still open");
-        require(msg.sender == bob, "Only Bob can trigger this");
-        require(!_allRequiredOtPayloadsPublished(), "OT payloads already published");
-
-        _slash(bob, alice);
-    }
-
-    /**
      * @dev Phase 7: Alice reveals her input labels for the evaluation circuit m.
      * These labels correspond to her private input x.
      * @param _labels The set of wire labels for Alice's input.
@@ -363,7 +279,7 @@ contract MillionairesProblem {
         garblerLabels = _labels;
 
         currentStage = Stage.Settle;
-        deadlines.settle = block.timestamp + EVAL_OT_STEP_TIMEOUT;
+        deadlines.settle = block.timestamp + 1 hours;
     }
 
     /**
@@ -383,95 +299,6 @@ contract MillionairesProblem {
         require(success, "Penalty transfer failed");
 
         currentStage = Stage.Closed;
-    }
-
-    function startEvaluationOtSession(uint256 sessionId) external {
-        require(currentStage == Stage.Settle, "Wrong stage");
-        require(msg.sender == bob, "Only Evaluator");
-        require(block.timestamp <= deadlines.settle, "Eval OT start deadline missed");
-        require(sessionId != 0, "Bad sessionId");
-        require(evalOtSession.sessionId == 0, "Eval OT session already started");
-
-        evalOtSession = EvalOtSession({
-            sessionId: sessionId,
-            step: EvalOtStep.AwaitingM0Commit,
-            stepDeadline: block.timestamp + EVAL_OT_STEP_TIMEOUT
-        });
-        deadlines.settle = 0;
-
-        emit EvalOtSessionStarted(sessionId, evalOtSession.stepDeadline);
-    }
-
-    function commitEvaluationOtRoundHash(uint256 sessionId, uint8 round, bytes32 roundHash) external {
-        require(currentStage == Stage.Settle, "Wrong stage");
-        require(roundHash != bytes32(0), "Empty round hash");
-
-        _requireEvalOtSession(sessionId);
-        require(block.timestamp <= evalOtSession.stepDeadline, "Eval OT step deadline missed");
-        require(evalOtSession.step == _evalOtCommitStep(round), "Wrong eval OT step");
-        require(msg.sender == _evalOtRoundSender(round), "Wrong round sender");
-
-        evalOtRoundCommitments[round] = roundHash;
-        delete publishedEvalOtPayloadHashes[round];
-
-        evalOtSession.step = _evalOtAckStep(round);
-        evalOtSession.stepDeadline = block.timestamp + EVAL_OT_STEP_TIMEOUT;
-
-        emit EvalOtRoundCommitted(sessionId, round, roundHash, evalOtSession.stepDeadline);
-    }
-
-    function ackEvaluationOtRound(uint256 sessionId, uint8 round) external {
-        require(currentStage == Stage.Settle, "Wrong stage");
-
-        _requireEvalOtSession(sessionId);
-        require(block.timestamp <= evalOtSession.stepDeadline, "Eval OT step deadline missed");
-        require(evalOtSession.step == _evalOtAckStep(round), "Wrong eval OT step");
-        require(evalOtRoundCommitments[round] != bytes32(0), "Round not committed");
-        require(msg.sender == _evalOtRoundAcknowledger(round), "Wrong round acknowledger");
-
-        _advanceEvalOtSession(round);
-        emit EvalOtRoundAcknowledged(sessionId, round, msg.sender, evalOtSession.stepDeadline);
-    }
-
-    function forceDeliverEvaluationOtRound(
-        uint256 sessionId,
-        uint8 round,
-        bytes32[] calldata payloadHashes
-    ) external {
-        require(currentStage == Stage.Settle, "Wrong stage");
-
-        _requireEvalOtSession(sessionId);
-        require(evalOtSession.step == _evalOtAckStep(round), "Wrong eval OT step");
-        require(block.timestamp > evalOtSession.stepDeadline, "Ack deadline not reached");
-        require(evalOtRoundCommitments[round] != bytes32(0), "Round not committed");
-        require(msg.sender == _evalOtRoundSender(round), "Wrong round sender");
-        require(
-            keccak256(abi.encodePacked(payloadHashes)) == evalOtRoundCommitments[round],
-            "Eval OT payload hash mismatch"
-        );
-
-        delete publishedEvalOtPayloadHashes[round];
-        bytes32[] storage dst = publishedEvalOtPayloadHashes[round];
-        for (uint256 i = 0; i < payloadHashes.length; i++) {
-            dst.push(payloadHashes[i]);
-        }
-
-        _advanceEvalOtSession(round);
-        emit EvalOtRoundForceDelivered(sessionId, round, evalOtRoundCommitments[round], payloadHashes.length);
-    }
-
-    function slashEvaluationOtTimeout(uint256 sessionId) external {
-        require(currentStage == Stage.Settle, "Wrong stage");
-        require(msg.sender == alice || msg.sender == bob, "Only participants");
-
-        _requireEvalOtSession(sessionId);
-        require(evalOtSession.step != EvalOtStep.Completed, "Eval OT session completed");
-        require(block.timestamp > evalOtSession.stepDeadline, "Eval OT deadline not reached");
-
-        (address honestParty, address dishonestParty) = _evalOtTimeoutParties(evalOtSession.step);
-        emit EvalOtSessionTimeoutSlashed(sessionId, evalOtSession.step, dishonestParty, honestParty);
-        emit CheaterSlashed(dishonestParty, honestParty);
-        _slash(honestParty, dishonestParty);
     }
 
 /**
@@ -507,7 +334,6 @@ contract MillionairesProblem {
     function settle(bytes32 _outputLabel) external {
         require(currentStage == Stage.Settle, "Wrong stage");
         require(msg.sender == bob, "Only Evaluator");
-        require(evalOtSession.step == EvalOtStep.Completed, "Eval OT session not completed");
         require(block.timestamp <= deadlines.settle, "Settlement deadline missed");
 
         InstanceCommitment storage evalInstance = instanceCommitments[m];
@@ -534,19 +360,12 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 8 Timeout: If Bob fails to start the eval OT session or, after completion, fails to settle the result.
-     * Alice can claim the funds after the relevant deadline.
+     * @dev Phase 8 Timeout: If Bob fails to settle by deadline, Alice can claim funds.
      */
     function abortPhase6() external {
         require(currentStage == Stage.Settle, "Not in settle stage");
         require(msg.sender == alice, "Only Alice can trigger this");
-
-        if (evalOtSession.step == EvalOtStep.None) {
-            require(block.timestamp > deadlines.settle, "Bob is not late yet");
-        } else {
-            require(evalOtSession.step == EvalOtStep.Completed, "Eval OT session not completed");
-            require(block.timestamp > deadlines.settle, "Bob is not late yet");
-        }
+        require(block.timestamp > deadlines.settle, "Bob is not late yet");
 
         uint256 total = vault[alice] + vault[bob];
         vault[alice] = 0;
@@ -560,95 +379,6 @@ contract MillionairesProblem {
 
     function getSOpenLength() external view returns (uint256) {
         return sOpen.length;
-    }
-
-    function getPublishedEvalOtPayloadCount(uint8 round) external view returns (uint256) {
-        require(round < OT_ROUNDS_PER_INPUT, "Bad OT round");
-        return publishedEvalOtPayloadHashes[round].length;
-    }
-
-    function getPublishedEvalOtPayloadHashes(uint8 round) external view returns (bytes32[] memory) {
-        require(round < OT_ROUNDS_PER_INPUT, "Bad OT round");
-        return publishedEvalOtPayloadHashes[round];
-    }
-
-    function getPublishedEvalOtPayloadHash(uint8 round, uint256 leafIndex) external view returns (bytes32) {
-        require(round < OT_ROUNDS_PER_INPUT, "Bad OT round");
-        require(leafIndex < publishedEvalOtPayloadHashes[round].length, "Eval OT leaf out of range");
-        return publishedEvalOtPayloadHashes[round][leafIndex];
-    }
-
-    function _requireEvalOtSession(uint256 sessionId) internal view {
-        require(sessionId != 0, "Bad sessionId");
-        require(evalOtSession.sessionId == sessionId, "Eval OT session mismatch");
-        require(evalOtSession.step != EvalOtStep.None, "Eval OT session not started");
-    }
-
-    function _evalOtCommitStep(uint8 round) internal pure returns (EvalOtStep) {
-        if (round == 0) return EvalOtStep.AwaitingM0Commit;
-        if (round == 1) return EvalOtStep.AwaitingM1Commit;
-        if (round == 2) return EvalOtStep.AwaitingM2Commit;
-        revert("Bad OT round");
-    }
-
-    function _evalOtAckStep(uint8 round) internal pure returns (EvalOtStep) {
-        if (round == 0) return EvalOtStep.AwaitingM0Ack;
-        if (round == 1) return EvalOtStep.AwaitingM1Ack;
-        if (round == 2) return EvalOtStep.AwaitingM2Ack;
-        revert("Bad OT round");
-    }
-
-    function _evalOtRoundSender(uint8 round) internal view returns (address) {
-        if (round == 1) return bob;
-        if (round < OT_ROUNDS_PER_INPUT) return alice;
-        revert("Bad OT round");
-    }
-
-    function _evalOtRoundAcknowledger(uint8 round) internal view returns (address) {
-        if (round == 1) return alice;
-        if (round < OT_ROUNDS_PER_INPUT) return bob;
-        revert("Bad OT round");
-    }
-
-    function _evalOtTimeoutParties(EvalOtStep step) internal view returns (address honestParty, address dishonestParty) {
-        if (
-            step == EvalOtStep.AwaitingM0Commit ||
-            step == EvalOtStep.AwaitingM0Ack ||
-            step == EvalOtStep.AwaitingM2Commit ||
-            step == EvalOtStep.AwaitingM2Ack
-        ) {
-            return (bob, alice);
-        }
-
-        if (step == EvalOtStep.AwaitingM1Commit || step == EvalOtStep.AwaitingM1Ack) {
-            return (alice, bob);
-        }
-
-        revert("Bad eval OT step");
-    }
-
-    function _advanceEvalOtSession(uint8 round) internal {
-        if (round == 0) {
-            evalOtSession.step = EvalOtStep.AwaitingM1Commit;
-            evalOtSession.stepDeadline = block.timestamp + EVAL_OT_STEP_TIMEOUT;
-            return;
-        }
-
-        if (round == 1) {
-            evalOtSession.step = EvalOtStep.AwaitingM2Commit;
-            evalOtSession.stepDeadline = block.timestamp + EVAL_OT_STEP_TIMEOUT;
-            return;
-        }
-
-        if (round == 2) {
-            evalOtSession.step = EvalOtStep.Completed;
-            evalOtSession.stepDeadline = 0;
-            deadlines.settle = block.timestamp + 1 hours;
-            emit EvalOtSessionCompleted(evalOtSession.sessionId, deadlines.settle);
-            return;
-        }
-
-        revert("Bad OT round");
     }
 
     /**
@@ -668,16 +398,13 @@ contract MillionairesProblem {
     function closeDispute() external {
         require(currentStage == Stage.Dispute, "Wrong stage");
 
-        // Bob can close early only after Alice publishes required opened OT payloads.
         if (msg.sender == bob) {
-            require(_allRequiredOtPayloadsPublished(), "OT payloads not fully published");
             currentStage = Stage.Labels;
             return;
         }
 
         require(msg.sender == alice, "Only Alice can close after deadline");
         require(block.timestamp > deadlines.dispute, "Dispute window still open");
-        require(_allRequiredOtPayloadsPublished(), "OT payloads not fully published");
         currentStage = Stage.Labels;
     }
 
@@ -832,19 +559,7 @@ contract MillionairesProblem {
     uint256 private constant LEAF_BYTES_LEN = 71;
 
     event GateLeafChallenged(uint256 indexed instanceId, uint256 indexed gateIndex, bool mismatch);
-    event OTLeafChallenged(uint256 indexed instanceId, uint16 indexed inputBit, uint8 indexed round, bool mismatch);
-    event OTPayloadsPublished(uint256 indexed instanceId, bytes32 indexed payloadsCommitment, uint256 payloadCount);
-    event EvalOtSessionStarted(uint256 indexed sessionId, uint256 stepDeadline);
-    event EvalOtRoundCommitted(uint256 indexed sessionId, uint8 indexed round, bytes32 indexed roundHash, uint256 ackDeadline);
-    event EvalOtRoundAcknowledged(uint256 indexed sessionId, uint8 indexed round, address indexed acknowledger, uint256 nextDeadline);
-    event EvalOtRoundForceDelivered(uint256 indexed sessionId, uint8 indexed round, bytes32 indexed roundHash, uint256 payloadCount);
-    event EvalOtSessionCompleted(uint256 indexed sessionId, uint256 settlementDeadline);
-    event EvalOtSessionTimeoutSlashed(
-        uint256 indexed sessionId,
-        EvalOtStep step,
-        address indexed cheater,
-        address beneficiary
-    );
+    event OTInstanceRootChallenged(uint256 indexed instanceId, bool mismatch);
     event CheaterSlashed(address indexed cheater, address indexed beneficiary);
 
     function _isOpenInstance(uint256 instanceId) internal view returns (bool) {
@@ -854,24 +569,6 @@ contract MillionairesProblem {
             if (sOpen[i] == instanceId) return true;
         }
         return false;
-    }
-
-    function _instanceRequiresOtPublication(uint256 instanceId) internal view returns (bool) {
-        return instanceCommitments[instanceId].rootOT != bytes32(0);
-    }
-
-    function _isOtEvidencePublished(uint256 instanceId) internal view returns (bool) {
-        return otPayloadsPublished[instanceId];
-    }
-
-    function _allRequiredOtPayloadsPublished() internal view returns (bool) {
-        for (uint256 i = 0; i < sOpen.length; i++) {
-            uint256 instanceId = sOpen[i];
-            if (_instanceRequiresOtPublication(instanceId) && !_isOtEvidencePublished(instanceId)) {
-                return false;
-            }
-        }
-        return true;
     }
 
     function _assertValidLayoutProof(
@@ -943,29 +640,16 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 6 (Dispute): single OT challenge path using payload hashes published on-chain by Alice.
-     * For opened check-circuits (`instanceId != m`) replay is deterministic under revealed garbler seed + verifier seed.
+     * @dev Phase 6 (Dispute): Bob challenges OT root commitment for one opened instance.
+     * Contract deterministically recomputes rootOT from (revealed garbler seed, revealed verifier seed).
      */
-    function disputePublishedObliviousTransfer(
-        uint256 instanceId,
-        bytes32 verifierSeed,
-        uint16 inputBit,
-        uint8 round
-    ) external {
+    function disputeObliviousTransferRoot(uint256 instanceId) external {
         require(currentStage == Stage.Dispute, "Wrong stage");
         require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
-        require(msg.sender == alice || msg.sender == bob, "Only participants can dispute");
+        require(msg.sender == bob, "Only Evaluator can dispute");
         require(instanceId != m, "Cannot dispute evaluation circuit m");
-        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
-        require(
-            keccak256(abi.encodePacked(verifierSeed)) == verifierSeedCommitment,
-            "Invalid verifier seed"
-        );
-        require(otPayloadsPublished[instanceId], "OT payloads not published");
-
-        uint256 leafIndex = _otLeafIndex(inputBit, round);
-        bytes32 payloadHash = publishedOtPayloadHashes[instanceId][leafIndex];
-        _resolveOtChallenge(instanceId, verifierSeed, inputBit, round, payloadHash);
+        require(verifierSeedRevealed, "Verifier seed not revealed");
+        _resolveOtRootChallenge(instanceId);
     }
 
     // leaf = H(gateIndex || gateType || wireA || wireB || wireC)
@@ -1003,12 +687,6 @@ contract MillionairesProblem {
         return round == 1 ? 1 : 0;
     }
 
-    function _otLeafIndex(uint16 inputBit, uint8 round) internal view returns (uint256) {
-        require(inputBit < bitWidth, "OT input bit out of range");
-        require(round < OT_ROUNDS_PER_INPUT, "Bad OT round");
-        return uint256(inputBit) * OT_ROUNDS_PER_INPUT + round;
-    }
-
     function _otTranscriptLeafHash(uint16 inputBit, uint8 round, uint8 author, bytes32 payloadHash)
         internal
         pure
@@ -1022,7 +700,7 @@ contract MillionairesProblem {
         return bitWidth + inputBit;
     }
 
-    function _computeOtPayloadHash(bytes32 garblerSeed, bytes32 verifierSeed, uint256 instanceId, uint16 inputBit, uint8 round)
+    function _computeOtPayloadHash(bytes32 garblerSeed, bytes32 verifierSeedValue, uint256 instanceId, uint16 inputBit, uint8 round)
         internal
         view
         returns (bytes32)
@@ -1035,7 +713,7 @@ contract MillionairesProblem {
             abi.encodePacked("OT-S", circuitId, instanceId, wireId, garblerSeed)
         );
         bytes32 verifierRandomness = keccak256(
-            abi.encodePacked("OT-R", circuitId, instanceId, wireId, verifierSeed)
+            abi.encodePacked("OT-R", circuitId, instanceId, wireId, verifierSeedValue)
         );
 
         if (round == 0) {
@@ -1082,15 +760,20 @@ contract MillionairesProblem {
         );
     }
 
-    function _otRootFromPayloadHashes(bytes32[] calldata payloadHashes) internal view returns (bytes32) {
-        uint256 width = payloadHashes.length;
+    function _recomputeOtRoot(bytes32 garblerSeed, bytes32 verifierSeedValue, uint256 instanceId)
+        internal
+        view
+        returns (bytes32)
+    {
+        uint256 width = uint256(bitWidth) * OT_ROUNDS_PER_INPUT;
         bytes32[] memory level = new bytes32[](width);
 
         uint256 cursor = 0;
         for (uint16 inputBit = 0; inputBit < bitWidth; inputBit++) {
             for (uint8 round = 0; round < OT_ROUNDS_PER_INPUT; round++) {
                 uint8 author = _otMessageAuthor(round);
-                level[cursor] = _otTranscriptLeafHash(inputBit, round, author, payloadHashes[cursor]);
+                bytes32 payloadHash = _computeOtPayloadHash(garblerSeed, verifierSeedValue, instanceId, inputBit, round);
+                level[cursor] = _otTranscriptLeafHash(inputBit, round, author, payloadHash);
                 cursor++;
             }
         }
@@ -1110,29 +793,19 @@ contract MillionairesProblem {
         return level[0];
     }
 
-    function _resolveOtChallenge(
-        uint256 instanceId,
-        bytes32 verifierSeed,
-        uint16 inputBit,
-        uint8 round,
-        bytes32 payloadHash
-    ) internal {
+    function _resolveOtRootChallenge(uint256 instanceId) internal {
         bytes32 garblerSeed = _requireRevealedSeedForOpenedInstance(instanceId);
-        uint8 author = _otMessageAuthor(round);
-        bytes32 expectedPayloadHash = _computeOtPayloadHash(garblerSeed, verifierSeed, instanceId, inputBit, round);
-        bool matchLeaf = payloadHash == expectedPayloadHash;
+        bytes32 expectedRoot = _recomputeOtRoot(garblerSeed, verifierSeed, instanceId);
+        bool matchRoot = expectedRoot == instanceCommitments[instanceId].rootOT;
 
-        if (!matchLeaf) {
-            address honestParty = author == 0 ? bob : alice;
-            address dishonestParty = author == 0 ? alice : bob;
-            emit OTLeafChallenged(instanceId, inputBit, round, true);
-            emit CheaterSlashed(dishonestParty, honestParty);
-            _slash(honestParty, dishonestParty);
+        if (!matchRoot) {
+            emit OTInstanceRootChallenged(instanceId, true);
+            emit CheaterSlashed(alice, bob);
+            _slash(bob, alice);
         } else {
-            address counterparty = msg.sender == alice ? bob : alice;
-            emit OTLeafChallenged(instanceId, inputBit, round, false);
-            emit CheaterSlashed(msg.sender, counterparty);
-            _slash(counterparty, msg.sender);
+            emit OTInstanceRootChallenged(instanceId, false);
+            emit CheaterSlashed(bob, alice);
+            _slash(alice, bob);
         }
     }
     // ------ gc part end ------
