@@ -305,7 +305,7 @@ compact_cli_output() {
       fi
       ;;
     alice:submit-commitments|alice:submit-core-commitments)
-      local circuit_id bit_width root_ot_nonzero blob_nonzero instance0_line instance9_line
+      local circuit_id bit_width root_ot_nonzero blob_nonzero root_ot_note instance0_line instance9_line
       local com0 rootgc0 rootot0 blob0 com9 rootgc9 rootot9 blob9
       circuit_id="$(extract_kv_from_text circuit_id "${raw}")"
       bit_width="$(extract_kv_from_text bit_width "${raw}")"
@@ -331,11 +331,23 @@ compact_cli_output() {
       rootot9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*rootOT=(0x[0-9a-fA-F]{64}).*/\1/p')"
       blob9="$(printf '%s\n' "${instance9_line}" | sed -nE 's/.*blobHashGC=(0x[0-9a-fA-F]{64}).*/\1/p')"
 
-      echo "  Alice: submit_commitments n=${CUT_AND_CHOOSE_N}, bit_width=${bit_width}, circuit=$(short_hash32 "${circuit_id}"), rootOT_nonzero=${root_ot_nonzero}/${CUT_AND_CHOOSE_N}, blobHashGC_nonzero=${blob_nonzero}/${CUT_AND_CHOOSE_N} [OK]"
-      [[ -n "${com0}" || -n "${rootgc0}" || -n "${rootot0}" || -n "${blob0}" ]] && \
-        echo "  commitment_sample: i=0 comSeed=$(short_hash32 "${com0}") rootGC=$(short_hash32 "${rootgc0}") rootOT=$(short_hash32 "${rootot0}") blobHashGC=$(short_hash32 "${blob0}")"
-      [[ -n "${com9}" || -n "${rootgc9}" || -n "${rootot9}" || -n "${blob9}" ]] && \
-        echo "  commitment_sample: i=$((CUT_AND_CHOOSE_N - 1)) comSeed=$(short_hash32 "${com9}") rootGC=$(short_hash32 "${rootgc9}") rootOT=$(short_hash32 "${rootot9}") blobHashGC=$(short_hash32 "${blob9}")"
+      root_ot_note=""
+      if [[ "${root_ot_nonzero}" == "0" ]]; then
+        root_ot_note=" (expected; OT roots submitted after seed reveal)"
+      fi
+      echo "  Alice: submit_commitments n=${CUT_AND_CHOOSE_N}, bit_width=${bit_width}, circuit=$(short_hash32 "${circuit_id}"), rootOT_set=${root_ot_nonzero}/${CUT_AND_CHOOSE_N}${root_ot_note} [OK]"
+      if [[ "${blob_nonzero}" == "0" ]]; then
+        [[ -n "${com0}" || -n "${rootgc0}" || -n "${rootot0}" ]] && \
+          echo "  commitment_sample: i=0 comSeed=$(short_hash32 "${com0}") rootGC=$(short_hash32 "${rootgc0}") rootOT=$(short_hash32 "${rootot0}")"
+        [[ -n "${com9}" || -n "${rootgc9}" || -n "${rootot9}" ]] && \
+          echo "  commitment_sample: i=$((CUT_AND_CHOOSE_N - 1)) comSeed=$(short_hash32 "${com9}") rootGC=$(short_hash32 "${rootgc9}") rootOT=$(short_hash32 "${rootot9}")"
+        echo "  eval_blob_note: blobHashGC omitted/zero in this case (no evaluation blob needed; dispute targets opened instance)"
+      else
+        [[ -n "${com0}" || -n "${rootgc0}" || -n "${rootot0}" || -n "${blob0}" ]] && \
+          echo "  commitment_sample: i=0 comSeed=$(short_hash32 "${com0}") rootGC=$(short_hash32 "${rootgc0}") rootOT=$(short_hash32 "${rootot0}") blobHashGC=$(short_hash32 "${blob0}")"
+        [[ -n "${com9}" || -n "${rootgc9}" || -n "${rootot9}" || -n "${blob9}" ]] && \
+          echo "  commitment_sample: i=$((CUT_AND_CHOOSE_N - 1)) comSeed=$(short_hash32 "${com9}") rootGC=$(short_hash32 "${rootgc9}") rootOT=$(short_hash32 "${rootot9}") blobHashGC=$(short_hash32 "${blob9}")"
+      fi
       ;;
     alice:submit-ot-roots)
       local root_ot_nonzero
@@ -718,7 +730,7 @@ common_bootstrap() {
 show_ot_visibility() {
   local instance_id="$1"
   local _unused_dir="$2"
-  local title="${3:-Phase 6 (off-chain): OT visibility check}"
+  local title="${3:-Optional check (off-chain): OT visibility check}"
 
   local seed
   local expected_root_ot
@@ -739,7 +751,10 @@ show_ot_visibility() {
 
   phase "${title}"
   echo "  ot_replay_execution: off-chain recompute (no on-chain tx in this step)"
+  echo "  ot_replay_purpose: pre-screen before on-chain OT dispute (avoid wasting gas if match)"
   echo "  ot_replay_model: rootOT commits bit_width(${BIT_WIDTH})*3_rounds transcript leaves"
+  echo "  note: on-chain OT dispute recomputes rootOT and slashes on mismatch / false challenge"
+  echo "  ot_dispute: on-chain recompute+slash path is available"
   echo "  ot_replay_input: instance=${instance_id}, garbler_seed=$(short_hash32 "${seed}"), verifier_seed=$(short_hash32 "${VERIFIER_SEED_HEX}")"
 
   local ot_raw
@@ -779,10 +794,10 @@ scenario_success() {
   local eval_dir="${out_dir}/eval-m"
 
   printf "\n\033[1;32m================ CASE 1: SUCCESS FLOW ================\033[0m\n"
-  echo "security_goal: honest run; commitments, opened-instance OT root replay checks, and settlement must all agree"
-  echo "artifact_defs: comSeed=keccak(seed), rootGC=terminal incremental-hash root over gate leaves where leafHash=keccak(leafBytes(gateIndex,GateDesc,4-rows)), circuitLayoutRoot=commitment to (gateIndex,GateDesc) used by layout proofs, rootOT=OT transcript root, h0/h1=keccak(output_label)"
+  echo "security_goal: honest run with verifier-seed commit-reveal binding; disputes cover (a) GC leaf correctness for opened instances and (b) opened-instance OT root correctness; settlement must agree"
+  echo "artifact_defs: comSeed=keccak(seed), rootGC=terminal incremental-hash root over gate leaves where leafHash=keccak(gateIndex || leafBytes(GateDesc,4-rows)), circuitLayoutRoot=commitment to (gateIndex,GateDesc) used by layout proofs, verifierSeedCommitment=keccak(seed||salt), rootOT=Alice commits after Bob seed reveal and Bob can dispute on-chain, h0/h1=keccak(output_label)"
   echo "label_encoding: output_label is 16-byte GC label zero-padded to bytes32 before on-chain hash check"
-  echo "liveness_hooks: verifier-seed/choose/open/labels/settle deadlines + abort/slash paths are active"
+  echo "liveness_hooks: deposit -> verifierSeed(commit) -> coreCommit -> verifierSeed(reveal) -> otRoots -> choose -> open -> dispute -> labels -> settle"
   common_bootstrap "${m_choice}"
 
   phase "Phase 3: Alice derives anchors and submits core commitments"
@@ -843,15 +858,24 @@ scenario_success() {
 
   local challenge_instance
   challenge_instance="$(choose_challenge_instance "${m_choice}")"
-  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 8 (off-chain): Bob replays opened OT root from revealed seeds"
+  show_ot_visibility "${challenge_instance}" "${out_dir}" "Optional check (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
-  phase "Phase 9: Bob closes dispute window"
+  phase "Phase 9: Bob ends Dispute stage (early close)"
   cast send "${CONTRACT_ADDRESS}" "closeDispute()" \
     "${TX_FLAGS[@]}" \
     --private-key "${BOB_PK}" \
     --rpc-url "${RPC_URL}" >/dev/null
   echo "  Bob: close_dispute [OK]"
+  local stage_after_close
+  local stage_after_close_token
+  local stage_transition_status="[FAIL]"
+  stage_after_close="$(stage_value)"
+  stage_after_close_token="$(first_token "${stage_after_close}")"
+  if [[ "${stage_after_close_token}" == "8" ]]; then
+    stage_transition_status="[OK]"
+  fi
+  echo "  stage_transition: Dispute -> Labels ${stage_transition_status}"
   wait_phase
 
   phase "Phase 10: Alice prepares evaluation package + reveals x labels (enter Settle)"
@@ -1085,7 +1109,7 @@ scenario_alice_cheats() {
 
   printf "\n\033[1;31m============= CASE 2: ALICE CHEATS, BOB SLASHES =============\033[0m\n"
   echo "security_goal: if Alice tampers opened-instance GC commitment, Bob proves mismatch and Alice is slashed"
-  echo "liveness_hooks: verifier-seed/choose/open/dispute/labels/settle deadlines + abort/slash paths are active"
+  echo "liveness_hooks: deposit -> verifierSeed(commit) -> coreCommit -> verifierSeed(reveal) -> otRoots -> choose -> open -> dispute -> labels -> settle"
   common_bootstrap "${m_choice}"
 
   phase "Phase 3: Alice exports honest artifacts"
@@ -1158,7 +1182,7 @@ scenario_alice_cheats() {
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 8 (off-chain): Bob replays opened OT root from revealed seeds"
+  show_ot_visibility "${challenge_instance}" "${out_dir}" "Optional check (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
   phase "Phase 9: Bob disputes one tampered GC node"
@@ -1238,7 +1262,7 @@ scenario_bob_cheats() {
 
   printf "\n\033[1;35m========== CASE 3: BOB FALSE-CHALLENGES, ALICE WINS ==========\033[0m\n"
   echo "security_goal: if Bob submits a false GC dispute on opened instance, Bob is slashed and Alice wins"
-  echo "liveness_hooks: dispute/labels/settle deadlines remain enforced; false challenge is economically penalized"
+  echo "liveness_hooks: deposit -> verifierSeed(commit) -> coreCommit -> verifierSeed(reveal) -> otRoots -> choose -> open -> dispute -> labels -> settle"
   common_bootstrap "${m_choice}"
 
   phase "Phase 3: Alice submits honest core commitments"
@@ -1271,7 +1295,7 @@ scenario_bob_cheats() {
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 8 (off-chain): Bob replays opened OT root from revealed seeds"
+  show_ot_visibility "${challenge_instance}" "${out_dir}" "Optional check (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
   phase "Phase 9: Bob submits false GC challenge"
