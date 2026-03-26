@@ -820,16 +820,168 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
             .clone()
     };
 
-    let tuple_items = instances
+    let core_tuple_items = instances
         .iter()
         .map(|inst| {
             format!(
-                "({},{},{},{},{},{},{})",
+                "({},{},{},{},{},{})",
                 hex32(inst.com_seed),
                 hex32(root_gcs[inst.instance_id]),
                 hex32(blob_hashes[inst.instance_id]),
                 hex32(zero),
-                hex32(root_ots[inst.instance_id]),
+                hex32(h0[inst.instance_id]),
+                hex32(h1[inst.instance_id])
+            )
+        })
+        .collect::<Vec<_>>();
+    let core_commitments_arg = format!("[{}]", core_tuple_items.join(","));
+
+    println!("circuit_id={}", hex32(config.circuit_id));
+    println!("master_seed={}", hex32(config.master_seed));
+    println!("bit_width={}", config.bit_width);
+    for inst in &instances {
+        println!(
+            "instance={} comSeed={} rootGC={} rootOT={} blobHashGC={}",
+            inst.instance_id,
+            hex32(inst.com_seed),
+            hex32(root_gcs[inst.instance_id]),
+            hex32(root_ots[inst.instance_id]),
+            hex32(blob_hashes[inst.instance_id])
+        );
+    }
+
+    let core_tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address.clone(),
+        "submitCommitments((bytes32,bytes32,bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
+        core_commitments_arg,
+        "--private-key".to_string(),
+        alice_private_key.clone(),
+        "--rpc-url".to_string(),
+        rpc_url.clone(),
+    ])?;
+    print_tx_summary("submit_core_commitments", &core_tx_result);
+
+    let ot_tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "submitOtRoots(bytes32[10])".to_string(),
+        bytes32_vec_literal(&root_ots),
+        "--private-key".to_string(),
+        alice_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+    print_tx_summary("submit_ot_roots", &ot_tx_result);
+    Ok(())
+}
+
+fn cmd_submit_core_commitments(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let alice_private_key = required_env_any(&["ALICE_PRIVATE_KEY", "ALICE_PK"])?;
+    let config = parse_session_config(args)?;
+    let instances = build_instances(&config);
+    let zero = [0u8; 32];
+    let export_dir = parse_flag_value(args, "--export-dir").map(PathBuf::from);
+    let derive_default_anchors =
+        parse_flag_value(args, "--h0").is_none() || parse_flag_value(args, "--h1").is_none();
+    let derived_anchors = if derive_default_anchors {
+        Some(derive_anchor_lists(&config)?)
+    } else {
+        None
+    };
+
+    let root_gcs = if let Some(raw) = parse_flag_value(args, "--root-gcs") {
+        let parsed = parse_bytes32_list_csv(&raw)?;
+        if parsed.len() != CUT_AND_CHOOSE_N {
+            return Err(format!(
+                "--root-gcs must contain {} values, got {}",
+                CUT_AND_CHOOSE_N,
+                parsed.len()
+            )
+            .into());
+        }
+        parsed
+    } else {
+        instances
+            .iter()
+            .map(|inst| inst.root_gc)
+            .collect::<Vec<_>>()
+    };
+
+    if let Some(path) = export_dir.as_ref() {
+        // core commit export does not depend on verifier seed
+        write_instance_files(path, &config, &instances, None)?;
+        println!("artifacts_exported={}", path.display());
+    }
+
+    let blob_hashes = if let Some(raw) = parse_flag_value(args, "--blob-hashes") {
+        let parsed = parse_bytes32_list_csv(&raw)?;
+        if parsed.len() != CUT_AND_CHOOSE_N {
+            return Err(format!(
+                "--blob-hashes must contain {} values, got {}",
+                CUT_AND_CHOOSE_N,
+                parsed.len()
+            )
+            .into());
+        }
+        parsed
+    } else if let Some(path) = export_dir.as_ref() {
+        derive_blob_hashes_from_exported_payloads(path, &instances)?
+    } else {
+        vec![zero; CUT_AND_CHOOSE_N]
+    };
+
+    let root_ots = vec![zero; CUT_AND_CHOOSE_N];
+
+    let h0 = if let Some(raw) = parse_flag_value(args, "--h0") {
+        let parsed = parse_bytes32_list_csv(&raw)?;
+        if parsed.len() != CUT_AND_CHOOSE_N {
+            return Err(format!(
+                "--h0 must contain {} values, got {}",
+                CUT_AND_CHOOSE_N,
+                parsed.len()
+            )
+            .into());
+        }
+        parsed
+    } else {
+        derived_anchors
+            .as_ref()
+            .expect("derived anchors available when h0 override is absent")
+            .0
+            .clone()
+    };
+
+    let h1 = if let Some(raw) = parse_flag_value(args, "--h1") {
+        let parsed = parse_bytes32_list_csv(&raw)?;
+        if parsed.len() != CUT_AND_CHOOSE_N {
+            return Err(format!(
+                "--h1 must contain {} values, got {}",
+                CUT_AND_CHOOSE_N,
+                parsed.len()
+            )
+            .into());
+        }
+        parsed
+    } else {
+        derived_anchors
+            .as_ref()
+            .expect("derived anchors available when h1 override is absent")
+            .1
+            .clone()
+    };
+
+    let tuple_items = instances
+        .iter()
+        .map(|inst| {
+            format!(
+                "({},{},{},{},{},{})",
+                hex32(inst.com_seed),
+                hex32(root_gcs[inst.instance_id]),
+                hex32(blob_hashes[inst.instance_id]),
+                hex32(zero),
                 hex32(h0[inst.instance_id]),
                 hex32(h1[inst.instance_id])
             )
@@ -854,15 +1006,64 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     let tx_result = run_cast(&[
         "send".to_string(),
         contract_address,
-        "submitCommitments((bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32)[10])"
-            .to_string(),
+        "submitCommitments((bytes32,bytes32,bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
         commitments_arg,
         "--private-key".to_string(),
         alice_private_key,
         "--rpc-url".to_string(),
         rpc_url,
     ])?;
-    print_tx_summary("submit_commitments", &tx_result);
+    print_tx_summary("submit_core_commitments", &tx_result);
+    Ok(())
+}
+
+fn cmd_submit_ot_roots(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let alice_private_key = required_env_any(&["ALICE_PRIVATE_KEY", "ALICE_PK"])?;
+    let config = parse_session_config(args)?;
+    let instances = build_instances(&config);
+    let verifier_seed = parse_optional_verifier_seed(args)?;
+
+    let root_ots = if let Some(raw) = parse_flag_value(args, "--root-ots") {
+        let parsed = parse_bytes32_list_csv(&raw)?;
+        if parsed.len() != CUT_AND_CHOOSE_N {
+            return Err(format!(
+                "--root-ots must contain {} values, got {}",
+                CUT_AND_CHOOSE_N,
+                parsed.len()
+            )
+            .into());
+        }
+        parsed
+    } else if let Some(verifier_seed) = verifier_seed {
+        derive_ot_root_lists(&config, &instances, verifier_seed)?
+    } else {
+        return Err("Provide --verifier-seed or --root-ots for OT root submission".into());
+    };
+
+    println!("circuit_id={}", hex32(config.circuit_id));
+    println!("master_seed={}", hex32(config.master_seed));
+    println!("bit_width={}", config.bit_width);
+    for inst in &instances {
+        println!(
+            "instance={} rootOT={}",
+            inst.instance_id,
+            hex32(root_ots[inst.instance_id])
+        );
+    }
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "submitOtRoots(bytes32[10])".to_string(),
+        bytes32_vec_literal(&root_ots),
+        "--private-key".to_string(),
+        alice_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+    print_tx_summary("submit_ot_roots", &tx_result);
     Ok(())
 }
 
@@ -963,6 +1164,12 @@ fn print_help() {
         "  submit-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
     );
     println!(
+        "  submit-core-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
+    );
+    println!(
+        "  submit-ot-roots [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>]"
+    );
+    println!(
         "  export-artifacts --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32>]"
     );
     println!(
@@ -987,6 +1194,8 @@ fn main() -> AppResult<()> {
         "deposit" => cmd_deposit(),
         "derive-anchors" => cmd_derive_anchors(tail),
         "submit-commitments" => cmd_submit_commitments(tail),
+        "submit-core-commitments" => cmd_submit_core_commitments(tail),
+        "submit-ot-roots" => cmd_submit_ot_roots(tail),
         "export-artifacts" => cmd_export_artifacts(tail),
         "prepare-eval" => cmd_prepare_eval(tail),
         "reveal-openings" => cmd_reveal_openings(tail),

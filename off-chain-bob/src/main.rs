@@ -165,6 +165,10 @@ fn random_bytes32() -> AppResult<[u8; 32]> {
     Ok(seed)
 }
 
+fn verifier_seed_commitment_with_salt(seed: [u8; 32], salt: [u8; 32]) -> [u8; 32] {
+    keccak256(&[&seed, &salt])
+}
+
 #[derive(Debug, Clone)]
 struct EvalMeta {
     bit_width: usize,
@@ -549,21 +553,71 @@ fn cmd_deposit() -> AppResult<()> {
     Ok(())
 }
 
-fn cmd_reveal_verifier_seed(args: &[String]) -> AppResult<()> {
+fn cmd_commit_verifier_seed(args: &[String]) -> AppResult<()> {
     let rpc_url = rpc_url();
     let contract_address = required_env("CONTRACT_ADDRESS")?;
     let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
-    let seed = if let Some(raw) = parse_flag_value(args, "--seed") {
-        parse_bytes32(&raw)?
+
+    let commitment_override = parse_flag_value(args, "--commitment")
+        .as_deref()
+        .map(parse_bytes32)
+        .transpose()?;
+    let seed = parse_flag_value(args, "--seed")
+        .as_deref()
+        .map(parse_bytes32)
+        .transpose()?;
+    let salt = parse_flag_value(args, "--salt")
+        .as_deref()
+        .map(parse_bytes32)
+        .transpose()?;
+
+    let (commitment, used_seed, used_salt) = if let Some(commitment) = commitment_override {
+        (commitment, seed, salt)
     } else {
-        random_bytes32()?
+        let used_seed = seed.unwrap_or(random_bytes32()?);
+        let used_salt = salt.unwrap_or(random_bytes32()?);
+        (
+            verifier_seed_commitment_with_salt(used_seed, used_salt),
+            Some(used_seed),
+            Some(used_salt),
+        )
     };
 
     let tx_result = run_cast(&[
         "send".to_string(),
         contract_address,
-        "revealVerifierSeed(bytes32)".to_string(),
+        "commitVerifierSeed(bytes32)".to_string(),
+        hex32(commitment),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+    print_tx_summary("commit_verifier_seed", &tx_result);
+    if let Some(seed) = used_seed {
+        println!("verifier_seed={}", hex32(seed));
+    }
+    if let Some(salt) = used_salt {
+        println!("verifier_salt={}", hex32(salt));
+    }
+    println!("verifier_seed_commitment={}", hex32(commitment));
+    Ok(())
+}
+
+fn cmd_reveal_verifier_seed(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+    let seed = parse_bytes32(&required_flag_value(args, "--seed")?)?;
+    let salt = parse_bytes32(&required_flag_value(args, "--salt")?)?;
+    let commitment = verifier_seed_commitment_with_salt(seed, salt);
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "revealVerifierSeed(bytes32,bytes32)".to_string(),
         hex32(seed),
+        hex32(salt),
         "--private-key".to_string(),
         bob_private_key,
         "--rpc-url".to_string(),
@@ -571,6 +625,8 @@ fn cmd_reveal_verifier_seed(args: &[String]) -> AppResult<()> {
     ])?;
     print_tx_summary("reveal_verifier_seed", &tx_result);
     println!("verifier_seed={}", hex32(seed));
+    println!("verifier_salt={}", hex32(salt));
+    println!("verifier_seed_commitment={}", hex32(commitment));
     Ok(())
 }
 
@@ -984,7 +1040,8 @@ fn cmd_dispute_ot(args: &[String]) -> AppResult<()> {
 fn print_help() {
     println!("off-chain-bob commands:");
     println!("  deposit");
-    println!("  reveal-verifier-seed [--seed <0x..32>]");
+    println!("  commit-verifier-seed [--seed <0x..32> --salt <0x..32> | --commitment <0x..32>]");
+    println!("  reveal-verifier-seed --seed <0x..32> --salt <0x..32>");
     println!("  choose --m <index>");
     println!(
         "  evaluate-m --y <u64> [--payload-file <path>] [--eval-dir <path>] [--alice-labels-file <path>]"
@@ -1012,6 +1069,7 @@ fn main() -> AppResult<()> {
 
     match command {
         "deposit" => cmd_deposit(),
+        "commit-verifier-seed" => cmd_commit_verifier_seed(tail),
         "reveal-verifier-seed" => cmd_reveal_verifier_seed(tail),
         "choose" => cmd_choose(tail),
         "evaluate-m" => cmd_evaluate_m(tail),

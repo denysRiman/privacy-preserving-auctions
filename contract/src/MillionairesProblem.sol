@@ -21,8 +21,8 @@ contract MillionairesProblem {
 
     struct Deadlines {
         uint256 deposit;          // Phase 1: Alice & Bob must lock funds
-        uint256 verifierSeed;    // Phase 2: Bob must reveal verifier randomness for OT replay
-        uint256 commit;          // Phase 3: Alice must submit GC + transcript commitments
+        uint256 verifierSeed;    // Phase 2: Bob commit/reveal verifier randomness for OT replay
+        uint256 commit;          // Phase 3: Alice submit core commitments, then OT roots
         uint256 choose;          // Phase 4: Bob must pick index m
         uint256 open;            // Phase 5: Alice must reveal n-1 seeds
         uint256 dispute;         // Phase 6: Off-chain verification + Dispute window
@@ -36,11 +36,32 @@ contract MillionairesProblem {
         bytes32 blobHashGC; // EIP-4844 versioned hash for evaluation payload blob (instance i)
         bytes32 rootXG;    // Merkle root over G's input labels
         bytes32 rootOT;    // Merkle root over public OT transcript leaves
-        bytes32 h0;        // Result anchor for output 0: H(Lout0)
-        bytes32 h1;        // Result anchor for output 1: H(Lout1)
+        bytes32 h0;        // PoC mapping: keccak(outputLabel) == h0 -> result=true (Alice wins / x > y)
+        bytes32 h1;        // PoC mapping: keccak(outputLabel) == h1 -> result=false (Bob wins / x <= y)
     }
 
-    enum Stage { Deposits, VerifierSeed, Commitments, Choose, Open, Dispute, Labels, Settle, Closed }
+    struct CoreInstanceCommitment {
+        bytes32 comSeed;
+        bytes32 rootGC;
+        bytes32 blobHashGC;
+        bytes32 rootXG;
+        bytes32 h0;
+        bytes32 h1;
+    }
+
+    enum Stage {
+        Deposits,
+        VerifierSeedCommit,
+        CommitmentsCore,
+        VerifierSeedReveal,
+        CommitmentsOT,
+        Choose,
+        Open,
+        Dispute,
+        Labels,
+        Settle,
+        Closed
+    }
     Stage public currentStage;
 
     uint256 public constant DEPOSIT_GARBLER = 1 ether;
@@ -53,6 +74,7 @@ contract MillionairesProblem {
 
     // Mapping to store revealed seeds for verification (index => seed)
     mapping(uint256 => bytes32) public revealedSeeds;
+    bytes32 public verifierSeedCommitment;
     bytes32 public verifierSeed;
     bool public verifierSeedRevealed;
     uint16 public bitWidth;
@@ -79,7 +101,7 @@ contract MillionairesProblem {
 
         vault[msg.sender] += msg.value;
         if (vault[alice] == DEPOSIT_GARBLER && vault[bob] == DEPOSIT_EVALUATOR) {
-            currentStage = Stage.VerifierSeed;
+            currentStage = Stage.VerifierSeedCommit;
             deadlines.verifierSeed = block.timestamp + 1 hours;
         }
     }
@@ -101,16 +123,83 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 3: Garbler submits commitments for all N instances.
+     * @dev Phase 2a: Bob commits verifier randomness hash before Alice submits commitments.
      */
-    function submitCommitments(InstanceCommitment[N] calldata _commitments) external {
-        require(currentStage == Stage.Commitments, "Wrong stage");
+    function commitVerifierSeed(bytes32 commitment) external {
+        require(currentStage == Stage.VerifierSeedCommit, "Wrong stage");
+        require(msg.sender == bob, "Only Evaluator");
+        require(block.timestamp <= deadlines.verifierSeed, "Verifier seed deadline missed");
+        require(verifierSeedCommitment == bytes32(0), "Verifier seed already committed");
+        require(commitment != bytes32(0), "Empty verifier seed commitment");
+
+        verifierSeedCommitment = commitment;
+        currentStage = Stage.CommitmentsCore;
+        deadlines.commit = block.timestamp + 1 hours;
+    }
+
+    /**
+     * @dev Phase 2b: Bob reveals verifier randomness used for opened-instance OT root replay.
+     * Alice uses this seed together with each opened garbler seed to derive rootOT commitments.
+     */
+    function revealVerifierSeed(bytes32 seed, bytes32 salt) external {
+        require(currentStage == Stage.VerifierSeedReveal, "Wrong stage");
+        require(msg.sender == bob, "Only Evaluator");
+        require(block.timestamp <= deadlines.verifierSeed, "Verifier seed deadline missed");
+        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
+        require(!verifierSeedRevealed, "Verifier seed already revealed");
+        require(seed != bytes32(0), "Empty verifier seed");
+        require(
+            keccak256(abi.encodePacked(seed, salt)) == verifierSeedCommitment,
+            "Invalid verifier seed reveal"
+        );
+
+        verifierSeed = seed;
+        verifierSeedRevealed = true;
+        currentStage = Stage.CommitmentsOT;
+        deadlines.commit = block.timestamp + 1 hours;
+    }
+
+    /**
+     * @dev Phase 3a: Garbler submits core commitments for all N instances (without OT roots).
+     */
+    function submitCommitments(CoreInstanceCommitment[N] calldata commitments) external {
+        require(currentStage == Stage.CommitmentsCore, "Wrong stage");
         require(msg.sender == alice, "Only Garbler");
         require(block.timestamp <= deadlines.commit, "Commitment deadline missed");
+        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
+
+        for (uint256 i = 0; i < N; i++) {
+            require(commitments[i].comSeed != bytes32(0), "Empty comSeed");
+            require(commitments[i].rootGC != bytes32(0), "Empty rootGC");
+            require(commitments[i].h0 != bytes32(0), "Empty h0");
+            require(commitments[i].h1 != bytes32(0), "Empty h1");
+            require(commitments[i].h0 != commitments[i].h1, "h0 and h1 must differ");
+
+            instanceCommitments[i].comSeed = commitments[i].comSeed;
+            instanceCommitments[i].rootGC = commitments[i].rootGC;
+            instanceCommitments[i].blobHashGC = commitments[i].blobHashGC;
+            instanceCommitments[i].rootXG = commitments[i].rootXG;
+            instanceCommitments[i].h0 = commitments[i].h0;
+            instanceCommitments[i].h1 = commitments[i].h1;
+            instanceCommitments[i].rootOT = bytes32(0);
+        }
+
+        currentStage = Stage.VerifierSeedReveal;
+        deadlines.verifierSeed = block.timestamp + 1 hours;
+    }
+
+    /**
+     * @dev Phase 3b: Garbler submits OT roots for all N instances after Bob reveals verifier seed.
+     */
+    function submitOtRoots(bytes32[N] calldata rootOTs) external {
+        require(currentStage == Stage.CommitmentsOT, "Wrong stage");
+        require(msg.sender == alice, "Only Garbler");
+        require(block.timestamp <= deadlines.commit, "OT root deadline missed");
         require(verifierSeedRevealed, "Verifier seed not revealed");
 
         for (uint256 i = 0; i < N; i++) {
-            instanceCommitments[i] = _commitments[i];
+            require(rootOTs[i] != bytes32(0), "Empty rootOT");
+            instanceCommitments[i].rootOT = rootOTs[i];
         }
 
         currentStage = Stage.Choose;
@@ -118,27 +207,13 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 2: Bob reveals verifier randomness used for opened-instance OT root replay.
-     * Alice uses this seed together with each opened garbler seed to derive rootOT commitments.
-     */
-    function revealVerifierSeed(bytes32 _seed) external {
-        require(currentStage == Stage.VerifierSeed, "Wrong stage");
-        require(msg.sender == bob, "Only Evaluator");
-        require(block.timestamp <= deadlines.verifierSeed, "Verifier seed deadline missed");
-        require(!verifierSeedRevealed, "Verifier seed already revealed");
-        require(_seed != bytes32(0), "Empty verifier seed");
-
-        verifierSeed = _seed;
-        verifierSeedRevealed = true;
-        currentStage = Stage.Commitments;
-        deadlines.commit = block.timestamp + 1 hours;
-    }
-
-    /**
      * @dev Phase 2 Timeout: If Bob fails to reveal verifier randomness, Alice can claim the penalty.
      */
     function abortVerifierSeedStage() external {
-        require(currentStage == Stage.VerifierSeed, "Not in verifier-seed stage");
+        require(
+            currentStage == Stage.VerifierSeedCommit || currentStage == Stage.VerifierSeedReveal,
+            "Not in verifier-seed stage"
+        );
         require(block.timestamp > deadlines.verifierSeed, "Bob is not late yet");
         require(msg.sender == alice, "Only Alice can trigger this abort");
 
@@ -150,7 +225,10 @@ contract MillionairesProblem {
      * Bob can call this to reclaim his funds and Alice's collateral.
      */
     function abortPhase2() external {
-        require(currentStage == Stage.Commitments, "Not in commitment stage");
+        require(
+            currentStage == Stage.CommitmentsCore || currentStage == Stage.CommitmentsOT,
+            "Not in commitment stage"
+        );
         require(block.timestamp > deadlines.commit, "Alice is not late yet");
         require(msg.sender == bob, "Only Bob can trigger this abort");
 
@@ -177,6 +255,12 @@ contract MillionairesProblem {
         require(msg.sender == bob, "Only Evaluator");
         require(block.timestamp <= deadlines.choose, "Choice deadline missed");
         require(_m < N, "Index out of bounds");
+
+        // Defensive cleanup in case of re-entry/reuse in future protocol variants.
+        for (uint256 i = 0; i < sOpen.length; i++) {
+            delete revealedSeeds[sOpen[i]];
+        }
+        delete sOpen;
 
         m = _m;
         for (uint256 i = 0; i < N; i++) {
@@ -218,11 +302,25 @@ contract MillionairesProblem {
         require(msg.sender == alice, "Only Garbler");
         require(block.timestamp <= deadlines.open, "Reveal deadline missed");
         require(_indices.length == N - 1, "Must reveal N-1 seeds");
+        require(_seeds.length == N - 1, "Must provide N-1 seeds");
+        require(_indices.length == _seeds.length, "Length mismatch");
+
+        bool[] memory seen = new bool[](N);
 
         for (uint256 i = 0; i < _indices.length; i++) {
             uint256 idx = _indices[i];
+            require(idx < N, "Index out of bounds");
+            require(!seen[idx], "Duplicate index");
+            seen[idx] = true;
 
-            require(idx != m, "Cannot reveal evaluation index");
+            bool inSOpen = false;
+            for (uint256 j = 0; j < sOpen.length; j++) {
+                if (sOpen[j] == idx) {
+                    inSOpen = true;
+                    break;
+                }
+            }
+            require(inSOpen, "Index not in sOpen");
 
             // Verify the seed matches the commitment from Phase 2
             // H(seed) == instanceCommitments[idx].comSeed
@@ -232,6 +330,10 @@ contract MillionairesProblem {
             );
 
             revealedSeeds[idx] = _seeds[i];
+        }
+
+        for (uint256 i = 0; i < sOpen.length; i++) {
+            require(seen[sOpen[i]], "Missing sOpen index");
         }
 
         currentStage = Stage.Dispute;
@@ -270,6 +372,7 @@ contract MillionairesProblem {
         require(currentStage == Stage.Labels, "Wrong stage");
         require(msg.sender == alice, "Only Garbler");
         require(block.timestamp <= deadlines.labels, "Label reveal deadline missed");
+        require(_labels.length == bitWidth, "Bad labels length");
 
         bytes32 bHash = blobhash(0);
         require(bHash != bytes32(0), "Garbled Table Blob missing");
@@ -316,8 +419,7 @@ contract MillionairesProblem {
         bytes32[] calldata ihProof, bytes32[] calldata layoutProof) external {
         require(currentStage == Stage.Dispute, "Not in Dispute stage");
         require(msg.sender == bob, "Only Evaluator can dispute");
-        require(_idx != m, "Cannot dispute evaluation circuit m");
-        require(keccak256(abi.encodePacked(_seed)) == instanceCommitments[_idx].comSeed, "Invalid seed");
+        require(_idx < N, "Index out of bounds");
         require(revealedSeeds[_idx] == _seed, "Seed mismatch");
 
         challengeGateLeaf(_idx, gateIndex, g, leafBytes, ihProof, layoutProof);
@@ -328,7 +430,8 @@ contract MillionairesProblem {
 
     /**
      * @dev Phase 8: Bob (Evaluator) submits the final output label.
-     * The contract verifies it against Alice's anchors (h0, h1).
+     * `_outputLabel` is a bytes16 GC output label zero-padded to bytes32 before submission.
+     * PoC semantic mapping remains: h0-match => result=true, h1-match => result=false.
      * @param _outputLabel The label resulting from Ev(F, X).
      */
     function settle(bytes32 _outputLabel) external {
@@ -412,7 +515,6 @@ contract MillionairesProblem {
     //  Spec primitives
 
     // setting primitives
-    uint256 private constant LABEL_BYTES = 16;
     bytes32 public circuitId;
 
     function computeWireFlipBit(bytes32 seed, uint256 instanceId, uint16 wireId) internal view returns (uint8) {
@@ -641,12 +743,14 @@ contract MillionairesProblem {
 
     /**
      * @dev Phase 6 (Dispute): Bob challenges OT root commitment for one opened instance.
-     * Contract deterministically recomputes rootOT from (revealed garbler seed, revealed verifier seed).
+     * Contract deterministically recomputes rootOT from (revealed garbler seed, revealed verifier seed)
+     * and immediately resolves/slashes on mismatch or false challenge.
      */
     function disputeObliviousTransferRoot(uint256 instanceId) external {
         require(currentStage == Stage.Dispute, "Wrong stage");
         require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
         require(msg.sender == bob, "Only Evaluator can dispute");
+        require(instanceId < N, "Index out of bounds");
         require(instanceId != m, "Cannot dispute evaluation circuit m");
         require(verifierSeedRevealed, "Verifier seed not revealed");
         _resolveOtRootChallenge(instanceId);

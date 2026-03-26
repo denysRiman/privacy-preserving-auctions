@@ -24,6 +24,7 @@ TX_GAS_PRICE_WEI="${TX_GAS_PRICE_WEI:-0}"
 STRICT_BALANCE_CHECK="${STRICT_BALANCE_CHECK:-1}"
 EVAL_BLOB_FEE_TOLERANCE_WEI="${EVAL_BLOB_FEE_TOLERANCE_WEI:-10000000000000000}" # 0.01 ETH
 VERIFIER_SEED_OVERRIDE="${VERIFIER_SEED_OVERRIDE:-${VERIFIER_SEED:-}}"
+VERIFIER_SALT_OVERRIDE="${VERIFIER_SALT_OVERRIDE:-${VERIFIER_SALT:-}}"
 
 CUT_AND_CHOOSE_N=10
 
@@ -35,6 +36,8 @@ BOB_ADDR=""
 ALICE_RESET_WEI=""
 BOB_RESET_WEI=""
 VERIFIER_SEED_HEX=""
+VERIFIER_SALT_HEX=""
+VERIFIER_SEED_COMMITMENT=""
 TX_FLAGS=()
 
 is_truthy() {
@@ -301,7 +304,7 @@ compact_cli_output() {
         echo "  Bob: deposit wallet $(wei_to_eth_safe "${before}") ETH -> $(wei_to_eth_safe "${after}") ETH, vault=$(wei_to_eth_safe "${vault}") ETH [OK]"
       fi
       ;;
-    alice:submit-commitments)
+    alice:submit-commitments|alice:submit-core-commitments)
       local circuit_id bit_width root_ot_nonzero blob_nonzero instance0_line instance9_line
       local com0 rootgc0 rootot0 blob0 com9 rootgc9 rootot9 blob9
       circuit_id="$(extract_kv_from_text circuit_id "${raw}")"
@@ -333,6 +336,15 @@ compact_cli_output() {
         echo "  commitment_sample: i=0 comSeed=$(short_hash32 "${com0}") rootGC=$(short_hash32 "${rootgc0}") rootOT=$(short_hash32 "${rootot0}") blobHashGC=$(short_hash32 "${blob0}")"
       [[ -n "${com9}" || -n "${rootgc9}" || -n "${rootot9}" || -n "${blob9}" ]] && \
         echo "  commitment_sample: i=$((CUT_AND_CHOOSE_N - 1)) comSeed=$(short_hash32 "${com9}") rootGC=$(short_hash32 "${rootgc9}") rootOT=$(short_hash32 "${rootot9}") blobHashGC=$(short_hash32 "${blob9}")"
+      ;;
+    alice:submit-ot-roots)
+      local root_ot_nonzero
+      root_ot_nonzero="$(
+        printf '%s\n' "${raw}" \
+          | sed -nE 's/^instance=[0-9]+ rootOT=(0x[0-9a-fA-F]{64})/\1/p' \
+          | grep -Evc '^0x0{64}$' || true
+      )"
+      echo "  Alice: submit_ot_roots nonzero=${root_ot_nonzero}/${CUT_AND_CHOOSE_N} [OK]"
       ;;
     alice:reveal-openings)
       local m open_indices cleaned opened_count
@@ -380,11 +392,19 @@ compact_cli_output() {
       ;;
     bob:choose)
       ;;
+    bob:commit-verifier-seed)
+      local commitment
+      commitment="$(extract_kv_from_text verifier_seed_commitment "${raw}")"
+      [[ -n "${commitment}" ]] && \
+        echo "  Bob: commit_verifier_seed commitment=$(short_hash32 "${commitment}") [OK]"
+      ;;
     bob:reveal-verifier-seed)
-      local seed
+      local seed salt commitment
       seed="$(extract_kv_from_text verifier_seed "${raw}")"
+      salt="$(extract_kv_from_text verifier_salt "${raw}")"
+      commitment="$(extract_kv_from_text verifier_seed_commitment "${raw}")"
       [[ -n "${seed}" ]] && \
-        echo "  Bob: reveal_verifier_seed seed=$(short_hash32 "${seed}") [OK]"
+        echo "  Bob: reveal_verifier_seed seed=$(short_hash32 "${seed}"), salt=$(short_hash32 "${salt}"), commitment=$(short_hash32 "${commitment}") [OK]"
       ;;
     bob:evaluate-m)
       local y_value decoded output_label
@@ -427,16 +447,30 @@ run_bob() {
   compact_cli_output "bob" "${command}" "${raw}"
 }
 
+commit_bob_verifier_seed() {
+  local commit_raw
+  if [[ -n "${VERIFIER_SEED_OVERRIDE}" && -n "${VERIFIER_SALT_OVERRIDE}" ]]; then
+    commit_raw="$(run_bob_raw commit-verifier-seed --seed "${VERIFIER_SEED_OVERRIDE}" --salt "${VERIFIER_SALT_OVERRIDE}")"
+  elif [[ -n "${VERIFIER_SEED_OVERRIDE}" ]]; then
+    commit_raw="$(run_bob_raw commit-verifier-seed --seed "${VERIFIER_SEED_OVERRIDE}")"
+  elif [[ -n "${VERIFIER_SALT_OVERRIDE}" ]]; then
+    commit_raw="$(run_bob_raw commit-verifier-seed --salt "${VERIFIER_SALT_OVERRIDE}")"
+  else
+    commit_raw="$(run_bob_raw commit-verifier-seed)"
+  fi
+  compact_cli_output "bob" "commit-verifier-seed" "${commit_raw}"
+  VERIFIER_SEED_HEX="$(extract_kv_from_text verifier_seed "${commit_raw}")"
+  VERIFIER_SALT_HEX="$(extract_kv_from_text verifier_salt "${commit_raw}")"
+  VERIFIER_SEED_COMMITMENT="$(extract_kv_from_text verifier_seed_commitment "${commit_raw}")"
+  assert_non_empty "verifier_seed_commitment" "${VERIFIER_SEED_COMMITMENT}"
+}
+
 reveal_bob_verifier_seed() {
   local reveal_raw
-  if [[ -n "${VERIFIER_SEED_OVERRIDE}" ]]; then
-    reveal_raw="$(run_bob_raw reveal-verifier-seed --seed "${VERIFIER_SEED_OVERRIDE}")"
-  else
-    reveal_raw="$(run_bob_raw reveal-verifier-seed)"
-  fi
-  compact_cli_output "bob" "reveal-verifier-seed" "${reveal_raw}"
-  VERIFIER_SEED_HEX="$(extract_kv_from_text verifier_seed "${reveal_raw}")"
   assert_non_empty "verifier_seed" "${VERIFIER_SEED_HEX}"
+  assert_non_empty "verifier_salt" "${VERIFIER_SALT_HEX}"
+  reveal_raw="$(run_bob_raw reveal-verifier-seed --seed "${VERIFIER_SEED_HEX}" --salt "${VERIFIER_SALT_HEX}")"
+  compact_cli_output "bob" "reveal-verifier-seed" "${reveal_raw}"
 }
 
 stage_value() {
@@ -676,8 +710,8 @@ common_bootstrap() {
   run_bob deposit
   wait_phase
 
-  phase "Phase 2: Bob reveals verifier seed"
-  reveal_bob_verifier_seed
+  phase "Phase 2: Bob commits verifier seed commitment"
+  commit_bob_verifier_seed
   wait_phase
 }
 
@@ -751,7 +785,7 @@ scenario_success() {
   echo "liveness_hooks: verifier-seed/choose/open/labels/settle deadlines + abort/slash paths are active"
   common_bootstrap "${m_choice}"
 
-  phase "Phase 3: Alice derives anchors and submits commitments"
+  phase "Phase 3: Alice derives anchors and submits core commitments"
   local anchors_raw
   anchors_raw="$(
     run_alice_raw derive-anchors \
@@ -767,10 +801,9 @@ scenario_success() {
 
   local submit_raw
   submit_raw="$(
-    run_alice_raw submit-commitments \
+    run_alice_raw submit-core-commitments \
       --bit-width "${BIT_WIDTH}" \
       --circuit-id "${CIRCUIT_ID}" \
-      --verifier-seed "${VERIFIER_SEED_HEX}" \
       --h0 "${h0_list}" \
       --h1 "${h1_list}" \
       --export-dir "${out_dir}"
@@ -785,12 +818,23 @@ scenario_success() {
   assert_non_empty "committed_blob_hash(m)" "${committed_blob_hash}"
   wait_phase
 
-  phase "Phase 4: Bob chooses m"
+  phase "Phase 4: Bob reveals verifier seed + salt"
+  reveal_bob_verifier_seed
+  wait_phase
+
+  phase "Phase 5: Alice submits OT roots"
+  run_alice submit-ot-roots \
+    --bit-width "${BIT_WIDTH}" \
+    --circuit-id "${CIRCUIT_ID}" \
+    --verifier-seed "${VERIFIER_SEED_HEX}"
+  wait_phase
+
+  phase "Phase 6: Bob chooses m"
   run_bob choose --m "${m_choice}"
   echo "  choose_m: m=${m_choice}, opened_expected=$((CUT_AND_CHOOSE_N - 1)) [OK]"
   wait_phase
 
-  phase "Phase 5: Alice reveals openings"
+  phase "Phase 7: Alice reveals openings"
   run_alice reveal-openings \
     --m "${m_choice}" \
     --bit-width "${BIT_WIDTH}" \
@@ -799,10 +843,10 @@ scenario_success() {
 
   local challenge_instance
   challenge_instance="$(choose_challenge_instance "${m_choice}")"
-  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 6 (off-chain): Bob replays opened OT root from revealed seeds"
+  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 8 (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
-  phase "Phase 7: Bob closes dispute window"
+  phase "Phase 9: Bob closes dispute window"
   cast send "${CONTRACT_ADDRESS}" "closeDispute()" \
     "${TX_FLAGS[@]}" \
     --private-key "${BOB_PK}" \
@@ -810,7 +854,7 @@ scenario_success() {
   echo "  Bob: close_dispute [OK]"
   wait_phase
 
-  phase "Phase 8: Alice prepares evaluation package + reveals x labels (enter Settle)"
+  phase "Phase 10: Alice prepares evaluation package + reveals x labels (enter Settle)"
   local prepare_eval_raw
   prepare_eval_raw="$(
     run_alice_raw prepare-eval \
@@ -843,7 +887,7 @@ scenario_success() {
     --path "${eval_blob_file}"
   local stage_after_labels
   stage_after_labels="$(stage_value)"
-  if [[ "$(first_token "${stage_after_labels}")" != "7" ]]; then
+  if [[ "$(first_token "${stage_after_labels}")" != "9" ]]; then
     echo "Expected Settle stage after reveal-labels, got ${stage_after_labels}" >&2
     exit 1
   fi
@@ -852,10 +896,10 @@ scenario_success() {
     blob_link_status="[OK]"
   fi
   echo "  blob_link_m: committed=$(short_hash32 "${committed_blob_hash}"), prepared=$(short_hash32 "${eval_blob_hash}"), onchain=$(short_hash32 "${onchain_eval_blob_hash}") ${blob_link_status}"
-  echo "  stage_transition: stage=Settle(7) [OK]"
+  echo "  stage_transition: stage=Settle(9) [OK]"
   wait_phase
 
-  phase "Phase 9: Settlement (Bob evaluates m and settles)"
+  phase "Phase 11: Settlement (Bob evaluates m and settles)"
   local eval_raw
   eval_raw="$(
     run_bob_raw evaluate-m \
@@ -993,7 +1037,7 @@ scenario_success() {
     exit 1
   fi
 
-  if [[ "${stage_token}" == "8" && "${result_token}" == "${expected_result}" && "${winner_by_contract}" == "${expected_winner}" ]]; then
+  if [[ "${stage_token}" == "10" && "${result_token}" == "${expected_result}" && "${winner_by_contract}" == "${expected_winner}" ]]; then
     onchain_ok=1
     onchain_status="[OK]"
   fi
@@ -1048,11 +1092,10 @@ scenario_alice_cheats() {
   run_alice export-artifacts \
     --out-dir "${out_dir}" \
     --bit-width "${BIT_WIDTH}" \
-    --circuit-id "${CIRCUIT_ID}" \
-    --verifier-seed "${VERIFIER_SEED_HEX}"
+    --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  phase "Phase 3: Alice commits a tampered rootGC for one opened instance"
+  phase "Phase 3: Alice commits a tampered core commitment for one opened instance"
   local seed_file="${out_dir}/instance-${challenge_instance}-seed.txt"
   local honest_leaves_file="${out_dir}/instance-${challenge_instance}-leaves.txt"
   local tampered_leaves_file="${out_dir}/instance-${challenge_instance}-leaves-tampered.txt"
@@ -1086,29 +1129,39 @@ scenario_alice_cheats() {
   local root_gcs_list
   root_gcs_list="$(build_root_gcs_list "${out_dir}" "${challenge_instance}" "${tampered_root}")"
 
-  run_alice submit-commitments \
+  run_alice submit-core-commitments \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
-    --verifier-seed "${VERIFIER_SEED_HEX}" \
     --root-gcs "${root_gcs_list}"
   wait_phase
 
-  phase "Phase 4: Bob chooses m"
+  phase "Phase 4: Bob reveals verifier seed + salt"
+  reveal_bob_verifier_seed
+  wait_phase
+
+  phase "Phase 5: Alice submits OT roots"
+  run_alice submit-ot-roots \
+    --bit-width "${BIT_WIDTH}" \
+    --circuit-id "${CIRCUIT_ID}" \
+    --verifier-seed "${VERIFIER_SEED_HEX}"
+  wait_phase
+
+  phase "Phase 6: Bob chooses m"
   run_bob choose --m "${m_choice}"
   echo "  choose_m: m=${m_choice}, opened_expected=$((CUT_AND_CHOOSE_N - 1)) [OK]"
   wait_phase
 
-  phase "Phase 5: Alice reveals openings"
+  phase "Phase 7: Alice reveals openings"
   run_alice reveal-openings \
     --m "${m_choice}" \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 6 (off-chain): Bob replays opened OT root from revealed seeds"
+  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 8 (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
-  phase "Phase 7: Bob disputes one tampered GC node"
+  phase "Phase 9: Bob disputes one tampered GC node"
   local gate_index
   local gate_type
   local wire_a
@@ -1165,7 +1218,7 @@ scenario_alice_cheats() {
 
   local stage
   stage="$(stage_value)"
-  echo "final_stage=${stage} (8 means Closed)"
+  echo "final_stage=${stage} (10 means Closed)"
   echo "winner=Bob"
   echo "outcome=Alice slashed, Bob won dispute"
   local expected_alice
@@ -1188,30 +1241,40 @@ scenario_bob_cheats() {
   echo "liveness_hooks: dispute/labels/settle deadlines remain enforced; false challenge is economically penalized"
   common_bootstrap "${m_choice}"
 
-  phase "Phase 3: Alice submits honest commitments"
-  run_alice submit-commitments \
+  phase "Phase 3: Alice submits honest core commitments"
+  run_alice submit-core-commitments \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
-    --verifier-seed "${VERIFIER_SEED_HEX}" \
     --export-dir "${out_dir}"
   wait_phase
 
-  phase "Phase 4: Bob chooses m"
+  phase "Phase 4: Bob reveals verifier seed + salt"
+  reveal_bob_verifier_seed
+  wait_phase
+
+  phase "Phase 5: Alice submits OT roots"
+  run_alice submit-ot-roots \
+    --bit-width "${BIT_WIDTH}" \
+    --circuit-id "${CIRCUIT_ID}" \
+    --verifier-seed "${VERIFIER_SEED_HEX}"
+  wait_phase
+
+  phase "Phase 6: Bob chooses m"
   run_bob choose --m "${m_choice}"
   echo "  choose_m: m=${m_choice}, opened_expected=$((CUT_AND_CHOOSE_N - 1)) [OK]"
   wait_phase
 
-  phase "Phase 5: Alice reveals openings"
+  phase "Phase 7: Alice reveals openings"
   run_alice reveal-openings \
     --m "${m_choice}" \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 6 (off-chain): Bob replays opened OT root from revealed seeds"
+  show_ot_visibility "${challenge_instance}" "${out_dir}" "Phase 8 (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
-  phase "Phase 7: Bob submits false GC challenge"
+  phase "Phase 9: Bob submits false GC challenge"
   local seed_file="${out_dir}/instance-${challenge_instance}-seed.txt"
   local leaves_file="${out_dir}/instance-${challenge_instance}-leaves.txt"
   local root_file="${out_dir}/instance-${challenge_instance}-root-gc.txt"
@@ -1296,7 +1359,7 @@ scenario_bob_cheats() {
 
   local stage
   stage="$(stage_value)"
-  echo "final_stage=${stage} (8 means Closed)"
+  echo "final_stage=${stage} (10 means Closed)"
   echo "winner=Alice"
   echo "outcome=Bob false-challenged, Alice received collateral"
   local expected_alice
