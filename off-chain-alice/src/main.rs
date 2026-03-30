@@ -3,7 +3,7 @@ use off_chain_common::cli::{
     parse_u64, print_tx_summary, required_env, required_env_any, required_flag_value, rpc_url,
     run_cast,
 };
-use off_chain_common::consensus::{derive_wire_label, keccak256};
+use off_chain_common::consensus::{derive_wire_label, keccak256, uint256_from_u64};
 use off_chain_common::eip4844::eval_payload_versioned_blob_hash;
 use off_chain_common::eval_blob::CanonicalEvalBlobPayload;
 use off_chain_common::evaluation::{
@@ -16,6 +16,7 @@ use off_chain_common::ot::{recompute_ot_payload_hashes, recompute_ot_root};
 use off_chain_common::scenario::{
     CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed,
 };
+use off_chain_common::settlement::{default_circuit_id, output_anchor_hash};
 use off_chain_common::types::CircuitLayout;
 use std::env;
 use std::error::Error;
@@ -29,6 +30,7 @@ struct SessionConfig {
     bit_width: usize,
     circuit_id: [u8; 32],
     master_seed: [u8; 32],
+    winner_formula: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -110,11 +112,23 @@ fn parse_session_config(args: &[String]) -> AppResult<SessionConfig> {
         .map(|v| parse_u64(v, "bit-width"))
         .transpose()?
         .unwrap_or(8) as usize;
+    let winner_formula = if let Some(raw) = parse_flag_value(args, "--winner-formula") {
+        parse_u64(&raw, "winner-formula")?
+    } else if let Ok(raw) = env::var("WINNER_FORMULA") {
+        parse_u64(&raw, "WINNER_FORMULA")?
+    } else {
+        0
+    };
+    if winner_formula > 1 {
+        return Err("winner-formula must be 0 (HigherBidWins) or 1 (LowerBidWins)".into());
+    }
+    let winner_formula = winner_formula as u8;
+
     let circuit_id = parse_flag_value(args, "--circuit-id")
         .as_deref()
         .map(parse_bytes32)
         .transpose()?
-        .unwrap_or_else(|| keccak256(&[b"millionaires-yao-v1"]));
+        .unwrap_or_else(|| default_circuit_id(bit_width, winner_formula));
     let master_seed = parse_flag_value(args, "--master-seed")
         .as_deref()
         .map(parse_bytes32)
@@ -125,6 +139,7 @@ fn parse_session_config(args: &[String]) -> AppResult<SessionConfig> {
         bit_width,
         circuit_id,
         master_seed,
+        winner_formula,
     })
 }
 
@@ -201,6 +216,61 @@ fn derive_ot_root_lists(
             })
         })
         .collect()
+}
+
+fn derive_root_xg(circuit_id: [u8; 32], instance_id: u64, seed: [u8; 32]) -> [u8; 32] {
+    let instance = uint256_from_u64(instance_id);
+    let mut out = keccak256(&[b"XG", &circuit_id, &instance, &seed]);
+    if out == [0u8; 32] {
+        out[31] = 1;
+    }
+    out
+}
+
+fn derive_root_xg_lists(
+    config: &SessionConfig,
+    instances: &[InstanceArtifacts],
+) -> Vec<[u8; 32]> {
+    instances
+        .iter()
+        .map(|inst| derive_root_xg(config.circuit_id, inst.instance_id as u64, inst.seed))
+        .collect()
+}
+
+fn build_commitment_tuple_items(
+    instances: &[InstanceArtifacts],
+    root_gcs: &[[u8; 32]],
+    blob_hashes: &[[u8; 32]],
+    root_xgs: &[[u8; 32]],
+    h0: &[[u8; 32]],
+    h1: &[[u8; 32]],
+) -> Vec<String> {
+    instances
+        .iter()
+        .map(|inst| {
+            format!(
+                "({},{},{},{},{},{})",
+                hex32(inst.com_seed),
+                hex32(root_gcs[inst.instance_id]),
+                hex32(blob_hashes[inst.instance_id]),
+                hex32(root_xgs[inst.instance_id]),
+                hex32(h0[inst.instance_id]),
+                hex32(h1[inst.instance_id])
+            )
+        })
+        .collect::<Vec<_>>()
+}
+
+fn build_commitments_arg(
+    instances: &[InstanceArtifacts],
+    root_gcs: &[[u8; 32]],
+    blob_hashes: &[[u8; 32]],
+    root_xgs: &[[u8; 32]],
+    h0: &[[u8; 32]],
+    h1: &[[u8; 32]],
+) -> String {
+    let tuple_items = build_commitment_tuple_items(instances, root_gcs, blob_hashes, root_xgs, h0, h1);
+    format!("[{}]", tuple_items.join(","))
 }
 
 fn opened_indices_and_seeds(
@@ -344,9 +414,14 @@ fn ensure_value_fits_bits(value: u64, bit_width: usize, name: &str) -> AppResult
     Ok(())
 }
 
-fn hash_output_label(label16: [u8; 16]) -> [u8; 32] {
+fn compute_output_anchor(
+    config: &SessionConfig,
+    instance_id: u64,
+    winner_bit: bool,
+    label16: [u8; 16],
+) -> [u8; 32] {
     let as_bytes32 = label16_to_bytes32(label16);
-    keccak256(&[&as_bytes32])
+    output_anchor_hash(config.circuit_id, instance_id, winner_bit, as_bytes32)
 }
 
 fn derive_anchor_lists(config: &SessionConfig) -> AppResult<(Vec<[u8; 32]>, Vec<[u8; 32]>)> {
@@ -358,11 +433,15 @@ fn derive_anchor_lists(config: &SessionConfig) -> AppResult<(Vec<[u8; 32]>, Vec<
     let mut h1 = Vec::with_capacity(CUT_AND_CHOOSE_N);
     for instance_id in 0..CUT_AND_CHOOSE_N {
         let seed = derive_instance_seed(config.master_seed, config.circuit_id, instance_id as u64);
-        // Contract `result=true` on h0 match. Map h0 to semantic true (x > y = 1) for readability.
-        let l_true = derive_wire_label(config.circuit_id, instance_id as u64, out_wire, 1, seed);
-        let l_false = derive_wire_label(config.circuit_id, instance_id as u64, out_wire, 0, seed);
-        h0.push(hash_output_label(l_true));
-        h1.push(hash_output_label(l_false));
+        let label_true = derive_wire_label(config.circuit_id, instance_id as u64, out_wire, 1, seed);
+        let label_false = derive_wire_label(config.circuit_id, instance_id as u64, out_wire, 0, seed);
+        h0.push(compute_output_anchor(config, instance_id as u64, true, label_true));
+        h1.push(compute_output_anchor(
+            config,
+            instance_id as u64,
+            false,
+            label_false,
+        ));
     }
     Ok((h0, h1))
 }
@@ -382,12 +461,12 @@ fn build_eval_blob_payload_for_instance(
         gates,
     };
 
-    let (l0, l1) = derive_output_labels(seed, &layout, output_wire)
+    let (label_false, label_true) = derive_output_labels(seed, &layout, output_wire)
         .map_err(|e| format!("failed to derive output labels: {e}"))?;
-    let l_true_32 = label16_to_bytes32(l1);
-    let l_false_32 = label16_to_bytes32(l0);
-    let h0 = keccak256(&[&l_true_32]);
-    let h1 = keccak256(&[&l_false_32]);
+    let l_true_32 = label16_to_bytes32(label_true);
+    let l_false_32 = label16_to_bytes32(label_false);
+    let h0 = compute_output_anchor(config, instance_id as u64, true, label_true);
+    let h1 = compute_output_anchor(config, instance_id as u64, false, label_false);
 
     let y_offers = derive_bob_label_offers(
         seed,
@@ -480,6 +559,7 @@ fn cmd_derive_anchors(args: &[String]) -> AppResult<()> {
 
     println!("bit_width={}", config.bit_width);
     println!("circuit_id={}", hex32(config.circuit_id));
+    println!("winner_formula={}", config.winner_formula);
     println!("h0_list={}", bytes32_vec_literal(&h0));
     println!("h1_list={}", bytes32_vec_literal(&h1));
     Ok(())
@@ -617,6 +697,7 @@ fn cmd_prepare_eval(args: &[String]) -> AppResult<()> {
     println!("instance_id={m}");
     println!("x_value={x_value}");
     println!("output_wire={out_wire}");
+    println!("winner_formula={}", config.winner_formula);
     println!("h0={}", hex32(h0));
     println!("h1={}", hex32(h1));
     println!("lout_true={}", hex32(l_true_32));
@@ -781,6 +862,7 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
             "Provide --verifier-seed or --root-ots so Alice can commit rootOT values".into(),
         );
     };
+    let root_xgs = derive_root_xg_lists(&config, &instances);
 
     let h0 = if let Some(raw) = parse_flag_value(args, "--h0") {
         let parsed = parse_bytes32_list_csv(&raw)?;
@@ -820,21 +902,8 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
             .clone()
     };
 
-    let core_tuple_items = instances
-        .iter()
-        .map(|inst| {
-            format!(
-                "({},{},{},{},{},{})",
-                hex32(inst.com_seed),
-                hex32(root_gcs[inst.instance_id]),
-                hex32(blob_hashes[inst.instance_id]),
-                hex32(zero),
-                hex32(h0[inst.instance_id]),
-                hex32(h1[inst.instance_id])
-            )
-        })
-        .collect::<Vec<_>>();
-    let core_commitments_arg = format!("[{}]", core_tuple_items.join(","));
+    let core_commitments_arg =
+        build_commitments_arg(&instances, &root_gcs, &blob_hashes, &root_xgs, &h0, &h1);
 
     println!("circuit_id={}", hex32(config.circuit_id));
     println!("master_seed={}", hex32(config.master_seed));
@@ -934,6 +1003,7 @@ fn cmd_submit_core_commitments(args: &[String]) -> AppResult<()> {
     };
 
     let root_ots = vec![zero; CUT_AND_CHOOSE_N];
+    let root_xgs = derive_root_xg_lists(&config, &instances);
 
     let h0 = if let Some(raw) = parse_flag_value(args, "--h0") {
         let parsed = parse_bytes32_list_csv(&raw)?;
@@ -973,21 +1043,8 @@ fn cmd_submit_core_commitments(args: &[String]) -> AppResult<()> {
             .clone()
     };
 
-    let tuple_items = instances
-        .iter()
-        .map(|inst| {
-            format!(
-                "({},{},{},{},{},{})",
-                hex32(inst.com_seed),
-                hex32(root_gcs[inst.instance_id]),
-                hex32(blob_hashes[inst.instance_id]),
-                hex32(zero),
-                hex32(h0[inst.instance_id]),
-                hex32(h1[inst.instance_id])
-            )
-        })
-        .collect::<Vec<_>>();
-    let commitments_arg = format!("[{}]", tuple_items.join(","));
+    let commitments_arg =
+        build_commitments_arg(&instances, &root_gcs, &blob_hashes, &root_xgs, &h0, &h1);
 
     println!("circuit_id={}", hex32(config.circuit_id));
     println!("master_seed={}", hex32(config.master_seed));
@@ -1158,13 +1215,13 @@ fn print_help() {
     println!("off-chain-alice commands:");
     println!("  deposit");
     println!(
-        "  derive-anchors [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]"
+        "  derive-anchors [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>]"
     );
     println!(
-        "  submit-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
+        "  submit-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
     );
     println!(
-        "  submit-core-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
+        "  submit-core-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
     );
     println!(
         "  submit-ot-roots [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>]"
@@ -1173,7 +1230,7 @@ fn print_help() {
         "  export-artifacts --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32>]"
     );
     println!(
-        "  prepare-eval --m <index> --x <u64> --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32>]"
+        "  prepare-eval --m <index> --x <u64> --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--verifier-seed <0x..32>]"
     );
     println!(
         "  reveal-openings --m <index> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>]"
@@ -1218,6 +1275,7 @@ mod tests {
             bit_width: 4,
             circuit_id: keccak256(&[b"millionaires-yao-v1"]),
             master_seed: keccak256(&[b"master-seed-v1"]),
+            winner_formula: 0,
         }
     }
 
@@ -1312,5 +1370,45 @@ mod tests {
         assert_eq!(payloads.lines().count(), config.bit_width * 3);
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn derives_non_zero_root_xg_per_instance() {
+        let config = test_config();
+        let instances = build_instances(&config);
+
+        let roots_a = derive_root_xg_lists(&config, &instances);
+        let roots_b = derive_root_xg_lists(&config, &instances);
+
+        assert_eq!(roots_a.len(), CUT_AND_CHOOSE_N);
+        assert_eq!(roots_a, roots_b);
+        assert!(roots_a.iter().all(|root| *root != [0u8; 32]));
+    }
+
+    #[test]
+    fn commitment_tuple_builder_uses_root_xg_slot() {
+        let config = test_config();
+        let instances = build_instances(&config);
+        let root_gcs = instances.iter().map(|inst| inst.root_gc).collect::<Vec<_>>();
+        let blob_hashes = vec![[0x11u8; 32]; CUT_AND_CHOOSE_N];
+        let root_xgs = derive_root_xg_lists(&config, &instances);
+        let h0 = vec![[0x22u8; 32]; CUT_AND_CHOOSE_N];
+        let h1 = vec![[0x33u8; 32]; CUT_AND_CHOOSE_N];
+
+        let commitments_arg =
+            build_commitments_arg(&instances, &root_gcs, &blob_hashes, &root_xgs, &h0, &h1);
+
+        for inst in &instances {
+            let expected_tuple = format!(
+                "({},{},{},{},{},{})",
+                hex32(inst.com_seed),
+                hex32(root_gcs[inst.instance_id]),
+                hex32(blob_hashes[inst.instance_id]),
+                hex32(root_xgs[inst.instance_id]),
+                hex32(h0[inst.instance_id]),
+                hex32(h1[inst.instance_id])
+            );
+            assert!(commitments_arg.contains(&expected_tuple));
+        }
     }
 }

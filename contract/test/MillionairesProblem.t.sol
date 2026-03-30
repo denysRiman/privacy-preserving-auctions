@@ -66,20 +66,49 @@ contract MillionairesTest is Test {
         bool expectMatch;
     }
 
-    function setUp() public {
-        bytes32 layoutLeaf = keccak256(abi.encodePacked(
-            uint256(0), // gateIndex
-            uint8(0),    // GateType.AND
-            uint16(1),   // wireA
-            uint16(2),   // wireB
-            uint16(3)    // wireC
-        ));
+    function _supportedCircuitId(uint8 variant) internal pure returns (bytes32) {
+        if (variant == 0) {
+            return hex"4b38f6018cce9cce241946cda9af3509db31d6ef0f4b17e25e4f589faa71da7e";
+        }
+        if (variant == 1) {
+            return hex"50c5a6de5fef89c8d930a3e3bf04578efff567e5c713693ba584c1c47d27eb9a";
+        }
+        return bytes32(0);
+    }
 
+    function _canonicalLayoutRoot(uint8 variant) internal pure returns (bytes32) {
+        if (variant == 0) {
+            return hex"d15d9ca7dfc1e2a4c47eb4812eb9d08761688c436aad557449954b91df138521";
+        }
+        if (variant == 1) {
+            return hex"35507759e0f8a618b62ca6fd10193e20c63ba04b5e3f520eff66af46b12c301d";
+        }
+        return bytes32(0);
+    }
+
+    function setUp() public {
+        bytes32 circuitId_ = _supportedCircuitId(0);
         vm.prank(alice);
-        mp = new MillionairesProblemHarness(bob, keccak256("millionaires-yao-v1"), layoutLeaf, BIT_WIDTH);
+        mp = new MillionairesProblemHarness(
+            bob,
+            circuitId_,
+            _canonicalLayoutRoot(0),
+            BIT_WIDTH
+        );
 
         vm.deal(alice, 10 ether);
         vm.deal(bob, 10 ether);
+    }
+
+    function _deployHarnessWithCircuit(uint8 variant) internal {
+        bytes32 circuitId_ = _supportedCircuitId(variant);
+        vm.prank(alice);
+        mp = new MillionairesProblemHarness(
+            bob,
+            circuitId_,
+            _canonicalLayoutRoot(variant),
+            BIT_WIDTH
+        );
     }
 
     function _defaultAndGate() internal pure returns (MillionairesProblem.GateDesc memory) {
@@ -136,6 +165,14 @@ contract MillionairesTest is Test {
             if (rootGC == bytes32(0)) {
                 rootGC = keccak256(abi.encodePacked("default-root-gc", i));
             }
+            bytes32 blobHashGC = commits[i].blobHashGC;
+            if (blobHashGC == bytes32(0)) {
+                blobHashGC = keccak256(abi.encodePacked("default-blob-gc", i));
+            }
+            bytes32 rootXG = commits[i].rootXG;
+            if (rootXG == bytes32(0)) {
+                rootXG = keccak256(abi.encodePacked("default-root-xg", i));
+            }
             bytes32 h0 = commits[i].h0;
             if (h0 == bytes32(0)) {
                 h0 = keccak256(abi.encodePacked("default-h0", i));
@@ -150,8 +187,8 @@ contract MillionairesTest is Test {
             core[i] = MillionairesProblem.CoreInstanceCommitment({
                 comSeed: comSeed,
                 rootGC: rootGC,
-                blobHashGC: commits[i].blobHashGC,
-                rootXG: commits[i].rootXG,
+                blobHashGC: blobHashGC,
+                rootXG: rootXG,
                 h0: h0,
                 h1: h1
             });
@@ -275,6 +312,82 @@ contract MillionairesTest is Test {
         mp.revealGarblerLabels(mockLabels);
     }
 
+    function _circuitBoundAnchor(
+        bytes32 circuitId_,
+        uint256 instanceId,
+        bool winnerBit,
+        bytes32 outputLabel
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                "OUT",
+                circuitId_,
+                instanceId,
+                winnerBit ? uint8(1) : uint8(0),
+                outputLabel
+            )
+        );
+    }
+
+    function test_Constructor_AllowsArbitraryCircuitIdAndLayoutRoot() public {
+        bytes32 arbitraryCircuitId = keccak256(abi.encodePacked("unsupported-circuit-id"));
+        bytes32 arbitraryLayoutRoot = keccak256(abi.encodePacked("arbitrary-layout-root"));
+
+        vm.prank(alice);
+        MillionairesProblemHarness deployed = new MillionairesProblemHarness(
+            bob,
+            arbitraryCircuitId,
+            arbitraryLayoutRoot,
+            BIT_WIDTH
+        );
+
+        assertEq(deployed.circuitId(), arbitraryCircuitId);
+        assertEq(deployed.circuitLayoutRoot(), arbitraryLayoutRoot);
+        assertEq(uint256(deployed.bitWidth()), BIT_WIDTH);
+    }
+
+    function test_Constructor_SucceedsWithCanonicalLayoutRoots_ForSupportedCircuitIds() public {
+        bytes32 rootVariant0 = hex"d15d9ca7dfc1e2a4c47eb4812eb9d08761688c436aad557449954b91df138521";
+        bytes32 rootVariant1 = hex"35507759e0f8a618b62ca6fd10193e20c63ba04b5e3f520eff66af46b12c301d";
+
+        vm.prank(alice);
+        MillionairesProblemHarness variant0 = new MillionairesProblemHarness(
+            bob,
+            _supportedCircuitId(0),
+            rootVariant0,
+            8
+        );
+        assertEq(uint256(variant0.bitWidth()), 8);
+        assertEq(variant0.circuitLayoutRoot(), rootVariant0);
+
+        vm.prank(alice);
+        MillionairesProblemHarness variant1 = new MillionairesProblemHarness(
+            bob,
+            _supportedCircuitId(1),
+            rootVariant1,
+            8
+        );
+        assertEq(uint256(variant1.bitWidth()), 8);
+        assertEq(variant1.circuitLayoutRoot(), rootVariant1);
+    }
+
+    function test_Constructor_AllowsMismatchedLayoutRootForKnownCircuitId() public {
+        vm.prank(alice);
+        MillionairesProblemHarness deployed = new MillionairesProblemHarness(
+            bob,
+            _supportedCircuitId(0),
+            hex"35507759e0f8a618b62ca6fd10193e20c63ba04b5e3f520eff66af46b12c301d", // formula=1 root
+            8
+        );
+
+        assertEq(deployed.circuitId(), _supportedCircuitId(0));
+        assertEq(
+            deployed.circuitLayoutRoot(),
+            hex"35507759e0f8a618b62ca6fd10193e20c63ba04b5e3f520eff66af46b12c301d"
+        );
+        assertEq(uint256(deployed.bitWidth()), 8);
+    }
+
     function test_SuccessfulDeposits() public {
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
@@ -372,6 +485,26 @@ contract MillionairesTest is Test {
 
         vm.prank(alice);
         vm.expectRevert("Empty rootGC");
+        mp.submitCommitments(core);
+    }
+
+    function test_SubmitCommitments_RevertsOnZeroBlobHashGC() public {
+        _toCommitmentsCoreStage();
+        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
+        core[0].blobHashGC = bytes32(0);
+
+        vm.prank(alice);
+        vm.expectRevert("Empty blobHashGC");
+        mp.submitCommitments(core);
+    }
+
+    function test_SubmitCommitments_RevertsOnZeroRootXG() public {
+        _toCommitmentsCoreStage();
+        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
+        core[0].rootXG = bytes32(0);
+
+        vm.prank(alice);
+        vm.expectRevert("Empty rootXG");
         mp.submitCommitments(core);
     }
 
@@ -1065,9 +1198,10 @@ contract MillionairesTest is Test {
 
     function test_FinalSettlement_AliceWins_RefundsBothDeposits() public {
         bytes32 aliceWinningLabel = keccak256(abi.encodePacked("alice_is_richer_label"));
+        bytes32 circuitId_ = mp.circuitId();
         _toSettleStage(
-            keccak256(abi.encodePacked(aliceWinningLabel)),
-            keccak256(abi.encodePacked("bob_wins_label"))
+            _circuitBoundAnchor(circuitId_, 0, true, aliceWinningLabel),
+            _circuitBoundAnchor(circuitId_, 0, false, keccak256(abi.encodePacked("bob_wins_label")))
         );
 
         uint256 aliceBalanceBefore = alice.balance;
@@ -1084,9 +1218,10 @@ contract MillionairesTest is Test {
 
     function test_FinalSettlement_BobWins_RefundsBothDeposits() public {
         bytes32 bobWinningLabel = keccak256(abi.encodePacked("bob_wins_label"));
+        bytes32 circuitId_ = mp.circuitId();
         _toSettleStage(
-            keccak256(abi.encodePacked("alice_wins_label")),
-            keccak256(abi.encodePacked(bobWinningLabel))
+            _circuitBoundAnchor(circuitId_, 0, true, keccak256(abi.encodePacked("alice_wins_label"))),
+            _circuitBoundAnchor(circuitId_, 0, false, bobWinningLabel)
         );
 
         uint256 aliceBalanceBefore = alice.balance;
@@ -1101,12 +1236,64 @@ contract MillionairesTest is Test {
         assertFalse(mp.result());
     }
 
+    function test_FinalSettlement_LowerCircuit_AliceWinsOnWinnerBitOne() public {
+        _deployHarnessWithCircuit(1);
+        vm.deal(alice, 10 ether);
+        vm.deal(bob, 10 ether);
+
+        bytes32 lowerBidAliceWinningLabel = keccak256(abi.encodePacked("lower-bid-wins-winner-bit-one"));
+        bytes32 circuitId_ = mp.circuitId();
+        _toSettleStage(
+            _circuitBoundAnchor(circuitId_, 0, true, lowerBidAliceWinningLabel),
+            _circuitBoundAnchor(circuitId_, 0, false, keccak256(abi.encodePacked("lower-bid-bob-wins")))
+        );
+
+        vm.prank(bob);
+        mp.settle(lowerBidAliceWinningLabel);
+
+        assertTrue(mp.result());
+    }
+
+    function test_FinalSettlement_CrossCircuitAnchors_RevertInvalidOutputLabel() public {
+        _deployHarnessWithCircuit(1);
+        vm.deal(alice, 10 ether);
+        vm.deal(bob, 10 ether);
+
+        bytes32 label = keccak256(abi.encodePacked("shared-output-label"));
+        _toSettleStage(
+            _circuitBoundAnchor(_supportedCircuitId(0), 0, true, label), // Anchors committed for circuit variant 0
+            _circuitBoundAnchor(_supportedCircuitId(0), 0, false, label)
+        );
+
+        vm.prank(bob);
+        vm.expectRevert("Invalid output label");
+        mp.settle(label); // Decoding runs with circuit variant 1 and must not match variant-0 anchors
+    }
+
+    function test_FinalSettlement_InstanceMismatchAnchors_RevertInvalidOutputLabel() public {
+        bytes32 label = keccak256(abi.encodePacked("instance-bound-output-label"));
+        bytes32 circuitId_ = mp.circuitId();
+        _toSettleStage(
+            _circuitBoundAnchor(circuitId_, 1, true, label), // Wrong instance; settle runs on m=0
+            _circuitBoundAnchor(circuitId_, 1, false, keccak256(abi.encodePacked("instance-bound-bob-wins")))
+        );
+
+        vm.prank(bob);
+        vm.expectRevert("Invalid output label");
+        mp.settle(label);
+    }
+
     function test_ChallengeGateLeaf_FalseChallenge_SlashesBob() public {
         bytes32 seed = keccak256("seed");
-        uint256 instanceId = 0;
-        uint256 gateIndex = 0;
-
-        MillionairesProblem.GateDesc memory g = _defaultAndGate();
+        RustGateChallengeVector memory v = _rustVectorDefaultAndGate();
+        uint256 instanceId = v.challengeInstanceId;
+        uint256 gateIndex = v.gateIndex;
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType(v.gateType),
+            wireA: v.wireA,
+            wireB: v.wireB,
+            wireC: v.wireC
+        });
 
         // leafBytes that contract itself would recompute
         bytes memory leaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
@@ -1116,7 +1303,7 @@ contract MillionairesTest is Test {
         bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, leaf), proof);
         _toDisputeWithRoot(seed, root, 9);
 
-        bytes32[] memory layoutProof = new bytes32[](0);
+        bytes32[] memory layoutProof = v.layoutProof;
 
         uint256 aliceBefore = alice.balance;
 
@@ -1130,10 +1317,15 @@ contract MillionairesTest is Test {
 
     function test_ChallengeGateLeaf_DetectCheat_SlashesAlice() public {
         bytes32 seed = keccak256("seed");
-        uint256 instanceId = 0;
-        uint256 gateIndex = 0;
-
-        MillionairesProblem.GateDesc memory g = _defaultAndGate();
+        RustGateChallengeVector memory v = _rustVectorDefaultAndGate();
+        uint256 instanceId = v.challengeInstanceId;
+        uint256 gateIndex = v.gateIndex;
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType(v.gateType),
+            wireA: v.wireA,
+            wireB: v.wireB,
+            wireC: v.wireC
+        });
 
         bytes memory expectedLeaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
         bytes memory fakeLeaf = _mutateFirstByte(expectedLeaf);
@@ -1142,7 +1334,7 @@ contract MillionairesTest is Test {
         bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, fakeLeaf), proof);
         _toDisputeWithRoot(seed, root, 9);
 
-        bytes32[] memory layoutProof = new bytes32[](0);
+        bytes32[] memory layoutProof = v.layoutProof;
         uint256 bobBefore = bob.balance;
 
         vm.prank(bob);
@@ -1154,28 +1346,41 @@ contract MillionairesTest is Test {
 
     function test_ChallengeGateLeaf_BadIHProof_Reverts() public {
         bytes32 seed = keccak256("seed");
-        MillionairesProblem.GateDesc memory g = _defaultAndGate();
+        RustGateChallengeVector memory v = _rustVectorDefaultAndGate();
+        uint256 instanceId = v.challengeInstanceId;
+        uint256 gateIndex = v.gateIndex;
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType(v.gateType),
+            wireA: v.wireA,
+            wireB: v.wireB,
+            wireC: v.wireC
+        });
 
-        bytes memory leaf = mp.computeLeaf(seed, 0, 0, g);
+        bytes memory leaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
 
         // Commit wrong root
         bytes32 wrongRoot = keccak256("wrong");
         _toDisputeWithRoot(seed, wrongRoot, 9);
 
         bytes32[] memory proof = new bytes32[](0);
-        bytes32[] memory layoutProof = new bytes32[](0);
+        bytes32[] memory layoutProof = v.layoutProof;
 
         vm.prank(bob);
         vm.expectRevert("Bad IH proof");
-        mp.challengeGateLeaf(0, 0, g, leaf, proof, layoutProof);
+        mp.challengeGateLeaf(instanceId, gateIndex, g, leaf, proof, layoutProof);
     }
 
     function test_ChallengeGateLeaf_BadLayoutProof_Reverts() public {
         bytes32 seed = keccak256("seed");
-        uint256 instanceId = 0;
-        uint256 gateIndex = 0;
-
-        MillionairesProblem.GateDesc memory g = _defaultAndGate();
+        RustGateChallengeVector memory v = _rustVectorDefaultAndGate();
+        uint256 instanceId = v.challengeInstanceId;
+        uint256 gateIndex = v.gateIndex;
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType(v.gateType),
+            wireA: v.wireA,
+            wireB: v.wireB,
+            wireC: v.wireC
+        });
         bytes memory leaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
 
         bytes32[] memory proof = new bytes32[](0);
@@ -1192,10 +1397,15 @@ contract MillionairesTest is Test {
 
     function test_DisputeGarbledTable_DelegatesToChallenge_SlashesBobOnMatch() public {
         bytes32 seed = keccak256("seed");
-        uint256 instanceId = 0;
-        uint256 gateIndex = 0;
-
-        MillionairesProblem.GateDesc memory g = _defaultAndGate();
+        RustGateChallengeVector memory v = _rustVectorDefaultAndGate();
+        uint256 instanceId = v.challengeInstanceId;
+        uint256 gateIndex = v.gateIndex;
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType(v.gateType),
+            wireA: v.wireA,
+            wireB: v.wireB,
+            wireC: v.wireC
+        });
 
         bytes32[] memory proof = new bytes32[](0);
         // Correct committed leaf.
@@ -1203,7 +1413,7 @@ contract MillionairesTest is Test {
         bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, leaf), proof);
         _toDisputeWithRoot(seed, root, 9);
 
-        bytes32[] memory layoutProof = new bytes32[](0);
+        bytes32[] memory layoutProof = v.layoutProof;
 
         uint256 aliceBefore = alice.balance;
 
@@ -1217,10 +1427,15 @@ contract MillionairesTest is Test {
 
     function test_DisputeGarbledTable_DelegatesToChallenge_SlashesAliceOnMismatch() public {
         bytes32 seed = keccak256("seed");
-        uint256 instanceId = 0;
-        uint256 gateIndex = 0;
-
-        MillionairesProblem.GateDesc memory g = _defaultAndGate();
+        RustGateChallengeVector memory v = _rustVectorDefaultAndGate();
+        uint256 instanceId = v.challengeInstanceId;
+        uint256 gateIndex = v.gateIndex;
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType(v.gateType),
+            wireA: v.wireA,
+            wireB: v.wireB,
+            wireC: v.wireC
+        });
 
         bytes memory expectedLeaf = mp.computeLeaf(seed, instanceId, gateIndex, g);
         bytes memory fakeLeaf = _mutateFirstByte(expectedLeaf);
@@ -1229,7 +1444,7 @@ contract MillionairesTest is Test {
         bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, fakeLeaf), proof);
         _toDisputeWithRoot(seed, root, 9);
 
-        bytes32[] memory layoutProof = new bytes32[](0);
+        bytes32[] memory layoutProof = v.layoutProof;
         uint256 bobBefore = bob.balance;
 
         vm.prank(bob);
@@ -1272,6 +1487,29 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         vm.expectRevert("Index out of bounds");
         mp.disputeGarbledTable(10, seed, 0, g, leaf, proof, layoutProof);
+    }
+
+    function test_DisputeGarbledTable_NotOpenedInstance_Reverts() public {
+        bytes32 seed = keccak256("seed");
+        RustGateChallengeVector memory v = _rustVectorDefaultAndGate();
+        uint256 gateIndex = v.gateIndex;
+        MillionairesProblem.GateDesc memory g = MillionairesProblem.GateDesc({
+            gateType: MillionairesProblem.GateType(v.gateType),
+            wireA: v.wireA,
+            wireB: v.wireB,
+            wireC: v.wireC
+        });
+
+        bytes32[] memory proof = new bytes32[](0);
+        bytes memory leaf = mp.computeLeaf(seed, 9, gateIndex, g);
+        bytes32 root = _processIncrementalProof(_gateLeafHash(gateIndex, leaf), proof);
+        _toDisputeWithRoot(seed, root, 9); // instance 9 is m, hence not opened
+
+        bytes32[] memory layoutProof = v.layoutProof;
+
+        vm.prank(bob);
+        vm.expectRevert("Not an opened instance");
+        mp.disputeGarbledTable(9, bytes32(0), gateIndex, g, leaf, proof, layoutProof);
     }
 
     function test_CloseDispute_NoOtPayloadRequirement() public {
@@ -1606,8 +1844,8 @@ contract MillionairesTest is Test {
 
     // Edit this single function to paste values from `cargo run` output.
     function _rustVectorDefaultAndGate() internal pure returns (RustGateChallengeVector memory v) {
-        v.circuitId = hex"7d054ebfd92394e7d8b68c457a833f9083147ac4e616619c23cfa544159e8797";
-        v.circuitLayoutRoot = hex"07f4a5ca9dea030d4dc113f2d52a09349808e157fc5095d654c1485f6db3f287";
+        v.circuitId = _supportedCircuitId(0);
+        v.circuitLayoutRoot = hex"d15d9ca7dfc1e2a4c47eb4812eb9d08761688c436aad557449954b91df138521";
 
         v.mChoice = 7;
         v.challengeInstanceId = 0;
@@ -1618,7 +1856,7 @@ contract MillionairesTest is Test {
         v.wireC = 19;
         v.expectMatch = true;
 
-        v.leafBytes = hex"00000700120013f3a970a4aca4195bb91139a403b12529c1b78544587cc4113ae7dfc3dd3e453ed253d5732b25084f641096d26c1e5786a67b4b471675e32cf1368473435a49cf";
+        v.leafBytes = hex"000007001200131d1a343a2b5b83197ecb03153560fd19f4f3b976981661f94e097180d55dd6412753449f071e423ba90fa9370e2cfc6bcb7b3a185c18da218a640d239cdd0380";
 
         v.comSeeds = new bytes32[](10);
         v.comSeeds[0] = hex"50f3ed16d8a54ce7e35d99ef80346a5c441c2fb1a34de9fab199922070c890c6";
@@ -1676,12 +1914,12 @@ contract MillionairesTest is Test {
         v.ihProof[6] = hex"5c22aa67adf3cb1afa395aff96bc41c1e27abd5c90a6b0f0ea61977d18c07c7c";
 
         v.layoutProof = new bytes32[](7);
-        v.layoutProof[0] = hex"4af035fa923878895db2ebdbd69dd9f28a7d3ca9704fa907614b8a301fdf8cc7";
-        v.layoutProof[1] = hex"4f16c787aaf3c34a7cbeb88ac350364e9ec2dc0e054e5e232b4cf4b5532e1d14";
-        v.layoutProof[2] = hex"4c3b91469df873c68aae516efc5f63ee6f23e2918db51b6ef827282c9f1968c7";
-        v.layoutProof[3] = hex"6f891ed83a0b3acfee1c480badf60888ec11592d1e25594e827afdfa9aec680a";
-        v.layoutProof[4] = hex"9d9629b078c14342b0b812fd5d771f5a2ecdab4a57cb1c96bdd6e860f5ab519e";
-        v.layoutProof[5] = hex"5261f5438a3ddcf9c14b99c31a927770f9a5c413d53b681a8090cfc30f8d3d39";
-        v.layoutProof[6] = hex"4b77870e636e81f46166bf774e81ebfb3c0551c0abf50673e609c789fa0aa901";
+        v.layoutProof[0] = hex"777d6c12d3c250d868b0e4181c8ed581875e79649b051e958df6bd510360921d";
+        v.layoutProof[1] = hex"ce0b488465342067190f5612c5fabd5943df01a0f6bfa3b0b20048b02e6149d5";
+        v.layoutProof[2] = hex"b7bc4e1d4ab6d317e3e879ebb52fa7fab2b9c47442f28538214dbcf3f2dced3c";
+        v.layoutProof[3] = hex"c2a43fa48469735a6eb4270f570cd839e92a7b48590842fd90c14c8b7203adef";
+        v.layoutProof[4] = hex"a260422b0d1747e2e5f05ffa9137638828a94d5657d5bf32edfd4920b431a702";
+        v.layoutProof[5] = hex"ad7fe54a89d8432f399df6095828722871f3ef39531b91ab1eb93130b8342436";
+        v.layoutProof[6] = hex"3db1f86570b388480271c6b1dae614e90d0960a688fa76cffb922f9979a11cd1";
     }
 }

@@ -135,11 +135,12 @@ pub fn encode_leaf(gate: GateDesc, rows: [[u8; 16]; 4]) -> [u8; LEAF_BYTES_LEN] 
 }
 
 /// Mirrors Solidity `_layoutLeafHash`:
-/// `keccak256(gateIndex, gateType, wireA, wireB, wireC)`.
-pub fn layout_leaf_hash(gate_index: u64, gate: GateDesc) -> [u8; 32] {
+/// `keccak256(circuitId, gateIndex, gateType, wireA, wireB, wireC)`.
+pub fn layout_leaf_hash(circuit_id: [u8; 32], gate_index: u64, gate: GateDesc) -> [u8; 32] {
     let gate_idx = uint256_from_u64(gate_index);
     let t = [gate.gate_type as u8];
     keccak256(&[
+        &circuit_id,
         &gate_idx,
         &t,
         &gate.wire_a.to_be_bytes(),

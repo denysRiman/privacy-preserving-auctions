@@ -25,6 +25,7 @@ STRICT_BALANCE_CHECK="${STRICT_BALANCE_CHECK:-1}"
 EVAL_BLOB_FEE_TOLERANCE_WEI="${EVAL_BLOB_FEE_TOLERANCE_WEI:-10000000000000000}" # 0.01 ETH
 VERIFIER_SEED_OVERRIDE="${VERIFIER_SEED_OVERRIDE:-${VERIFIER_SEED:-}}"
 VERIFIER_SALT_OVERRIDE="${VERIFIER_SALT_OVERRIDE:-${VERIFIER_SALT:-}}"
+WINNER_FORMULA="${WINNER_FORMULA:-0}" # 0: HigherBidWins (x>y), 1: LowerBidWins (x<=y)
 
 CUT_AND_CHOOSE_N=10
 
@@ -88,6 +89,10 @@ EOF
 
   ALICE_ADDR="$(cast wallet address --private-key "${ALICE_PK}")"
   BOB_ADDR="$(cast wallet address --private-key "${BOB_PK}")"
+  if [[ "${WINNER_FORMULA}" != "0" && "${WINNER_FORMULA}" != "1" ]]; then
+    echo "WINNER_FORMULA must be 0 (HigherBidWins) or 1 (LowerBidWins)." >&2
+    exit 1
+  fi
   init_tx_flags
 }
 
@@ -120,6 +125,7 @@ compute_circuit_meta() {
   probe_out="$(
     cd "${OFFCHAIN_COMMON_DIR}" && cargo run --offline --quiet -- \
       --bits "${BIT_WIDTH}" \
+      --winner-formula "${WINNER_FORMULA}" \
       --m "${m_for_probe}" \
       --gate-index 0 \
       --challenge-instance "${challenge_for_probe}"
@@ -179,7 +185,7 @@ deploy_contract() {
     exit 1
   fi
 
-  echo "deploy: contract=${CONTRACT_ADDRESS}, circuit=$(short_hash32 "${CIRCUIT_ID}"), layout=$(short_hash32 "${LAYOUT_ROOT}") [OK]"
+  echo "deploy: contract=${CONTRACT_ADDRESS}, circuit=$(short_hash32 "${CIRCUIT_ID}"), layout=$(short_hash32 "${LAYOUT_ROOT}"), winner_formula=${WINNER_FORMULA} [OK]"
 }
 
 run_alice_raw() {
@@ -188,6 +194,7 @@ run_alice_raw() {
     RPC_URL="${RPC_URL}" \
     CONTRACT_ADDRESS="${CONTRACT_ADDRESS}" \
     ALICE_PRIVATE_KEY="${ALICE_PK}" \
+    WINNER_FORMULA="${WINNER_FORMULA}" \
     DEPOSIT_WEI="${DEPOSIT_WEI}" \
     TX_LEGACY="${TX_LEGACY}" \
     TX_GAS_PRICE_WEI="${TX_GAS_PRICE_WEI}" \
@@ -201,6 +208,7 @@ run_bob_raw() {
     RPC_URL="${RPC_URL}" \
     CONTRACT_ADDRESS="${CONTRACT_ADDRESS}" \
     BOB_PRIVATE_KEY="${BOB_PK}" \
+    WINNER_FORMULA="${WINNER_FORMULA}" \
     DEPOSIT_WEI="${DEPOSIT_WEI}" \
     TX_LEGACY="${TX_LEGACY}" \
     TX_GAS_PRICE_WEI="${TX_GAS_PRICE_WEI}" \
@@ -255,6 +263,51 @@ short_hash32() {
   else
     echo "${value}"
   fi
+}
+
+formula_anchor_hash() {
+  local winner_bit="$1"
+  local output_label="$2"
+  local instance_id="$3"
+  local label_hex="${output_label#0x}"
+  local circuit_hex="${CIRCUIT_ID#0x}"
+  local instance_hex
+  local formula_hex
+  local bit_hex
+
+  if [[ ! "${WINNER_FORMULA}" =~ ^[0-9]+$ ]]; then
+    echo ""
+    return
+  fi
+  if [[ "${WINNER_FORMULA}" -lt 0 || "${WINNER_FORMULA}" -gt 255 ]]; then
+    echo ""
+    return
+  fi
+  if [[ ! "${winner_bit}" =~ ^[0-9]+$ ]]; then
+    echo ""
+    return
+  fi
+  if [[ "${winner_bit}" -lt 0 || "${winner_bit}" -gt 255 ]]; then
+    echo ""
+    return
+  fi
+  if [[ ! "${label_hex}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo ""
+    return
+  fi
+  if [[ ! "${instance_id}" =~ ^[0-9]+$ ]]; then
+    echo ""
+    return
+  fi
+  if [[ ! "${circuit_hex}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo ""
+    return
+  fi
+
+  formula_hex="$(printf '%02x' "${WINNER_FORMULA}")"
+  bit_hex="$(printf '%02x' "${winner_bit}")"
+  instance_hex="$(printf '%064x' "${instance_id}")"
+  cast keccak "0x4f5554${circuit_hex}${instance_hex}${formula_hex}${bit_hex}${label_hex}" | tr -d '[:space:]'
 }
 
 file_size_bytes() {
@@ -795,7 +848,7 @@ scenario_success() {
 
   printf "\n\033[1;32m================ CASE 1: SUCCESS FLOW ================\033[0m\n"
   echo "security_goal: honest run with verifier-seed commit-reveal binding; disputes cover (a) GC leaf correctness for opened instances and (b) opened-instance OT root correctness; settlement must agree"
-  echo "artifact_defs: comSeed=keccak(seed), rootGC=terminal incremental-hash root over gate leaves where leafHash=keccak(gateIndex || leafBytes(GateDesc,4-rows)), circuitLayoutRoot=commitment to (gateIndex,GateDesc) used by layout proofs, verifierSeedCommitment=keccak(seed||salt), rootOT=Alice commits after Bob seed reveal and Bob can dispute on-chain, h0/h1=keccak(output_label)"
+  echo "artifact_defs: comSeed=keccak(seed), rootGC=terminal incremental-hash root over gate leaves where leafHash=keccak(gateIndex || leafBytes(GateDesc,4-rows)), circuitLayoutRoot=commitment to (gateIndex,GateDesc) used by layout proofs, verifierSeedCommitment=keccak(seed||salt), rootOT=Alice commits after Bob seed reveal and Bob can dispute on-chain, h0/h1=keccak(OUT,circuitId,m,winnerFormula,winnerBit,output_label)"
   echo "label_encoding: output_label is 16-byte GC label zero-padded to bytes32 before on-chain hash check"
   echo "liveness_hooks: deposit -> verifierSeed(commit) -> coreCommit -> verifierSeed(reveal) -> otRoots -> choose -> open -> dispute -> labels -> settle"
   common_bootstrap "${m_choice}"
@@ -937,7 +990,7 @@ scenario_success() {
   decoded_bit="$(extract_kv_from_text decoded_bit "${eval_raw}")"
   local decoded_anchor
   local output_anchor_match
-  local output_label_hash
+  local output_anchor_hash
   assert_non_empty "output_label" "${output_label}"
   if [[ "${decoded_bit}" == "1" ]]; then
     decoded_anchor="h0"
@@ -947,11 +1000,14 @@ scenario_success() {
     decoded_anchor="unknown"
   fi
 
-  output_label_hash="$(cast keccak "${output_label}" | tr -d '[:space:]')"
+  output_anchor_hash=""
+  if [[ "${decoded_bit}" == "1" || "${decoded_bit}" == "0" ]]; then
+    output_anchor_hash="$(formula_anchor_hash "${decoded_bit}" "${output_label}" "${m_choice}")"
+  fi
   output_anchor_match="unknown"
-  if [[ -n "${settle_h0}" && "${output_label_hash}" == "${settle_h0}" ]]; then
+  if [[ -n "${settle_h0}" && "${output_anchor_hash}" == "${settle_h0}" ]]; then
     output_anchor_match="h0"
-  elif [[ -n "${settle_h1}" && "${output_label_hash}" == "${settle_h1}" ]]; then
+  elif [[ -n "${settle_h1}" && "${output_anchor_hash}" == "${settle_h1}" ]]; then
     output_anchor_match="h1"
   fi
 
@@ -995,12 +1051,18 @@ scenario_success() {
   result="$(cast call "${CONTRACT_ADDRESS}" "result()(bool)" --rpc-url "${RPC_URL}")"
   if (( alice_x_value > bob_y_value )); then
     x_gt_y="true"
-    expected_bit=1
+  else
+    x_gt_y="false"
+  fi
+  if [[ "${WINNER_FORMULA}" == "0" ]]; then
+    expected_bit=$([[ "${x_gt_y}" == "true" ]] && echo "1" || echo "0")
+  else
+    expected_bit=$([[ "${x_gt_y}" == "true" ]] && echo "0" || echo "1")
+  fi
+  if [[ "${expected_bit}" == "1" ]]; then
     expected_result="true"
     expected_winner="Alice"
   else
-    x_gt_y="false"
-    expected_bit=0
     expected_result="false"
     expected_winner="Bob"
   fi
@@ -1009,7 +1071,7 @@ scenario_success() {
   winner_by_gc="$(winner_from_bit "${decoded_bit}")"
   winner_by_contract="$(winner_from_contract_result "${result}")"
   output_label_short="$(short_hash32 "${output_label}")"
-  output_label_hash_short="$(short_hash32 "${output_label_hash}")"
+  output_label_hash_short="$(short_hash32 "${output_anchor_hash}")"
   settle_h0_short="$(short_hash32 "${settle_h0}")"
   settle_h1_short="$(short_hash32 "${settle_h1}")"
   result_token="$(first_token "${result}")"
@@ -1067,9 +1129,9 @@ scenario_success() {
   fi
 
   echo "eval_link: Bob uses Alice x-labels plus y-label offers in eval blob (PoC OT model) to evaluate GC(m) and derive output_label"
-  echo "comparison: Alice x=${alice_x_value}, Bob y=${bob_y_value} -> x>y=${x_gt_y} -> expected_bit=${expected_bit} (expected winner: ${expected_winner})"
+  echo "comparison: Alice x=${alice_x_value}, Bob y=${bob_y_value} -> x>y=${x_gt_y} -> expected_bit=${expected_bit}, winner_formula=${WINNER_FORMULA} (expected winner: ${expected_winner})"
   echo "bob_eval: decoded_bit=${decoded_bit}, output_label=${output_label_short}"
-  echo "ot_check: keccak(output_label)=${output_label_hash_short} -> matched ${output_anchor_match} (h0=${settle_h0_short}, h1=${settle_h1_short}) ${ot_anchor_status}"
+  echo "ot_check: anchor_hash=H(OUT,circuitId,m,winnerFormula,decoded_bit,output_label)=${output_label_hash_short} -> matched ${output_anchor_match} (h0=${settle_h0_short}, h1=${settle_h1_short}) ${ot_anchor_status}"
   echo "consistency: decoded_bit == expected_bit -> ${decoded_bit} == ${expected_bit} ${bit_consistency_status}"
   echo "onchain_settle: result=${result_token} -> winner=${winner_by_contract} ${onchain_status}, final_stage=Closed"
   echo "payouts: Alice=$(format_eth_compact "$(cast from-wei "${actual_alice_wei}")") ETH (exp $(format_eth_compact "$(cast from-wei "${expected_alice_wei}")")) ${alice_payout_status}, Bob=$(format_eth_compact "$(cast from-wei "${actual_bob_wei}")") ETH (exp $(format_eth_compact "$(cast from-wei "${expected_bob_wei}")")) ${bob_payout_status}"

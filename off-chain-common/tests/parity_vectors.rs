@@ -63,8 +63,8 @@ fn gate_leaf_matches_deterministic_vector() {
         "a300af318eda049428eb239539c1f40283d72dc07b6dfc33795294dceacc15a0"
     );
     assert_eq!(
-        hex::encode(layout_leaf_hash(9, gate)),
-        "77e8fea17177263b25687abafa2631d7e6915106d7cf6ec47feb3b086fe2a97c"
+        hex::encode(layout_leaf_hash(circuit_id, 9, gate)),
+        "2936fb056366b091fcb127196caa310db20f4ebdda70f943a912a3735b94dc33"
     );
 }
 

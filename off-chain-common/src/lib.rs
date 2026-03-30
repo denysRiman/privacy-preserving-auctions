@@ -12,4 +12,5 @@ pub mod labels;
 pub mod merkle;
 pub mod ot;
 pub mod scenario;
+pub mod settlement;
 pub mod types;

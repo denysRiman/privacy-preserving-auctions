@@ -26,7 +26,7 @@ fn generates_10_instances_and_valid_gate_proofs() {
     let layout_leaf_hashes: Vec<[u8; 32]> = gates
         .iter()
         .enumerate()
-        .map(|(idx, gate)| layout_leaf_hash(idx as u64, *gate))
+        .map(|(idx, gate)| layout_leaf_hash(circuit_id, idx as u64, *gate))
         .collect();
     // This is what the contract stores as `circuitLayoutRoot`.
     let layout_root = merkle_root_from_hashes(&layout_leaf_hashes);
@@ -67,7 +67,7 @@ fn generates_10_instances_and_valid_gate_proofs() {
             assert!(verify_ih_proof(block_hash, &proof_gc, root_gc));
 
             // Prove gate descriptor exists in layout commitment.
-            let layout_leaf = layout_leaf_hash(gate_index as u64, gates[gate_index]);
+            let layout_leaf = layout_leaf_hash(circuit_id, gate_index as u64, gates[gate_index]);
             assert!(verify_proof(layout_leaf, &layout_proof, layout_root));
         }
     }

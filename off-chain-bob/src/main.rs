@@ -15,6 +15,7 @@ use off_chain_common::ot::{
     ot_leaf_index, ot_message_author, ot_root_from_payload_hashes, recompute_ot_payload_hashes,
 };
 use off_chain_common::scenario::build_millionaires_layout;
+use off_chain_common::settlement::{default_circuit_id, output_anchor_hash};
 use off_chain_common::types::{CircuitLayout, GateDesc};
 use std::env;
 use std::error::Error;
@@ -167,6 +168,22 @@ fn random_bytes32() -> AppResult<[u8; 32]> {
 
 fn verifier_seed_commitment_with_salt(seed: [u8; 32], salt: [u8; 32]) -> [u8; 32] {
     keccak256(&[&seed, &salt])
+}
+
+fn parse_winner_formula(args: &[String]) -> AppResult<u8> {
+    let winner_formula = if let Some(raw) = parse_flag_value(args, "--winner-formula") {
+        parse_u64(&raw, "winner-formula")?
+    } else if let Ok(raw) = env::var("WINNER_FORMULA") {
+        parse_u64(&raw, "WINNER_FORMULA")?
+    } else {
+        0
+    };
+
+    if winner_formula > 1 {
+        return Err("winner-formula must be 0 (HigherBidWins) or 1 (LowerBidWins)".into());
+    }
+
+    Ok(winner_formula as u8)
 }
 
 #[derive(Debug, Clone)]
@@ -411,7 +428,7 @@ fn prepare_dispute_packet(config: &PrepareDisputeConfig) -> AppResult<PreparedDi
     let layout_leaf_hashes = gates
         .iter()
         .enumerate()
-        .map(|(idx, gate)| layout_leaf_hash(idx as u64, *gate))
+        .map(|(idx, gate)| layout_leaf_hash(config.circuit_id, idx as u64, *gate))
         .collect::<Vec<_>>();
     let layout_root = merkle_root_from_hashes(&layout_leaf_hashes);
     let layout_proof = merkle_proof_from_hashes(&layout_leaf_hashes, selected_gate_index);
@@ -790,8 +807,14 @@ fn cmd_evaluate_m(args: &[String]) -> AppResult<()> {
     println!("output_label={}", hex32(evaluated_label32));
     println!("h0={}", hex32(h0));
     println!("h1={}", hex32(h1));
-    println!("matches_h0={}", keccak256(&[&evaluated_label32]) == h0);
-    println!("matches_h1={}", keccak256(&[&evaluated_label32]) == h1);
+    println!(
+        "matches_h0={}",
+        output_anchor_hash(circuit_id, instance_id, true, evaluated_label32) == h0
+    );
+    println!(
+        "matches_h1={}",
+        output_anchor_hash(circuit_id, instance_id, false, evaluated_label32) == h1
+    );
     if let Some(bit) = decoded_bit {
         println!("decoded_bit={bit}");
     } else {
@@ -807,6 +830,7 @@ fn cmd_prepare_ot_dispute(args: &[String]) -> AppResult<()> {
         .map(|v| parse_u64(v, "bit-width"))
         .transpose()?
         .unwrap_or(8) as usize;
+    let winner_formula = parse_winner_formula(args)?;
     let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
     let garbler_seed = if let Some(raw) = parse_flag_value(args, "--garbler-seed") {
         parse_bytes32(&raw)?
@@ -830,7 +854,7 @@ fn cmd_prepare_ot_dispute(args: &[String]) -> AppResult<()> {
         .as_deref()
         .map(parse_bytes32)
         .transpose()?
-        .unwrap_or_else(|| keccak256(&[b"millionaires-yao-v1"]));
+        .unwrap_or_else(|| default_circuit_id(bit_width, winner_formula));
 
     let contract_address = required_env("CONTRACT_ADDRESS")?;
     let rpc_url = rpc_url();
@@ -887,6 +911,7 @@ fn cmd_prepare_dispute(args: &[String]) -> AppResult<()> {
         .map(|v| parse_u64(v, "bit-width"))
         .transpose()?
         .unwrap_or(8) as usize;
+    let winner_formula = parse_winner_formula(args)?;
     let instance_id = parse_u64(&required_flag_value(args, "--instance-id")?, "instance-id")?;
     let seed = parse_bytes32(&required_flag_value(args, "--seed")?)?;
     let leaves_file = required_flag_value(args, "--claimed-leaves-file")?;
@@ -904,7 +929,7 @@ fn cmd_prepare_dispute(args: &[String]) -> AppResult<()> {
         .as_deref()
         .map(parse_bytes32)
         .transpose()?
-        .unwrap_or_else(|| keccak256(&[b"millionaires-yao-v1"]));
+        .unwrap_or_else(|| default_circuit_id(bit_width, winner_formula));
 
     let claimed_leaves = read_claimed_leaves_file(Path::new(&leaves_file))?;
     let config = PrepareDisputeConfig {
@@ -1047,10 +1072,10 @@ fn print_help() {
         "  evaluate-m --y <u64> [--payload-file <path>] [--eval-dir <path>] [--alice-labels-file <path>]"
     );
     println!(
-        "  prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]"
+        "  prepare-dispute --instance-id <id> --seed <0x..32> --claimed-leaves-file <path> [--bit-width <bits>] [--winner-formula <0|1>] [--gate-index <k>] [--circuit-id <0x..32>] [--expected-root-gc <0x..32>] [--allow-false-challenge]"
     );
     println!(
-        "  prepare-ot-dispute --instance-id <id> --verifier-seed <0x..32> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>]"
+        "  prepare-ot-dispute --instance-id <id> --verifier-seed <0x..32> [--garbler-seed <0x..32> | --seed <0x..32>] [--bit-width <bits>] [--winner-formula <0|1>] [--input-bit <n> --round <0|1|2>] [--circuit-id <0x..32>] [--expected-root-ot <0x..32>]"
     );
     println!(
         "  dispute --instance-id <id> --seed <0x..32> --gate-index <k> --gate-type <0|1|2> --wire-a <u16> --wire-b <u16> --wire-c <u16> --leaf-bytes <0x..71> --ih-proof <0x..,0x..> --layout-proof <0x..,0x..>"

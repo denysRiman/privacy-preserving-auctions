@@ -58,5 +58,6 @@ You can override defaults by exporting env vars before running:
 - `TX_LEGACY` (default: `1`)
 - `TX_GAS_PRICE_WEI` (default: `0`)
 - `STRICT_BALANCE_CHECK` (default: `1`)
+- `WINNER_FORMULA` (default: `0`; `0` = higher bid wins (`x>y`), `1` = lower bid wins (`x<=y`))
 - `VERIFIER_SEED` or `VERIFIER_SEED_OVERRIDE` to force a specific Bob verifier seed in the demo
 - `BASE_FEE_WEI`/`GAS_PRICE_WEI` for `start_anvil.sh` (both default `0`)

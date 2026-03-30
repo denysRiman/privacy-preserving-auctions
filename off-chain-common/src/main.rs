@@ -7,6 +7,7 @@ use off_chain_common::merkle::{merkle_proof_from_hashes, merkle_root_from_hashes
 use off_chain_common::scenario::{
     CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed,
 };
+use off_chain_common::settlement::default_circuit_id;
 use off_chain_common::types::{CircuitLayout, GateDesc, GateType};
 
 /// Per-instance artifacts used to print Solidity-ready challenge data.
@@ -33,6 +34,25 @@ fn parse_usize_arg(args: &[String], flag: &str, default: usize) -> usize {
         }
         if let Some(raw) = args[idx].strip_prefix(&key_eq) {
             return raw.parse::<usize>().unwrap_or(default);
+        }
+        idx += 1;
+    }
+    default
+}
+
+/// Parses `--flag value` or `--flag=value` as `u8`, falling back to `default`.
+fn parse_u8_arg(args: &[String], flag: &str, default: u8) -> u8 {
+    let key_eq = format!("{flag}=");
+    let mut idx = 0usize;
+    while idx < args.len() {
+        if args[idx] == flag {
+            if idx + 1 < args.len() {
+                return args[idx + 1].parse::<u8>().unwrap_or(default);
+            }
+            return default;
+        }
+        if let Some(raw) = args[idx].strip_prefix(&key_eq) {
+            return raw.parse::<u8>().unwrap_or(default);
         }
         idx += 1;
     }
@@ -92,6 +112,7 @@ async fn main() {
     // CLI knobs for reproducible vector generation.
     let args: Vec<String> = std::env::args().collect();
     let bit_width = parse_usize_arg(&args, "--bits", 8);
+    let winner_formula = parse_u8_arg(&args, "--winner-formula", 0);
     let m = parse_usize_arg(&args, "--m", 7);
     let gate_index = parse_usize_arg(&args, "--gate-index", 3);
     let challenge_instance_arg = parse_usize_arg(&args, "--challenge-instance", usize::MAX);
@@ -99,7 +120,11 @@ async fn main() {
     let n = CUT_AND_CHOOSE_N;
     assert!(m < n, "m must be in [0, N)");
 
-    let circuit_id = keccak256(&[b"millionaires-yao-v1"]);
+    assert!(
+        winner_formula <= 1,
+        "winner-formula must be 0 (HigherBidWins) or 1 (LowerBidWins)"
+    );
+    let circuit_id = default_circuit_id(bit_width, winner_formula);
     let master_seed = keccak256(&[b"master-seed-v1"]);
     // Deterministic layout so Solidity/Rust vectors are stable across runs.
     let gates = build_millionaires_layout(bit_width);
@@ -114,7 +139,7 @@ async fn main() {
     let layout_leaf_hashes: Vec<[u8; 32]> = gates
         .iter()
         .enumerate()
-        .map(|(idx, gate)| layout_leaf_hash(idx as u64, *gate))
+        .map(|(idx, gate)| layout_leaf_hash(circuit_id, idx as u64, *gate))
         .collect();
     let circuit_layout_root = merkle_root_from_hashes(&layout_leaf_hashes);
     let layout_proof = merkle_proof_from_hashes(&layout_leaf_hashes, gate_index);
@@ -168,7 +193,7 @@ async fn main() {
     let leaf = inst.leaves[gate_index];
     let block_hash_value = inst.block_hashes[gate_index];
     let ih_proof = ih_proof_from_hashes(&inst.block_hashes, gate_index);
-    let layout_leaf = layout_leaf_hash(gate_index as u64, gate);
+    let layout_leaf = layout_leaf_hash(circuit_id, gate_index as u64, gate);
 
     // Quick local verification before user copies values to Solidity tests.
     let proof_ok = verify_ih_proof(block_hash_value, &ih_proof, inst.root_gc);
@@ -178,6 +203,7 @@ async fn main() {
     println!("N = {}", n);
     println!("bitWidth = {}", bit_width);
     println!("gateCount = {}", gates.len());
+    println!("winnerFormula = {}", winner_formula);
     println!("evaluation m = {}", m);
     println!("challenge instance = {}", challenge_instance);
     println!("gateIndex = {}", gate_index);

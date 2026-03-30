@@ -36,8 +36,8 @@ contract MillionairesProblem {
         bytes32 blobHashGC; // EIP-4844 versioned hash for evaluation payload blob (instance i)
         bytes32 rootXG;    // Merkle root over G's input labels
         bytes32 rootOT;    // Merkle root over public OT transcript leaves
-        bytes32 h0;        // PoC mapping: keccak(outputLabel) == h0 -> result=true (Alice wins / x > y)
-        bytes32 h1;        // PoC mapping: keccak(outputLabel) == h1 -> result=false (Bob wins / x <= y)
+        bytes32 h0;        // Anchor for winner-bit = 1 (Alice wins) under committed circuitId
+        bytes32 h1;        // Anchor for winner-bit = 0 (Bob wins) under committed circuitId
     }
 
     struct CoreInstanceCommitment {
@@ -79,7 +79,12 @@ contract MillionairesProblem {
     bool public verifierSeedRevealed;
     uint16 public bitWidth;
 
-    constructor(address _bob, bytes32 _circuitId, bytes32 _circuitLayoutRoot, uint16 _bitWidth) {
+    constructor(
+        address _bob,
+        bytes32 _circuitId,
+        bytes32 _circuitLayoutRoot,
+        uint16 _bitWidth
+    ) {
         require(_bitWidth > 0, "bitWidth must be > 0");
         alice = msg.sender;
         bob = _bob;
@@ -171,6 +176,8 @@ contract MillionairesProblem {
         for (uint256 i = 0; i < N; i++) {
             require(commitments[i].comSeed != bytes32(0), "Empty comSeed");
             require(commitments[i].rootGC != bytes32(0), "Empty rootGC");
+            require(commitments[i].blobHashGC != bytes32(0), "Empty blobHashGC");
+            require(commitments[i].rootXG != bytes32(0), "Empty rootXG");
             require(commitments[i].h0 != bytes32(0), "Empty h0");
             require(commitments[i].h1 != bytes32(0), "Empty h1");
             require(commitments[i].h0 != commitments[i].h1, "h0 and h1 must differ");
@@ -420,6 +427,7 @@ contract MillionairesProblem {
         require(currentStage == Stage.Dispute, "Not in Dispute stage");
         require(msg.sender == bob, "Only Evaluator can dispute");
         require(_idx < N, "Index out of bounds");
+        require(_isOpenInstance(_idx), "Not an opened instance");
         require(revealedSeeds[_idx] == _seed, "Seed mismatch");
 
         challengeGateLeaf(_idx, gateIndex, g, leafBytes, ihProof, layoutProof);
@@ -428,10 +436,33 @@ contract MillionairesProblem {
 
 
 
+    function _computeOutputAnchor(bytes32 outputLabel, bool winnerBit) internal view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                "OUT",
+                circuitId,
+                m,
+                winnerBit ? uint8(1) : uint8(0),
+                outputLabel
+            )
+        );
+    }
+
+    function _decodeOutputBitFromLabel(bytes32 outputLabel) internal view returns (bool) {
+        InstanceCommitment storage evalInstance = instanceCommitments[m];
+        if (_computeOutputAnchor(outputLabel, true) == evalInstance.h0) {
+            return true;
+        }
+        if (_computeOutputAnchor(outputLabel, false) == evalInstance.h1) {
+            return false;
+        }
+        revert("Invalid output label");
+    }
+
     /**
      * @dev Phase 8: Bob (Evaluator) submits the final output label.
      * `_outputLabel` is a bytes16 GC output label zero-padded to bytes32 before submission.
-     * PoC semantic mapping remains: h0-match => result=true, h1-match => result=false.
+     * Matching is done against circuit-bound winner anchors committed in `h0/h1`.
      * @param _outputLabel The label resulting from Ev(F, X).
      */
     function settle(bytes32 _outputLabel) external {
@@ -439,16 +470,7 @@ contract MillionairesProblem {
         require(msg.sender == bob, "Only Evaluator");
         require(block.timestamp <= deadlines.settle, "Settlement deadline missed");
 
-        InstanceCommitment storage evalInstance = instanceCommitments[m];
-
-        // Verify if the label matches H(Lout0) or H(Lout1)
-        if (keccak256(abi.encodePacked(_outputLabel)) == evalInstance.h0) {
-            result = true;
-        } else if (keccak256(abi.encodePacked(_outputLabel)) == evalInstance.h1) {
-            result = false;
-        } else {
-            revert("Invalid output label");
-        }
+        result = _decodeOutputBitFromLabel(_outputLabel);
 
         uint256 payoutAlice = vault[alice];
         uint256 payoutBob = vault[bob];
@@ -756,9 +778,9 @@ contract MillionairesProblem {
         _resolveOtRootChallenge(instanceId);
     }
 
-    // leaf = H(gateIndex || gateType || wireA || wireB || wireC)
-    function _layoutLeafHash(uint256 gateIndex, GateDesc calldata g) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(gateIndex, uint8(g.gateType), g.wireA, g.wireB, g.wireC));
+    // leaf = H(circuitId || gateIndex || gateType || wireA || wireB || wireC)
+    function _layoutLeafHash(uint256 gateIndex, GateDesc calldata g) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked(circuitId, gateIndex, uint8(g.gateType), g.wireA, g.wireB, g.wireC));
     }
 
     // Proof format:
