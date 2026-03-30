@@ -216,7 +216,7 @@ async fn main() {
     let zero32 = [0u8; 32];
     for a in &instances {
         println!(
-            "instance[{}]: comSeed={} rootGC={} rootXG={} rootOT={} h0={} h1={}",
+            "instance[{}]: comSeed={} rootGC={} blobHashGC={} rootOT={} h0={} h1={}",
             a.instance_id,
             hex32(a.com_seed),
             hex32(a.root_gc),
@@ -226,7 +226,7 @@ async fn main() {
             hex32(zero32)
         );
     }
-    // `rootXG`, `rootOT`, `h0`, `h1` are placeholders in this MVP printer.
+    // `blobHashGC`, `rootOT`, `h0`, `h1` are placeholders in this MVP printer.
     println!();
 
     println!("=== Phase-4 Openings (revealOpenings) ===");

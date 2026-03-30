@@ -3,7 +3,7 @@ use off_chain_common::cli::{
     parse_u64, print_tx_summary, required_env, required_env_any, required_flag_value, rpc_url,
     run_cast,
 };
-use off_chain_common::consensus::{derive_wire_label, keccak256, uint256_from_u64};
+use off_chain_common::consensus::{derive_wire_label, keccak256};
 use off_chain_common::eip4844::eval_payload_versioned_blob_hash;
 use off_chain_common::eval_blob::CanonicalEvalBlobPayload;
 use off_chain_common::evaluation::{
@@ -104,6 +104,13 @@ fn parse_optional_verifier_seed(args: &[String]) -> AppResult<Option<[u8; 32]>> 
         .as_deref()
         .map(parse_bytes32)
         .transpose()
+}
+
+fn resolve_target_buyer(args: &[String]) -> AppResult<String> {
+    if let Some(buyer) = parse_flag_value(args, "--buyer") {
+        return Ok(buyer);
+    }
+    required_env("BOB_ADDRESS")
 }
 
 fn parse_session_config(args: &[String]) -> AppResult<SessionConfig> {
@@ -218,30 +225,10 @@ fn derive_ot_root_lists(
         .collect()
 }
 
-fn derive_root_xg(circuit_id: [u8; 32], instance_id: u64, seed: [u8; 32]) -> [u8; 32] {
-    let instance = uint256_from_u64(instance_id);
-    let mut out = keccak256(&[b"XG", &circuit_id, &instance, &seed]);
-    if out == [0u8; 32] {
-        out[31] = 1;
-    }
-    out
-}
-
-fn derive_root_xg_lists(
-    config: &SessionConfig,
-    instances: &[InstanceArtifacts],
-) -> Vec<[u8; 32]> {
-    instances
-        .iter()
-        .map(|inst| derive_root_xg(config.circuit_id, inst.instance_id as u64, inst.seed))
-        .collect()
-}
-
 fn build_commitment_tuple_items(
     instances: &[InstanceArtifacts],
     root_gcs: &[[u8; 32]],
     blob_hashes: &[[u8; 32]],
-    root_xgs: &[[u8; 32]],
     h0: &[[u8; 32]],
     h1: &[[u8; 32]],
 ) -> Vec<String> {
@@ -249,11 +236,10 @@ fn build_commitment_tuple_items(
         .iter()
         .map(|inst| {
             format!(
-                "({},{},{},{},{},{})",
+                "({},{},{},{},{})",
                 hex32(inst.com_seed),
                 hex32(root_gcs[inst.instance_id]),
                 hex32(blob_hashes[inst.instance_id]),
-                hex32(root_xgs[inst.instance_id]),
                 hex32(h0[inst.instance_id]),
                 hex32(h1[inst.instance_id])
             )
@@ -265,11 +251,10 @@ fn build_commitments_arg(
     instances: &[InstanceArtifacts],
     root_gcs: &[[u8; 32]],
     blob_hashes: &[[u8; 32]],
-    root_xgs: &[[u8; 32]],
     h0: &[[u8; 32]],
     h1: &[[u8; 32]],
 ) -> String {
-    let tuple_items = build_commitment_tuple_items(instances, root_gcs, blob_hashes, root_xgs, h0, h1);
+    let tuple_items = build_commitment_tuple_items(instances, root_gcs, blob_hashes, h0, h1);
     format!("[{}]", tuple_items.join(","))
 }
 
@@ -791,6 +776,7 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     let rpc_url = rpc_url();
     let contract_address = required_env("CONTRACT_ADDRESS")?;
     let alice_private_key = required_env_any(&["ALICE_PRIVATE_KEY", "ALICE_PK"])?;
+    let buyer_address = resolve_target_buyer(args)?;
     let config = parse_session_config(args)?;
     let instances = build_instances(&config);
     let zero = [0u8; 32];
@@ -862,8 +848,6 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
             "Provide --verifier-seed or --root-ots so Alice can commit rootOT values".into(),
         );
     };
-    let root_xgs = derive_root_xg_lists(&config, &instances);
-
     let h0 = if let Some(raw) = parse_flag_value(args, "--h0") {
         let parsed = parse_bytes32_list_csv(&raw)?;
         if parsed.len() != CUT_AND_CHOOSE_N {
@@ -902,12 +886,12 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
             .clone()
     };
 
-    let core_commitments_arg =
-        build_commitments_arg(&instances, &root_gcs, &blob_hashes, &root_xgs, &h0, &h1);
+    let core_commitments_arg = build_commitments_arg(&instances, &root_gcs, &blob_hashes, &h0, &h1);
 
     println!("circuit_id={}", hex32(config.circuit_id));
     println!("master_seed={}", hex32(config.master_seed));
     println!("bit_width={}", config.bit_width);
+    println!("ot_roots_buyer={buyer_address}");
     for inst in &instances {
         println!(
             "instance={} comSeed={} rootGC={} rootOT={} blobHashGC={}",
@@ -922,7 +906,7 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     let core_tx_result = run_cast(&[
         "send".to_string(),
         contract_address.clone(),
-        "submitCommitments((bytes32,bytes32,bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
+        "submitCommitments((bytes32,bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
         core_commitments_arg,
         "--private-key".to_string(),
         alice_private_key.clone(),
@@ -934,7 +918,8 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     let ot_tx_result = run_cast(&[
         "send".to_string(),
         contract_address,
-        "submitOtRoots(bytes32[10])".to_string(),
+        "submitOtRootsForBuyer(address,bytes32[10])".to_string(),
+        buyer_address,
         bytes32_vec_literal(&root_ots),
         "--private-key".to_string(),
         alice_private_key,
@@ -1003,8 +988,6 @@ fn cmd_submit_core_commitments(args: &[String]) -> AppResult<()> {
     };
 
     let root_ots = vec![zero; CUT_AND_CHOOSE_N];
-    let root_xgs = derive_root_xg_lists(&config, &instances);
-
     let h0 = if let Some(raw) = parse_flag_value(args, "--h0") {
         let parsed = parse_bytes32_list_csv(&raw)?;
         if parsed.len() != CUT_AND_CHOOSE_N {
@@ -1043,8 +1026,7 @@ fn cmd_submit_core_commitments(args: &[String]) -> AppResult<()> {
             .clone()
     };
 
-    let commitments_arg =
-        build_commitments_arg(&instances, &root_gcs, &blob_hashes, &root_xgs, &h0, &h1);
+    let commitments_arg = build_commitments_arg(&instances, &root_gcs, &blob_hashes, &h0, &h1);
 
     println!("circuit_id={}", hex32(config.circuit_id));
     println!("master_seed={}", hex32(config.master_seed));
@@ -1063,7 +1045,7 @@ fn cmd_submit_core_commitments(args: &[String]) -> AppResult<()> {
     let tx_result = run_cast(&[
         "send".to_string(),
         contract_address,
-        "submitCommitments((bytes32,bytes32,bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
+        "submitCommitments((bytes32,bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
         commitments_arg,
         "--private-key".to_string(),
         alice_private_key,
@@ -1078,6 +1060,7 @@ fn cmd_submit_ot_roots(args: &[String]) -> AppResult<()> {
     let rpc_url = rpc_url();
     let contract_address = required_env("CONTRACT_ADDRESS")?;
     let alice_private_key = required_env_any(&["ALICE_PRIVATE_KEY", "ALICE_PK"])?;
+    let buyer_address = resolve_target_buyer(args)?;
     let config = parse_session_config(args)?;
     let instances = build_instances(&config);
     let verifier_seed = parse_optional_verifier_seed(args)?;
@@ -1102,6 +1085,7 @@ fn cmd_submit_ot_roots(args: &[String]) -> AppResult<()> {
     println!("circuit_id={}", hex32(config.circuit_id));
     println!("master_seed={}", hex32(config.master_seed));
     println!("bit_width={}", config.bit_width);
+    println!("ot_roots_buyer={buyer_address}");
     for inst in &instances {
         println!(
             "instance={} rootOT={}",
@@ -1113,7 +1097,8 @@ fn cmd_submit_ot_roots(args: &[String]) -> AppResult<()> {
     let tx_result = run_cast(&[
         "send".to_string(),
         contract_address,
-        "submitOtRoots(bytes32[10])".to_string(),
+        "submitOtRootsForBuyer(address,bytes32[10])".to_string(),
+        buyer_address,
         bytes32_vec_literal(&root_ots),
         "--private-key".to_string(),
         alice_private_key,
@@ -1218,13 +1203,13 @@ fn print_help() {
         "  derive-anchors [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>]"
     );
     println!(
-        "  submit-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
+        "  submit-commitments [--buyer <addr>] [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
     );
     println!(
         "  submit-core-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
     );
     println!(
-        "  submit-ot-roots [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>]"
+        "  submit-ot-roots [--buyer <addr>] [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>]"
     );
     println!(
         "  export-artifacts --out-dir <path> [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32>]"
@@ -1373,38 +1358,22 @@ mod tests {
     }
 
     #[test]
-    fn derives_non_zero_root_xg_per_instance() {
-        let config = test_config();
-        let instances = build_instances(&config);
-
-        let roots_a = derive_root_xg_lists(&config, &instances);
-        let roots_b = derive_root_xg_lists(&config, &instances);
-
-        assert_eq!(roots_a.len(), CUT_AND_CHOOSE_N);
-        assert_eq!(roots_a, roots_b);
-        assert!(roots_a.iter().all(|root| *root != [0u8; 32]));
-    }
-
-    #[test]
-    fn commitment_tuple_builder_uses_root_xg_slot() {
+    fn commitment_tuple_builder_uses_core_slots() {
         let config = test_config();
         let instances = build_instances(&config);
         let root_gcs = instances.iter().map(|inst| inst.root_gc).collect::<Vec<_>>();
         let blob_hashes = vec![[0x11u8; 32]; CUT_AND_CHOOSE_N];
-        let root_xgs = derive_root_xg_lists(&config, &instances);
         let h0 = vec![[0x22u8; 32]; CUT_AND_CHOOSE_N];
         let h1 = vec![[0x33u8; 32]; CUT_AND_CHOOSE_N];
 
-        let commitments_arg =
-            build_commitments_arg(&instances, &root_gcs, &blob_hashes, &root_xgs, &h0, &h1);
+        let commitments_arg = build_commitments_arg(&instances, &root_gcs, &blob_hashes, &h0, &h1);
 
         for inst in &instances {
             let expected_tuple = format!(
-                "({},{},{},{},{},{})",
+                "({},{},{},{},{})",
                 hex32(inst.com_seed),
                 hex32(root_gcs[inst.instance_id]),
                 hex32(blob_hashes[inst.instance_id]),
-                hex32(root_xgs[inst.instance_id]),
                 hex32(h0[inst.instance_id]),
                 hex32(h1[inst.instance_id])
             );

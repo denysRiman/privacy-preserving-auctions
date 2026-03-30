@@ -502,13 +502,6 @@ fn cmd_deposit() -> AppResult<()> {
     ])?;
     println!("stage_before={stage_before}");
 
-    let configured_bob = run_cast(&[
-        "call".to_string(),
-        contract_address.clone(),
-        "bob()(address)".to_string(),
-        "--rpc-url".to_string(),
-        rpc_url.clone(),
-    ])?;
     let signer_bob = run_cast(&[
         "wallet".to_string(),
         "address".to_string(),
@@ -521,8 +514,7 @@ fn cmd_deposit() -> AppResult<()> {
         "--rpc-url".to_string(),
         rpc_url.clone(),
     ])?;
-    println!("configured_bob={configured_bob}");
-    println!("signer_bob={signer_bob}");
+    println!("signer_buyer={signer_bob}");
     println!("bob_wallet_before={wallet_before}");
 
     println!(
@@ -603,7 +595,7 @@ fn cmd_commit_verifier_seed(args: &[String]) -> AppResult<()> {
     let tx_result = run_cast(&[
         "send".to_string(),
         contract_address,
-        "commitVerifierSeed(bytes32)".to_string(),
+        "commitBuyerSeed(bytes32)".to_string(),
         hex32(commitment),
         "--private-key".to_string(),
         bob_private_key,
@@ -632,7 +624,7 @@ fn cmd_reveal_verifier_seed(args: &[String]) -> AppResult<()> {
     let tx_result = run_cast(&[
         "send".to_string(),
         contract_address,
-        "revealVerifierSeed(bytes32,bytes32)".to_string(),
+        "revealBuyerSeed(bytes32,bytes32)".to_string(),
         hex32(seed),
         hex32(salt),
         "--private-key".to_string(),
@@ -650,28 +642,35 @@ fn cmd_reveal_verifier_seed(args: &[String]) -> AppResult<()> {
 fn cmd_choose(args: &[String]) -> AppResult<()> {
     let rpc_url = rpc_url();
     let contract_address = required_env("CONTRACT_ADDRESS")?;
-    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
 
-    let m_raw = if let Some(value) = parse_flag_value(args, "--m") {
-        value
+    let expected_m = if let Some(value) = parse_flag_value(args, "--m") {
+        Some(parse_u64(&value, "m")?)
     } else if let Some(first) = args.first() {
-        first.clone()
+        Some(parse_u64(first, "m")?)
     } else {
-        return Err("Missing m index (use: choose --m <index>)".into());
+        None
     };
-    let m = parse_u64(&m_raw, "m")?;
 
-    let tx_result = run_cast(&[
-        "send".to_string(),
+    let onchain_m = run_cast(&[
+        "call".to_string(),
         contract_address,
-        "choose(uint256)".to_string(),
-        m.to_string(),
-        "--private-key".to_string(),
-        bob_private_key,
+        "m()(uint256)".to_string(),
         "--rpc-url".to_string(),
         rpc_url,
     ])?;
-    print_tx_summary("choose", &tx_result);
+    let selected_m = parse_u64(onchain_m.trim(), "m")?;
+    println!("selected_m={selected_m}");
+
+    if let Some(expected) = expected_m {
+        if selected_m != expected {
+            return Err(format!(
+                "Deterministic m mismatch: expected {expected}, on-chain {selected_m}"
+            )
+            .into());
+        }
+        println!("match_expected=true");
+    }
+
     Ok(())
 }
 

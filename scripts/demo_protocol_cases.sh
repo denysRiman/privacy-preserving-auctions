@@ -10,6 +10,9 @@ OFFCHAIN_COMMON_DIR="${ROOT_DIR}/off-chain-common"
 RPC_URL="${RPC_URL:-http://127.0.0.1:8545}"
 ALICE_PK="${ALICE_PK:-${ALICE_PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}}"
 BOB_PK="${BOB_PK:-${BOB_PRIVATE_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}}"
+BOB2_PK="${BOB2_PK:-0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a}"
+BOB3_PK="${BOB3_PK:-0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6}"
+BUYER_COUNT="${BUYER_COUNT:-1}"
 BIT_WIDTH="${BIT_WIDTH:-8}"
 M_CHOICE="${M_CHOICE:-random}"
 DEPOSIT_WEI="${DEPOSIT_WEI:-1000000000000000000}"
@@ -34,12 +37,16 @@ CIRCUIT_ID=""
 LAYOUT_ROOT=""
 ALICE_ADDR=""
 BOB_ADDR=""
+BOB2_ADDR=""
+BOB3_ADDR=""
 ALICE_RESET_WEI=""
 BOB_RESET_WEI=""
 VERIFIER_SEED_HEX=""
 VERIFIER_SALT_HEX=""
 VERIFIER_SEED_COMMITMENT=""
 TX_FLAGS=()
+BUYER_ADDRS=()
+BUYER_PKS=()
 
 is_truthy() {
   case "$1" in
@@ -89,6 +96,24 @@ EOF
 
   ALICE_ADDR="$(cast wallet address --private-key "${ALICE_PK}")"
   BOB_ADDR="$(cast wallet address --private-key "${BOB_PK}")"
+  if [[ "${BUYER_COUNT}" -lt 1 || "${BUYER_COUNT}" -gt 3 ]]; then
+    echo "BUYER_COUNT must be between 1 and 3 for this demo." >&2
+    exit 1
+  fi
+
+  BUYER_ADDRS=("${BOB_ADDR}")
+  BUYER_PKS=("${BOB_PK}")
+  if [[ "${BUYER_COUNT}" -ge 2 ]]; then
+    BOB2_ADDR="$(cast wallet address --private-key "${BOB2_PK}")"
+    BUYER_ADDRS+=("${BOB2_ADDR}")
+    BUYER_PKS+=("${BOB2_PK}")
+  fi
+  if [[ "${BUYER_COUNT}" -ge 3 ]]; then
+    BOB3_ADDR="$(cast wallet address --private-key "${BOB3_PK}")"
+    BUYER_ADDRS+=("${BOB3_ADDR}")
+    BUYER_PKS+=("${BOB3_PK}")
+  fi
+
   if [[ "${WINNER_FORMULA}" != "0" && "${WINNER_FORMULA}" != "1" ]]; then
     echo "WINNER_FORMULA must be 0 (HigherBidWins) or 1 (LowerBidWins)." >&2
     exit 1
@@ -188,12 +213,116 @@ deploy_contract() {
   echo "deploy: contract=${CONTRACT_ADDRESS}, circuit=$(short_hash32 "${CIRCUIT_ID}"), layout=$(short_hash32 "${LAYOUT_ROOT}"), winner_formula=${WINNER_FORMULA} [OK]"
 }
 
+register_additional_buyers() {
+  if [[ "${BUYER_COUNT}" -le 1 ]]; then
+    return
+  fi
+
+  local buyers_csv=""
+  local idx
+  for ((idx = 1; idx < BUYER_COUNT; idx++)); do
+    if [[ -n "${buyers_csv}" ]]; then
+      buyers_csv+=","
+    fi
+    buyers_csv+="${BUYER_ADDRS[$idx]}"
+  done
+
+  cast send "${CONTRACT_ADDRESS}" "registerBuyers(address[])" "[${buyers_csv}]" \
+    "${TX_FLAGS[@]}" \
+    --private-key "${ALICE_PK}" \
+    --rpc-url "${RPC_URL}" >/dev/null
+  echo "buyers_registered: count=${BUYER_COUNT}, primary=${BOB_ADDR} [OK]"
+}
+
+deposit_additional_buyers() {
+  if [[ "${BUYER_COUNT}" -le 1 ]]; then
+    return
+  fi
+
+  local idx
+  for ((idx = 1; idx < BUYER_COUNT; idx++)); do
+    cast send "${CONTRACT_ADDRESS}" "deposit()" \
+      "${TX_FLAGS[@]}" \
+      --value "${DEPOSIT_WEI}" \
+      --private-key "${BUYER_PKS[$idx]}" \
+      --rpc-url "${RPC_URL}" >/dev/null
+    echo "  Buyer[$idx]: deposit [OK]"
+  done
+}
+
+finalize_additional_buyers_zero() {
+  if [[ "${BUYER_COUNT}" -le 1 ]]; then
+    return
+  fi
+
+  local idx
+  for ((idx = 1; idx < BUYER_COUNT; idx++)); do
+    cast send "${CONTRACT_ADDRESS}" "submitBuyerReady()" \
+      "${TX_FLAGS[@]}" \
+      --private-key "${BUYER_PKS[$idx]}" \
+      --rpc-url "${RPC_URL}" >/dev/null
+    echo "  buyer_input: buyer=Buyer[$idx] status=Ready [OK]"
+  done
+}
+
+close_dispute_ready_buyers() {
+  if [[ "${BUYER_COUNT}" -le 1 ]]; then
+    cast send "${CONTRACT_ADDRESS}" "closeDispute()" \
+      "${TX_FLAGS[@]}" \
+      --private-key "${BOB_PK}" \
+      --rpc-url "${RPC_URL}" >/dev/null
+    echo "  Bob: close_dispute [OK]"
+    return
+  fi
+
+  local idx
+  local buyer_addr
+  local buyer_status
+  local actor
+
+  for ((idx = 0; idx < BUYER_COUNT; idx++)); do
+    if [[ "$(first_token "$(stage_value)")" == "8" ]]; then
+      break
+    fi
+
+    buyer_addr="${BUYER_ADDRS[$idx]}"
+    buyer_status="$(
+      cast call "${CONTRACT_ADDRESS}" "buyerStatus(address)(uint8)" "${buyer_addr}" --rpc-url "${RPC_URL}" | tr -d '[:space:]'
+    )"
+    if [[ "${buyer_status}" != "1" ]]; then
+      continue
+    fi
+
+    cast send "${CONTRACT_ADDRESS}" "closeDispute()" \
+      "${TX_FLAGS[@]}" \
+      --private-key "${BUYER_PKS[$idx]}" \
+      --rpc-url "${RPC_URL}" >/dev/null
+    actor="Buyer[$idx]"
+    if [[ "${idx}" -eq 0 ]]; then
+      actor="Bob"
+    fi
+    echo "  ${actor}: close_dispute [OK]"
+  done
+
+  if [[ "$(first_token "$(stage_value)")" != "8" ]]; then
+    if cast send "${CONTRACT_ADDRESS}" "closeDispute()" \
+      "${TX_FLAGS[@]}" \
+      --private-key "${ALICE_PK}" \
+      --rpc-url "${RPC_URL}" >/dev/null 2>&1; then
+      echo "  Alice: close_dispute_after_deadline [OK]"
+    else
+      echo "  close_dispute_fallback: stage still Dispute (deadline path not yet available)"
+    fi
+  fi
+}
+
 run_alice_raw() {
   (
     cd "${ALICE_APP_DIR}"
     RPC_URL="${RPC_URL}" \
     CONTRACT_ADDRESS="${CONTRACT_ADDRESS}" \
     ALICE_PRIVATE_KEY="${ALICE_PK}" \
+    BOB_ADDRESS="${BOB_ADDR}" \
     WINNER_FORMULA="${WINNER_FORMULA}" \
     DEPOSIT_WEI="${DEPOSIT_WEI}" \
     TX_LEGACY="${TX_LEGACY}" \
@@ -272,17 +401,7 @@ formula_anchor_hash() {
   local label_hex="${output_label#0x}"
   local circuit_hex="${CIRCUIT_ID#0x}"
   local instance_hex
-  local formula_hex
   local bit_hex
-
-  if [[ ! "${WINNER_FORMULA}" =~ ^[0-9]+$ ]]; then
-    echo ""
-    return
-  fi
-  if [[ "${WINNER_FORMULA}" -lt 0 || "${WINNER_FORMULA}" -gt 255 ]]; then
-    echo ""
-    return
-  fi
   if [[ ! "${winner_bit}" =~ ^[0-9]+$ ]]; then
     echo ""
     return
@@ -304,10 +423,9 @@ formula_anchor_hash() {
     return
   fi
 
-  formula_hex="$(printf '%02x' "${WINNER_FORMULA}")"
   bit_hex="$(printf '%02x' "${winner_bit}")"
   instance_hex="$(printf '%064x' "${instance_id}")"
-  cast keccak "0x4f5554${circuit_hex}${instance_hex}${formula_hex}${bit_hex}${label_hex}" | tr -d '[:space:]'
+  cast keccak "0x4f5554${circuit_hex}${instance_hex}${bit_hex}${label_hex}" | tr -d '[:space:]'
 }
 
 file_size_bytes() {
@@ -757,22 +875,28 @@ common_bootstrap() {
   local m_choice="$1"
   phase "Deploy contract"
   deploy_contract "${m_choice}"
+  register_additional_buyers
   wait_phase
 
   phase "Reset demo balances (post-deploy)"
   cast rpc anvil_setBalance "${ALICE_ADDR}" "${ALICE_START_BALANCE_HEX}" >/dev/null
   cast rpc anvil_setBalance "${BOB_ADDR}" "${BOB_START_BALANCE_HEX}" >/dev/null
+  local idx
+  for ((idx = 1; idx < BUYER_COUNT; idx++)); do
+    cast rpc anvil_setBalance "${BUYER_ADDRS[$idx]}" "${BOB_START_BALANCE_HEX}" >/dev/null
+  done
   ALICE_RESET_WEI="$(cast balance "${ALICE_ADDR}" --rpc-url "${RPC_URL}")"
   BOB_RESET_WEI="$(cast balance "${BOB_ADDR}" --rpc-url "${RPC_URL}")"
-  echo "balances_reset: Alice=$(format_eth_compact "$(cast from-wei "${ALICE_RESET_WEI}")") ETH, Bob=$(format_eth_compact "$(cast from-wei "${BOB_RESET_WEI}")") ETH [OK]"
+  echo "balances_reset: Alice=$(format_eth_compact "$(cast from-wei "${ALICE_RESET_WEI}")") ETH, Buyer[0]=$(format_eth_compact "$(cast from-wei "${BOB_RESET_WEI}")") ETH, buyer_count=${BUYER_COUNT} [OK]"
   wait_phase
 
   phase "Phase 1: Alice deposit"
   run_alice deposit
   wait_phase
 
-  phase "Phase 1: Bob deposit"
+  phase "Phase 1: Buyer deposits"
   run_bob deposit
+  deposit_additional_buyers
   wait_phase
 
   phase "Phase 2: Bob commits verifier seed commitment"
@@ -787,19 +911,13 @@ show_ot_visibility() {
 
   local seed
   local expected_root_ot
-  local commitment_raw
   seed="$(cast call "${CONTRACT_ADDRESS}" "revealedSeeds(uint256)(bytes32)" "${instance_id}" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
   if [[ ! "${seed}" =~ ^0x[0-9a-fA-F]{64}$ ]] || [[ "${seed}" == "0x0000000000000000000000000000000000000000000000000000000000000000" ]]; then
     echo "Missing on-chain revealed seed for opened instance ${instance_id}" >&2
     exit 1
   fi
 
-  commitment_raw="$(cast call "${CONTRACT_ADDRESS}" "instanceCommitments(uint256)(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32)" "${instance_id}" --rpc-url "${RPC_URL}")"
-  expected_root_ot="$(
-    printf '%s\n' "${commitment_raw}" \
-      | grep -Eo '0x[0-9a-fA-F]{64}' \
-      | sed -n '5p'
-  )"
+  expected_root_ot="$(cast call "${CONTRACT_ADDRESS}" "buyerRootOTCommitment(address,uint256)(bytes32)" "${BOB_ADDR}" "${instance_id}" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
   assert_non_empty "expected_root_ot(instance=${instance_id})" "${expected_root_ot}"
 
   phase "${title}"
@@ -848,12 +966,16 @@ scenario_success() {
 
   printf "\n\033[1;32m================ CASE 1: SUCCESS FLOW ================\033[0m\n"
   echo "security_goal: honest run with verifier-seed commit-reveal binding; disputes cover (a) GC leaf correctness for opened instances and (b) opened-instance OT root correctness; settlement must agree"
-  echo "artifact_defs: comSeed=keccak(seed), rootGC=terminal incremental-hash root over gate leaves where leafHash=keccak(gateIndex || leafBytes(GateDesc,4-rows)), circuitLayoutRoot=commitment to (gateIndex,GateDesc) used by layout proofs, verifierSeedCommitment=keccak(seed||salt), rootOT=Alice commits after Bob seed reveal and Bob can dispute on-chain, h0/h1=keccak(OUT,circuitId,m,winnerFormula,winnerBit,output_label)"
+  echo "artifact_defs: comSeed=keccak(seed), rootGC=terminal incremental-hash root over gate leaves where leafHash=keccak(gateIndex || leafBytes(GateDesc,4-rows)), circuitLayoutRoot=commitment to (gateIndex,GateDesc) used by layout proofs, verifierSeedCommitment=keccak(seed||salt), rootOT=Alice commits after Bob seed reveal and Bob can dispute on-chain, h0/h1=keccak(OUT,circuitId,m,winnerBit,output_label)"
   echo "label_encoding: output_label is 16-byte GC label zero-padded to bytes32 before on-chain hash check"
-  echo "liveness_hooks: deposit -> verifierSeed(commit) -> coreCommit -> verifierSeed(reveal) -> otRoots -> choose -> open -> dispute -> labels -> settle"
+  echo "liveness_hooks: deposit -> verifierSeed(commit) -> verifierSeed(reveal) -> coreCommit -> otRoots -> buyerInputOT -> open -> dispute -> labels -> settle"
   common_bootstrap "${m_choice}"
 
-  phase "Phase 3: Alice derives anchors and submits core commitments"
+  phase "Phase 3: Bob reveals verifier seed + salt"
+  reveal_bob_verifier_seed
+  wait_phase
+
+  phase "Phase 4: Alice derives anchors and submits core commitments"
   local anchors_raw
   anchors_raw="$(
     run_alice_raw derive-anchors \
@@ -878,16 +1000,7 @@ scenario_success() {
   )"
   compact_cli_output "alice" "submit-commitments" "${submit_raw}"
   local committed_blob_hash
-  committed_blob_hash="$(
-    printf '%s\n' "${submit_raw}" \
-      | sed -nE "/^instance=${m_choice} /s/.*blobHashGC=(0x[0-9a-fA-F]{64}).*/\\1/p" \
-      | tail -n1
-  )"
-  assert_non_empty "committed_blob_hash(m)" "${committed_blob_hash}"
-  wait_phase
-
-  phase "Phase 4: Bob reveals verifier seed + salt"
-  reveal_bob_verifier_seed
+  committed_blob_hash=""
   wait_phase
 
   phase "Phase 5: Alice submits OT roots"
@@ -897,12 +1010,27 @@ scenario_success() {
     --verifier-seed "${VERIFIER_SEED_HEX}"
   wait_phase
 
-  phase "Phase 6: Bob chooses m"
-  run_bob choose --m "${m_choice}"
+  phase "Phase 6: Bob finalizes buyer input/OT"
+  cast send "${CONTRACT_ADDRESS}" "submitBuyerReady()" \
+    "${TX_FLAGS[@]}" \
+    --private-key "${BOB_PK}" \
+    --rpc-url "${RPC_URL}" >/dev/null
+  echo "  buyer_input: buyer=Bob status=Ready [OK]"
+  finalize_additional_buyers_zero
+  wait_phase
+
+  phase "Phase 7: Deterministic m selected from aggregated seed"
+  m_choice="$(cast call "${CONTRACT_ADDRESS}" "m()(uint256)" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
+  committed_blob_hash="$(
+    cast call "${CONTRACT_ADDRESS}" "instanceCommitments(uint256)(bytes32,bytes32,bytes32,bytes32,bytes32)" "${m_choice}" --rpc-url "${RPC_URL}" \
+      | grep -Eo '0x[0-9a-fA-F]{64}' \
+      | sed -n '3p'
+  )"
+  assert_non_empty "committed_blob_hash(m)" "${committed_blob_hash}"
   echo "  choose_m: m=${m_choice}, opened_expected=$((CUT_AND_CHOOSE_N - 1)) [OK]"
   wait_phase
 
-  phase "Phase 7: Alice reveals openings"
+  phase "Phase 8: Alice reveals openings"
   run_alice reveal-openings \
     --m "${m_choice}" \
     --bit-width "${BIT_WIDTH}" \
@@ -914,12 +1042,12 @@ scenario_success() {
   show_ot_visibility "${challenge_instance}" "${out_dir}" "Optional check (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
-  phase "Phase 9: Bob ends Dispute stage (early close)"
-  cast send "${CONTRACT_ADDRESS}" "closeDispute()" \
-    "${TX_FLAGS[@]}" \
-    --private-key "${BOB_PK}" \
-    --rpc-url "${RPC_URL}" >/dev/null
-  echo "  Bob: close_dispute [OK]"
+  local close_dispute_title="Phase 10: Bob ends Dispute stage (early close)"
+  if [[ "${BUYER_COUNT}" -gt 1 ]]; then
+    close_dispute_title="Phase 10: Buyers end Dispute stage (early close)"
+  fi
+  phase "${close_dispute_title}"
+  close_dispute_ready_buyers
   local stage_after_close
   local stage_after_close_token
   local stage_transition_status="[FAIL]"
@@ -931,7 +1059,7 @@ scenario_success() {
   echo "  stage_transition: Dispute -> Labels ${stage_transition_status}"
   wait_phase
 
-  phase "Phase 10: Alice prepares evaluation package + reveals x labels (enter Settle)"
+  phase "Phase 11: Alice prepares evaluation package + reveals x labels (enter Settle)"
   local prepare_eval_raw
   prepare_eval_raw="$(
     run_alice_raw prepare-eval \
@@ -948,7 +1076,6 @@ scenario_success() {
   local settle_h1
   local eval_blob_file
   local eval_blob_hash
-  local onchain_eval_blob_hash
   local blob_link_status="[FAIL]"
   settle_h0="$(extract_kv_from_text h0 "${prepare_eval_raw}")"
   settle_h1="$(extract_kv_from_text h1 "${prepare_eval_raw}")"
@@ -968,15 +1095,14 @@ scenario_success() {
     echo "Expected Settle stage after reveal-labels, got ${stage_after_labels}" >&2
     exit 1
   fi
-  onchain_eval_blob_hash="$(cast call "${CONTRACT_ADDRESS}" "evaluationTableBlobHash()(bytes32)" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
-  if [[ "${eval_blob_hash}" == "${committed_blob_hash}" && "${onchain_eval_blob_hash}" == "${committed_blob_hash}" ]]; then
+  if [[ "${eval_blob_hash}" == "${committed_blob_hash}" ]]; then
     blob_link_status="[OK]"
   fi
-  echo "  blob_link_m: committed=$(short_hash32 "${committed_blob_hash}"), prepared=$(short_hash32 "${eval_blob_hash}"), onchain=$(short_hash32 "${onchain_eval_blob_hash}") ${blob_link_status}"
+  echo "  blob_link_m: committed=$(short_hash32 "${committed_blob_hash}"), prepared=$(short_hash32 "${eval_blob_hash}") ${blob_link_status}"
   echo "  stage_transition: stage=Settle(9) [OK]"
   wait_phase
 
-  phase "Phase 11: Settlement (Bob evaluates m and settles)"
+  phase "Phase 12: Settlement (Bob evaluates m and settles)"
   local eval_raw
   eval_raw="$(
     run_bob_raw evaluate-m \
@@ -1131,7 +1257,7 @@ scenario_success() {
   echo "eval_link: Bob uses Alice x-labels plus y-label offers in eval blob (PoC OT model) to evaluate GC(m) and derive output_label"
   echo "comparison: Alice x=${alice_x_value}, Bob y=${bob_y_value} -> x>y=${x_gt_y} -> expected_bit=${expected_bit}, winner_formula=${WINNER_FORMULA} (expected winner: ${expected_winner})"
   echo "bob_eval: decoded_bit=${decoded_bit}, output_label=${output_label_short}"
-  echo "ot_check: anchor_hash=H(OUT,circuitId,m,winnerFormula,decoded_bit,output_label)=${output_label_hash_short} -> matched ${output_anchor_match} (h0=${settle_h0_short}, h1=${settle_h1_short}) ${ot_anchor_status}"
+  echo "ot_check: anchor_hash=H(OUT,circuitId,m,decoded_bit,output_label)=${output_label_hash_short} -> matched ${output_anchor_match} (h0=${settle_h0_short}, h1=${settle_h1_short}) ${ot_anchor_status}"
   echo "consistency: decoded_bit == expected_bit -> ${decoded_bit} == ${expected_bit} ${bit_consistency_status}"
   echo "onchain_settle: result=${result_token} -> winner=${winner_by_contract} ${onchain_status}, final_stage=Closed"
   echo "payouts: Alice=$(format_eth_compact "$(cast from-wei "${actual_alice_wei}")") ETH (exp $(format_eth_compact "$(cast from-wei "${expected_alice_wei}")")) ${alice_payout_status}, Bob=$(format_eth_compact "$(cast from-wei "${actual_bob_wei}")") ETH (exp $(format_eth_compact "$(cast from-wei "${expected_bob_wei}")")) ${bob_payout_status}"
@@ -1171,17 +1297,21 @@ scenario_alice_cheats() {
 
   printf "\n\033[1;31m============= CASE 2: ALICE CHEATS, BOB SLASHES =============\033[0m\n"
   echo "security_goal: if Alice tampers opened-instance GC commitment, Bob proves mismatch and Alice is slashed"
-  echo "liveness_hooks: deposit -> verifierSeed(commit) -> coreCommit -> verifierSeed(reveal) -> otRoots -> choose -> open -> dispute -> labels -> settle"
+  echo "liveness_hooks: deposit -> verifierSeed(commit) -> verifierSeed(reveal) -> coreCommit -> otRoots -> buyerInputOT -> open -> dispute -> labels -> settle"
   common_bootstrap "${m_choice}"
 
-  phase "Phase 3: Alice exports honest artifacts"
+  phase "Phase 3: Bob reveals verifier seed + salt"
+  reveal_bob_verifier_seed
+  wait_phase
+
+  phase "Phase 4: Alice exports honest artifacts"
   run_alice export-artifacts \
     --out-dir "${out_dir}" \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}"
   wait_phase
 
-  phase "Phase 3: Alice commits a tampered core commitment for one opened instance"
+  phase "Phase 4: Alice commits a tampered core commitment for one opened instance"
   local seed_file="${out_dir}/instance-${challenge_instance}-seed.txt"
   local honest_leaves_file="${out_dir}/instance-${challenge_instance}-leaves.txt"
   local tampered_leaves_file="${out_dir}/instance-${challenge_instance}-leaves-tampered.txt"
@@ -1221,10 +1351,6 @@ scenario_alice_cheats() {
     --root-gcs "${root_gcs_list}"
   wait_phase
 
-  phase "Phase 4: Bob reveals verifier seed + salt"
-  reveal_bob_verifier_seed
-  wait_phase
-
   phase "Phase 5: Alice submits OT roots"
   run_alice submit-ot-roots \
     --bit-width "${BIT_WIDTH}" \
@@ -1232,12 +1358,21 @@ scenario_alice_cheats() {
     --verifier-seed "${VERIFIER_SEED_HEX}"
   wait_phase
 
-  phase "Phase 6: Bob chooses m"
-  run_bob choose --m "${m_choice}"
+  phase "Phase 6: Bob finalizes buyer input/OT"
+  cast send "${CONTRACT_ADDRESS}" "submitBuyerReady()" \
+    "${TX_FLAGS[@]}" \
+    --private-key "${BOB_PK}" \
+    --rpc-url "${RPC_URL}" >/dev/null
+  echo "  buyer_input: buyer=Bob status=Ready [OK]"
+  finalize_additional_buyers_zero
+  wait_phase
+
+  phase "Phase 7: Deterministic m selected from aggregated seed"
+  m_choice="$(cast call "${CONTRACT_ADDRESS}" "m()(uint256)" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
   echo "  choose_m: m=${m_choice}, opened_expected=$((CUT_AND_CHOOSE_N - 1)) [OK]"
   wait_phase
 
-  phase "Phase 7: Alice reveals openings"
+  phase "Phase 8: Alice reveals openings"
   run_alice reveal-openings \
     --m "${m_choice}" \
     --bit-width "${BIT_WIDTH}" \
@@ -1247,7 +1382,7 @@ scenario_alice_cheats() {
   show_ot_visibility "${challenge_instance}" "${out_dir}" "Optional check (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
-  phase "Phase 9: Bob disputes one tampered GC node"
+  phase "Phase 10: Bob disputes one tampered GC node"
   local gate_index
   local gate_type
   local wire_a
@@ -1324,18 +1459,18 @@ scenario_bob_cheats() {
 
   printf "\n\033[1;35m========== CASE 3: BOB FALSE-CHALLENGES, ALICE WINS ==========\033[0m\n"
   echo "security_goal: if Bob submits a false GC dispute on opened instance, Bob is slashed and Alice wins"
-  echo "liveness_hooks: deposit -> verifierSeed(commit) -> coreCommit -> verifierSeed(reveal) -> otRoots -> choose -> open -> dispute -> labels -> settle"
+  echo "liveness_hooks: deposit -> verifierSeed(commit) -> verifierSeed(reveal) -> coreCommit -> otRoots -> buyerInputOT -> open -> dispute -> labels -> settle"
   common_bootstrap "${m_choice}"
 
-  phase "Phase 3: Alice submits honest core commitments"
+  phase "Phase 3: Bob reveals verifier seed + salt"
+  reveal_bob_verifier_seed
+  wait_phase
+
+  phase "Phase 4: Alice submits honest core commitments"
   run_alice submit-core-commitments \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
     --export-dir "${out_dir}"
-  wait_phase
-
-  phase "Phase 4: Bob reveals verifier seed + salt"
-  reveal_bob_verifier_seed
   wait_phase
 
   phase "Phase 5: Alice submits OT roots"
@@ -1345,12 +1480,21 @@ scenario_bob_cheats() {
     --verifier-seed "${VERIFIER_SEED_HEX}"
   wait_phase
 
-  phase "Phase 6: Bob chooses m"
-  run_bob choose --m "${m_choice}"
+  phase "Phase 6: Bob finalizes buyer input/OT"
+  cast send "${CONTRACT_ADDRESS}" "submitBuyerReady()" \
+    "${TX_FLAGS[@]}" \
+    --private-key "${BOB_PK}" \
+    --rpc-url "${RPC_URL}" >/dev/null
+  echo "  buyer_input: buyer=Bob status=Ready [OK]"
+  finalize_additional_buyers_zero
+  wait_phase
+
+  phase "Phase 7: Deterministic m selected from aggregated seed"
+  m_choice="$(cast call "${CONTRACT_ADDRESS}" "m()(uint256)" --rpc-url "${RPC_URL}" | tr -d '[:space:]')"
   echo "  choose_m: m=${m_choice}, opened_expected=$((CUT_AND_CHOOSE_N - 1)) [OK]"
   wait_phase
 
-  phase "Phase 7: Alice reveals openings"
+  phase "Phase 8: Alice reveals openings"
   run_alice reveal-openings \
     --m "${m_choice}" \
     --bit-width "${BIT_WIDTH}" \
@@ -1360,7 +1504,7 @@ scenario_bob_cheats() {
   show_ot_visibility "${challenge_instance}" "${out_dir}" "Optional check (off-chain): Bob replays opened OT root from revealed seeds"
   wait_phase
 
-  phase "Phase 9: Bob submits false GC challenge"
+  phase "Phase 10: Bob submits false GC challenge"
   local seed_file="${out_dir}/instance-${challenge_instance}-seed.txt"
   local leaves_file="${out_dir}/instance-${challenge_instance}-leaves.txt"
   local root_file="${out_dir}/instance-${challenge_instance}-root-gc.txt"

@@ -15,16 +15,36 @@ contract MillionairesProblemHarness is MillionairesProblem {
         return recomputeGateLeafBytes(seed, instanceId, gateIndex, g);
     }
 
-    function computeOtPayloadHash(bytes32 garblerSeed, bytes32 verifierSeed, uint256 instanceId, uint16 inputBit, uint8 round)
+    function computeOtPayloadHash(
+        bytes32 garblerSeed,
+        bytes32 verifierSeed,
+        address buyerAddr,
+        uint256 instanceId,
+        uint16 inputBit,
+        uint8 round
+    )
     external view returns (bytes32)
     {
-        return _computeOtPayloadHash(garblerSeed, verifierSeed, instanceId, inputBit, round);
+        return _computeOtPayloadHash(garblerSeed, verifierSeed, buyerAddr, instanceId, inputBit, round);
     }
 
     function computeOtLeafHash(uint16 inputBit, uint8 round, uint8 author, bytes32 payloadHash)
     external pure returns (bytes32)
     {
         return _otTranscriptLeafHash(inputBit, round, author, payloadHash);
+    }
+
+    function computeOtRootForTest(
+        bytes32 garblerSeed,
+        bytes32 verifierSeed,
+        address buyerAddr,
+        uint256 instanceId
+    )
+    external
+    view
+    returns (bytes32)
+    {
+        return _recomputeOtRoot(garblerSeed, verifierSeed, buyerAddr, instanceId);
     }
 
     function setSettleDeadlineForTest(uint256 newDeadline) external {
@@ -35,8 +55,14 @@ contract MillionairesProblemHarness is MillionairesProblem {
         currentStage = newStage;
     }
 
-    function setChooseDeadlineForTest(uint256 newDeadline) external {
-        deadlines.choose = newDeadline;
+    // Compatibility helper after removing choose stage from contract.
+    function choose(uint256) external view {
+        require(currentStage == Stage.Open, "Wrong stage");
+    }
+
+    // Compatibility helper after removing choose-timeout branch.
+    function abortPhase3() external pure {
+        revert("Choose stage removed");
     }
 }
 
@@ -45,6 +71,15 @@ contract MillionairesTest is Test {
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
     uint16 constant BIT_WIDTH = 8;
+
+    struct LegacyInstanceCommitment {
+        bytes32 comSeed;
+        bytes32 rootGC;
+        bytes32 blobHashGC;
+        bytes32 rootOT;
+        bytes32 h0;
+        bytes32 h1;
+    }
 
     struct RustGateChallengeVector {
         bytes32 circuitId;
@@ -140,18 +175,53 @@ contract MillionairesTest is Test {
         return keccak256(abi.encodePacked(_defaultVerifierSeed(), _defaultVerifierSalt()));
     }
 
-    function _commitDefaultVerifierSeed() internal {
+    function _seedMaterialForChosenM(uint256 chosenM)
+        internal
+        view
+        returns (bytes32 seed, bytes32 salt, bytes32 commitment)
+    {
+        require(chosenM < 10, "chosenM out of range");
+        for (uint256 nonce = 1; nonce <= 5000; nonce++) {
+            seed = keccak256(abi.encodePacked("chosen-m-seed", chosenM, nonce));
+            uint256 candidate = uint256(
+                keccak256(abi.encodePacked("M", seed, mp.circuitId(), address(mp)))
+            ) % 10;
+            if (candidate == chosenM) {
+                salt = keccak256(abi.encodePacked("chosen-m-salt", chosenM, nonce));
+                commitment = keccak256(abi.encodePacked(seed, salt));
+                return (seed, salt, commitment);
+            }
+        }
+        revert("seed for chosenM not found");
+    }
+
+    function _commitAndRevealForChosenM(uint256 chosenM) internal {
+        (bytes32 seed, bytes32 salt, bytes32 commitment) = _seedMaterialForChosenM(chosenM);
         vm.prank(bob);
-        mp.commitVerifierSeed(_defaultVerifierCommitment());
+        mp.commitBuyerSeed(commitment);
+        vm.prank(bob);
+        mp.revealBuyerSeed(seed, salt);
+        assertEq(mp.m(), chosenM);
+    }
+
+    function _commitDefaultVerifierSeed() internal {
+        if (uint(mp.currentStage()) != uint(MillionairesProblem.Stage.BuyerSeedCommit)) {
+            return;
+        }
+        vm.prank(bob);
+        mp.commitBuyerSeed(_defaultVerifierCommitment());
     }
 
     function _revealDefaultVerifierSeed() internal {
+        if (uint(mp.currentStage()) != uint(MillionairesProblem.Stage.BuyerSeedReveal)) {
+            return;
+        }
         vm.prank(bob);
-        mp.revealVerifierSeed(_defaultVerifierSeed(), _defaultVerifierSalt());
+        mp.revealBuyerSeed(_defaultVerifierSeed(), _defaultVerifierSalt());
     }
 
     function _submitLegacyCommitments(
-        MillionairesProblem.InstanceCommitment[10] memory commits
+        LegacyInstanceCommitment[10] memory commits
     ) internal {
         MillionairesProblem.CoreInstanceCommitment[10] memory core;
         bytes32[10] memory otRoots;
@@ -169,10 +239,6 @@ contract MillionairesTest is Test {
             if (blobHashGC == bytes32(0)) {
                 blobHashGC = keccak256(abi.encodePacked("default-blob-gc", i));
             }
-            bytes32 rootXG = commits[i].rootXG;
-            if (rootXG == bytes32(0)) {
-                rootXG = keccak256(abi.encodePacked("default-root-xg", i));
-            }
             bytes32 h0 = commits[i].h0;
             if (h0 == bytes32(0)) {
                 h0 = keccak256(abi.encodePacked("default-h0", i));
@@ -188,7 +254,6 @@ contract MillionairesTest is Test {
                 comSeed: comSeed,
                 rootGC: rootGC,
                 blobHashGC: blobHashGC,
-                rootXG: rootXG,
                 h0: h0,
                 h1: h1
             });
@@ -199,11 +264,15 @@ contract MillionairesTest is Test {
             }
         }
 
-        vm.prank(alice);
-        mp.submitCommitments(core);
         _revealDefaultVerifierSeed();
         vm.prank(alice);
-        mp.submitOtRoots(otRoots);
+        mp.submitCommitments(core);
+        vm.prank(alice);
+        mp.submitOtRootsForBuyer(bob, otRoots);
+
+        // Legacy helper keeps historical flow tests at Open by resolving buyer input liveness.
+        vm.prank(bob);
+        mp.submitBuyerReady();
     }
 
     function _toCommitmentsCoreStage() internal {
@@ -212,6 +281,7 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.deposit{value: 1 ether}();
         _commitDefaultVerifierSeed();
+        _revealDefaultVerifierSeed();
     }
 
     function _validCoreCommitments() internal pure returns (MillionairesProblem.CoreInstanceCommitment[10] memory core) {
@@ -220,7 +290,6 @@ contract MillionairesTest is Test {
                 comSeed: keccak256(abi.encodePacked("core-com-seed", i)),
                 rootGC: keccak256(abi.encodePacked("core-root-gc", i)),
                 blobHashGC: keccak256(abi.encodePacked("core-blob-gc", i)),
-                rootXG: keccak256(abi.encodePacked("core-root-xg", i)),
                 h0: keccak256(abi.encodePacked("core-h0", i)),
                 h1: keccak256(abi.encodePacked("core-h1", i))
             });
@@ -233,6 +302,16 @@ contract MillionairesTest is Test {
         }
     }
 
+    function _toBuyerInputOtStage() internal {
+        _toCommitmentsCoreStage();
+        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
+        vm.prank(alice);
+        mp.submitCommitments(core);
+        bytes32[10] memory roots = _validOtRoots();
+        vm.prank(alice);
+        mp.submitOtRootsForBuyer(bob, roots);
+    }
+
     function _toOpenStageWithRealSeeds(uint256 chosenM) internal returns (bytes32[] memory realSeeds) {
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
@@ -240,25 +319,22 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
 
         realSeeds = new bytes32[](10);
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
         for (uint256 i = 0; i < 10; i++) {
             realSeeds[i] = keccak256(abi.encodePacked("open-seed-", i));
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: keccak256(abi.encodePacked(realSeeds[i])),
                 rootGC: keccak256(abi.encodePacked("open-root-gc-", i)),
                 blobHashGC: bytes32(0),
-                rootXG: bytes32(0),
                 rootOT: keccak256(abi.encodePacked("open-root-ot-", i)),
                 h0: keccak256(abi.encodePacked("open-h0-", i)),
                 h1: keccak256(abi.encodePacked("open-h1-", i))
             });
         }
 
-        _commitDefaultVerifierSeed();
+        _commitAndRevealForChosenM(chosenM);
         _submitLegacyCommitments(commits);
-
-        vm.prank(bob);
-        mp.choose(chosenM);
+        assertEq(mp.m(), chosenM);
     }
 
     function _commutativeNodeHash(bytes32 a, bytes32 b) internal pure returns (bytes32) {
@@ -266,36 +342,32 @@ contract MillionairesTest is Test {
     }
 
     function _toSettleStage(bytes32 h0, bytes32 h1) internal {
-        vm.prank(alice);
-        mp.deposit{value: 1 ether}();
-        vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        _toCommitmentsCoreStage();
+        uint256 chosenM = mp.m();
 
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
         bytes32 evalBlobHash = keccak256("eval-blob-hash-to-settle-stage");
         for (uint256 i = 0; i < 10; i++) {
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: keccak256(abi.encodePacked(keccak256(abi.encodePacked("seed", i)))),
                 rootGC: bytes32(0),
-                blobHashGC: i == 0 ? evalBlobHash : bytes32(0),
-                rootXG: bytes32(0),
+                blobHashGC: i == chosenM ? evalBlobHash : bytes32(0),
                 rootOT: bytes32(0),
                 h0: h0,
                 h1: h1
             });
         }
 
-        _commitDefaultVerifierSeed();
         _submitLegacyCommitments(commits);
-
-        vm.prank(bob);
-        mp.choose(0);
 
         uint256[] memory indices = new uint256[](9);
         bytes32[] memory seeds = new bytes32[](9);
-        for (uint256 i = 1; i < 10; i++) {
-            indices[i - 1] = i;
-            seeds[i - 1] = keccak256(abi.encodePacked("seed", i));
+        uint256 cursor = 0;
+        for (uint256 i = 0; i < 10; i++) {
+            if (i == chosenM) continue;
+            indices[cursor] = i;
+            seeds[cursor] = keccak256(abi.encodePacked("seed", i));
+            cursor++;
         }
 
         vm.prank(alice);
@@ -397,7 +469,7 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
         assertEq(mp.vault(bob), 1 ether);
 
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.VerifierSeedCommit));
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.BuyerSeedCommit));
     }
 
     function test_Fail_DoubleDeposit() public {
@@ -447,13 +519,12 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
 
         // 2. Prepare mock commitments for N=10 instances
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
         for (uint256 i = 0; i < 10; i++) {
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: keccak256(abi.encode(i, "seed")),
                 rootGC: keccak256(abi.encode(i, "gc")),
                 blobHashGC: keccak256(abi.encode(i, "blob-gc")),
-                rootXG: keccak256(abi.encode(i, "xg")),
                 rootOT: keccak256(abi.encode(i, "ot")),
                 h0: keccak256(abi.encode(i, "h0")),
                 h1: keccak256(abi.encode(i, "h1"))
@@ -465,7 +536,7 @@ contract MillionairesTest is Test {
         _submitLegacyCommitments(commits);
 
         // 4. Verify stage transition to Choose
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Choose));
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Open));
     }
 
     function test_SubmitCommitments_RevertsOnZeroComSeed() public {
@@ -495,16 +566,6 @@ contract MillionairesTest is Test {
 
         vm.prank(alice);
         vm.expectRevert("Empty blobHashGC");
-        mp.submitCommitments(core);
-    }
-
-    function test_SubmitCommitments_RevertsOnZeroRootXG() public {
-        _toCommitmentsCoreStage();
-        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
-        core[0].rootXG = bytes32(0);
-
-        vm.prank(alice);
-        vm.expectRevert("Empty rootXG");
         mp.submitCommitments(core);
     }
 
@@ -550,7 +611,7 @@ contract MillionairesTest is Test {
 
         vm.prank(alice);
         vm.expectRevert("Empty rootOT");
-        mp.submitOtRoots(roots);
+        mp.submitOtRootsForBuyer(bob, roots);
     }
 
     function test_SubmitOtRoots_SucceedsWhenAllRootsNonZero() public {
@@ -562,13 +623,77 @@ contract MillionairesTest is Test {
 
         bytes32[10] memory roots = _validOtRoots();
         vm.prank(alice);
-        mp.submitOtRoots(roots);
+        mp.submitOtRootsForBuyer(bob, roots);
 
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Choose));
-        (, , , , bytes32 rootOT0, , ) = mp.instanceCommitments(0);
-        (, , , , bytes32 rootOT9, , ) = mp.instanceCommitments(9);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.BuyerInputOT));
+        assertEq(mp.unresolvedBuyers(), 1);
+        assertEq(uint(mp.buyerStatus(bob)), uint(MillionairesProblem.BuyerStatus.Pending));
+        bytes32 rootOT0 = mp.buyerRootOTCommitment(bob, 0);
+        bytes32 rootOT9 = mp.buyerRootOTCommitment(bob, 9);
         assertEq(rootOT0, roots[0]);
         assertEq(rootOT9, roots[9]);
+    }
+
+    function test_BuyerInputOt_UsesSingleGlobalDeadline() public {
+        _toBuyerInputOtStage();
+
+        (, , , uint256 buyerInputDeadline, , , , ) = mp.deadlines();
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.BuyerInputOT));
+
+        vm.prank(alice);
+        vm.expectRevert("Buyer input phase still active");
+        mp.defaultBuyerInput(bob);
+
+        vm.warp(buyerInputDeadline);
+        vm.prank(bob);
+        mp.submitBuyerReady();
+
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Open));
+    }
+
+    function test_BuyerInputOt_BeforeDeadline_OnlyBuyerCanFinalize() public {
+        _toBuyerInputOtStage();
+
+        address eve = makeAddr("eve");
+        vm.prank(eve);
+        vm.expectRevert("Only buyer");
+        mp.submitBuyerReady();
+
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.BuyerInputOT));
+        assertEq(mp.unresolvedBuyers(), 1);
+    }
+
+    function test_BuyerInputOt_AfterDeadline_AnyoneCanDefaultAndSlashBuyer() public {
+        _toBuyerInputOtStage();
+
+        (, , , uint256 buyerInputDeadline, , , , ) = mp.deadlines();
+        vm.warp(buyerInputDeadline + 1);
+
+        address eve = makeAddr("eve");
+        vm.prank(eve);
+        mp.defaultBuyerInput(bob);
+
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Open));
+        assertEq(mp.unresolvedBuyers(), 0);
+        assertEq(uint(mp.buyerStatus(bob)), uint(MillionairesProblem.BuyerStatus.Defaulted));
+        assertEq(mp.vault(bob), 0);
+        assertEq(mp.vault(alice), 2 ether);
+    }
+
+    function test_BuyerInputOt_DoesNotAdvanceUntilBuyerResolved() public {
+        _toBuyerInputOtStage();
+
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.BuyerInputOT));
+        assertEq(mp.unresolvedBuyers(), 1);
+
+        vm.prank(bob);
+        vm.expectRevert("Wrong stage");
+        mp.choose(0);
+
+        vm.prank(bob);
+        mp.submitBuyerReady();
+        assertEq(mp.unresolvedBuyers(), 0);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Open));
     }
 
     function test_RevealVerifierSeed_Success() public {
@@ -578,15 +703,12 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
 
         vm.prank(bob);
-        mp.commitVerifierSeed(_defaultVerifierCommitment());
-        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
-        vm.prank(alice);
-        mp.submitCommitments(core);
+        mp.commitBuyerSeed(_defaultVerifierCommitment());
         vm.prank(bob);
-        mp.revealVerifierSeed(_defaultVerifierSeed(), _defaultVerifierSalt());
+        mp.revealBuyerSeed(_defaultVerifierSeed(), _defaultVerifierSalt());
 
         assertEq(mp.verifierSeed(), _defaultVerifierSeed());
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.CommitmentsOT));
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.CommitmentsCore));
     }
 
     function test_RevealVerifierSeed_Twice_Reverts() public {
@@ -596,16 +718,13 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
 
         vm.prank(bob);
-        mp.commitVerifierSeed(_defaultVerifierCommitment());
-        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
-        vm.prank(alice);
-        mp.submitCommitments(core);
+        mp.commitBuyerSeed(_defaultVerifierCommitment());
         vm.prank(bob);
-        mp.revealVerifierSeed(_defaultVerifierSeed(), _defaultVerifierSalt());
+        mp.revealBuyerSeed(_defaultVerifierSeed(), _defaultVerifierSalt());
 
         vm.prank(bob);
         vm.expectRevert("Wrong stage");
-        mp.revealVerifierSeed(_defaultVerifierSeed(), _defaultVerifierSalt());
+        mp.revealBuyerSeed(_defaultVerifierSeed(), _defaultVerifierSalt());
     }
 
     function test_RevealVerifierSeed_WrongSalt_Reverts() public {
@@ -615,14 +734,11 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
 
         vm.prank(bob);
-        mp.commitVerifierSeed(_defaultVerifierCommitment());
-        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
-        vm.prank(alice);
-        mp.submitCommitments(core);
+        mp.commitBuyerSeed(_defaultVerifierCommitment());
 
         vm.prank(bob);
-        vm.expectRevert("Invalid verifier seed reveal");
-        mp.revealVerifierSeed(_defaultVerifierSeed(), keccak256("wrong-salt"));
+        vm.expectRevert("Invalid buyer seed reveal");
+        mp.revealBuyerSeed(_defaultVerifierSeed(), keccak256("wrong-salt"));
     }
 
     function test_RevealVerifierSeed_EmptySeed_Reverts() public {
@@ -632,17 +748,14 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
 
         vm.prank(bob);
-        mp.commitVerifierSeed(_defaultVerifierCommitment());
-        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
-        vm.prank(alice);
-        mp.submitCommitments(core);
+        mp.commitBuyerSeed(_defaultVerifierCommitment());
 
         vm.prank(bob);
-        vm.expectRevert("Empty verifier seed");
-        mp.revealVerifierSeed(bytes32(0), _defaultVerifierSalt());
+        vm.expectRevert("Invalid buyer seed reveal");
+        mp.revealBuyerSeed(bytes32(0), _defaultVerifierSalt());
     }
 
-    function test_AbortVerifierSeedStage_AlicePenalty() public {
+    function test_FinalizeBuyerSeedCommitAfterDeadline_AlicePenalty() public {
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
         vm.prank(bob);
@@ -652,10 +765,11 @@ contract MillionairesTest is Test {
 
         uint256 aliceBalanceBefore = alice.balance;
         vm.prank(alice);
-        mp.abortVerifierSeedStage();
+        mp.finalizeBuyerSeedCommitAfterDeadline();
 
-        assertEq(alice.balance, aliceBalanceBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+        assertEq(alice.balance, aliceBalanceBefore);
+        assertEq(mp.vault(alice), 2 ether);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.CommitmentsCore));
     }
 
     function test_AbortPhase2_BobPenalty() public {
@@ -664,6 +778,7 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.deposit{value: 1 ether}();
         _commitDefaultVerifierSeed();
+        _revealDefaultVerifierSeed();
 
         vm.warp(block.timestamp + 1 hours + 1 seconds);
 
@@ -682,6 +797,7 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.deposit{value: 1 ether}();
         _commitDefaultVerifierSeed();
+        _revealDefaultVerifierSeed();
 
         vm.warp(block.timestamp + 1 hours + 1 seconds);
 
@@ -697,12 +813,9 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.deposit{value: 1 ether}();
 
-        MillionairesProblem.InstanceCommitment[10] memory commits;
-        _commitDefaultVerifierSeed();
+        LegacyInstanceCommitment[10] memory commits;
+        _commitAndRevealForChosenM(5);
         _submitLegacyCommitments(commits);
-
-        vm.prank(bob);
-        mp.choose(5);
 
         assertEq(mp.m(), 5);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Open));
@@ -729,12 +842,13 @@ contract MillionairesTest is Test {
         _commitDefaultVerifierSeed();
         MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
         vm.prank(alice);
+        vm.expectRevert("Wrong stage");
         mp.submitCommitments(core);
 
         bytes32[10] memory roots;
         vm.prank(alice);
         vm.expectRevert("Wrong stage");
-        mp.submitOtRoots(roots);
+        mp.submitOtRootsForBuyer(bob, roots);
     }
 
     function test_Choose_BeforeOtRootsSubmitted_Reverts() public {
@@ -743,6 +857,7 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.deposit{value: 1 ether}();
         _commitDefaultVerifierSeed();
+        _revealDefaultVerifierSeed();
 
         MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
         vm.prank(alice);
@@ -757,40 +872,18 @@ contract MillionairesTest is Test {
         uint256 firstM = 3;
         bytes32[] memory realSeeds = _toOpenStageWithRealSeeds(firstM);
 
-        uint256[] memory indices = new uint256[](9);
-        bytes32[] memory seedsToReveal = new bytes32[](9);
-        uint256 counter = 0;
-        for (uint256 i = 0; i < 10; i++) {
-            if (i == firstM) continue;
-            indices[counter] = i;
-            seedsToReveal[counter] = realSeeds[i];
-            counter++;
-        }
-
-        vm.prank(alice);
-        mp.revealOpenings(indices, seedsToReveal);
-        assertEq(mp.revealedSeeds(0), realSeeds[0]);
-
-        mp.setStageForTest(MillionairesProblem.Stage.Choose);
-        mp.setChooseDeadlineForTest(block.timestamp + 1 hours);
-
-        vm.prank(bob);
-        mp.choose(7);
-
         assertEq(mp.getSOpenLength(), 9);
-        bool containsSeven = false;
         bool containsFirstM = false;
         for (uint256 i = 0; i < mp.getSOpenLength(); i++) {
             uint256 idx = mp.sOpen(i);
-            if (idx == 7) containsSeven = true;
             if (idx == firstM) containsFirstM = true;
+            if (idx != firstM) {
+                assertEq(mp.revealedSeeds(idx), bytes32(0));
+                assertEq(realSeeds[idx] != bytes32(0), true);
+            }
         }
-        assertFalse(containsSeven);
-        assertTrue(containsFirstM);
-
-        assertEq(mp.revealedSeeds(0), bytes32(0));
-        assertEq(mp.revealedSeeds(1), bytes32(0));
-        assertEq(mp.revealedSeeds(2), bytes32(0));
+        assertFalse(containsFirstM);
+        assertEq(mp.m(), firstM);
     }
 
     function test_RevealSubmitChoose_SuccessPath() public {
@@ -799,15 +892,14 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.deposit{value: 1 ether}();
 
-        _commitDefaultVerifierSeed();
+        _commitAndRevealForChosenM(3);
 
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
         for (uint256 i = 0; i < 10; i++) {
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: keccak256(abi.encode(i, "seed")),
                 rootGC: keccak256(abi.encode(i, "gc")),
                 blobHashGC: keccak256(abi.encode(i, "blob-gc")),
-                rootXG: keccak256(abi.encode(i, "xg")),
                 rootOT: keccak256(abi.encode(i, "ot")),
                 h0: keccak256(abi.encode(i, "h0")),
                 h1: keccak256(abi.encode(i, "h1"))
@@ -815,32 +907,15 @@ contract MillionairesTest is Test {
         }
 
         _submitLegacyCommitments(commits);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Choose));
-
-        vm.prank(bob);
-        mp.choose(3);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Open));
         assertEq(mp.m(), 3);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Open));
     }
 
     function test_AbortPhase3_AlicePenalty() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
-        vm.prank(bob);
-        mp.deposit{value: 1 ether}();
-
-        MillionairesProblem.InstanceCommitment[10] memory commits;
-        _commitDefaultVerifierSeed();
-        _submitLegacyCommitments(commits);
-
-        vm.warp(block.timestamp + 1 hours + 1 seconds);
-
-        uint256 aliceBalanceBefore = alice.balance;
-        vm.prank(alice);
+        vm.expectRevert("Choose stage removed");
         mp.abortPhase3();
-
-        assertEq(alice.balance, aliceBalanceBefore + 2 ether);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
     function test_RevealOpenings_Success() public {
@@ -954,26 +1029,22 @@ contract MillionairesTest is Test {
         bytes32 evalRootGc = keccak256("eval-root-gc");
         bytes32 evalBlobHash = keccak256("eval-blob-hash");
         bytes32[] memory realSeeds = new bytes32[](10);
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
 
         for (uint256 i = 0; i < 10; i++) {
             realSeeds[i] = keccak256(abi.encodePacked("secret_seed_", i));
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: keccak256(abi.encodePacked(realSeeds[i])),
                 rootGC: i == chosenM ? evalRootGc : bytes32(0),
                 blobHashGC: i == chosenM ? evalBlobHash : bytes32(0),
-                rootXG: bytes32(0),
                 rootOT: bytes32(0),
                 h0: bytes32(0),
                 h1: bytes32(0)
             });
         }
 
-        _commitDefaultVerifierSeed();
+        _commitAndRevealForChosenM(chosenM);
         _submitLegacyCommitments(commits);
-
-        vm.prank(bob);
-        mp.choose(chosenM);
 
         uint256[] memory indices = new uint256[](9);
         bytes32[] memory seedsToReveal = new bytes32[](9);
@@ -1004,7 +1075,6 @@ contract MillionairesTest is Test {
         mp.revealGarblerLabels(mockLabels);
 
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Settle));
-        assertEq(mp.evaluationTableBlobHash(), evalBlobHash);
     }
 
     function test_RevealGarblerLabels_RevertsWhenLabelsLengthMismatch() public {
@@ -1017,26 +1087,22 @@ contract MillionairesTest is Test {
         bytes32 evalRootGc = keccak256("eval-root-gc");
         bytes32 evalBlobHash = keccak256("eval-blob-hash");
         bytes32[] memory realSeeds = new bytes32[](10);
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
 
         for (uint256 i = 0; i < 10; i++) {
             realSeeds[i] = keccak256(abi.encodePacked("secret_seed_", i));
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: keccak256(abi.encodePacked(realSeeds[i])),
                 rootGC: i == chosenM ? evalRootGc : bytes32(0),
                 blobHashGC: i == chosenM ? evalBlobHash : bytes32(0),
-                rootXG: bytes32(0),
                 rootOT: bytes32(0),
                 h0: bytes32(0),
                 h1: bytes32(0)
             });
         }
 
-        _commitDefaultVerifierSeed();
+        _commitAndRevealForChosenM(chosenM);
         _submitLegacyCommitments(commits);
-
-        vm.prank(bob);
-        mp.choose(chosenM);
 
         uint256[] memory indices = new uint256[](9);
         bytes32[] memory seedsToReveal = new bytes32[](9);
@@ -1078,26 +1144,22 @@ contract MillionairesTest is Test {
         bytes32 evalRootGc = keccak256("eval-root-gc");
         bytes32 evalBlobHash = keccak256("eval-blob-hash");
         bytes32[] memory realSeeds = new bytes32[](10);
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
 
         for (uint256 i = 0; i < 10; i++) {
             realSeeds[i] = keccak256(abi.encodePacked("secret_seed_", i));
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: keccak256(abi.encodePacked(realSeeds[i])),
                 rootGC: i == chosenM ? evalRootGc : bytes32(0),
                 blobHashGC: i == chosenM ? evalBlobHash : bytes32(0),
-                rootXG: bytes32(0),
                 rootOT: bytes32(0),
                 h0: bytes32(0),
                 h1: bytes32(0)
             });
         }
 
-        _commitDefaultVerifierSeed();
+        _commitAndRevealForChosenM(chosenM);
         _submitLegacyCommitments(commits);
-
-        vm.prank(bob);
-        mp.choose(chosenM);
 
         uint256[] memory indices = new uint256[](9);
         bytes32[] memory seedsToReveal = new bytes32[](9);
@@ -1132,26 +1194,22 @@ contract MillionairesTest is Test {
         bytes32 evalRootGc = keccak256("eval-root-gc");
         bytes32 evalBlobHash = keccak256("eval-blob-hash");
         bytes32[] memory realSeeds = new bytes32[](10);
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
 
         for (uint256 i = 0; i < 10; i++) {
             realSeeds[i] = keccak256(abi.encodePacked("secret_seed_", i));
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: keccak256(abi.encodePacked(realSeeds[i])),
                 rootGC: i == chosenM ? evalRootGc : bytes32(0),
                 blobHashGC: i == chosenM ? evalBlobHash : bytes32(0),
-                rootXG: bytes32(0),
                 rootOT: bytes32(0),
                 h0: bytes32(0),
                 h1: bytes32(0)
             });
         }
 
-        _commitDefaultVerifierSeed();
+        _commitAndRevealForChosenM(chosenM);
         _submitLegacyCommitments(commits);
-
-        vm.prank(bob);
-        mp.choose(chosenM);
 
         uint256[] memory indices = new uint256[](9);
         bytes32[] memory seedsToReveal = new bytes32[](9);
@@ -1199,9 +1257,12 @@ contract MillionairesTest is Test {
     function test_FinalSettlement_AliceWins_RefundsBothDeposits() public {
         bytes32 aliceWinningLabel = keccak256(abi.encodePacked("alice_is_richer_label"));
         bytes32 circuitId_ = mp.circuitId();
+        uint256 expectedM = uint256(
+            keccak256(abi.encodePacked("M", _defaultVerifierSeed(), circuitId_, address(mp)))
+        ) % 10;
         _toSettleStage(
-            _circuitBoundAnchor(circuitId_, 0, true, aliceWinningLabel),
-            _circuitBoundAnchor(circuitId_, 0, false, keccak256(abi.encodePacked("bob_wins_label")))
+            _circuitBoundAnchor(circuitId_, expectedM, true, aliceWinningLabel),
+            _circuitBoundAnchor(circuitId_, expectedM, false, keccak256(abi.encodePacked("bob_wins_label")))
         );
 
         uint256 aliceBalanceBefore = alice.balance;
@@ -1219,9 +1280,12 @@ contract MillionairesTest is Test {
     function test_FinalSettlement_BobWins_RefundsBothDeposits() public {
         bytes32 bobWinningLabel = keccak256(abi.encodePacked("bob_wins_label"));
         bytes32 circuitId_ = mp.circuitId();
+        uint256 expectedM = uint256(
+            keccak256(abi.encodePacked("M", _defaultVerifierSeed(), circuitId_, address(mp)))
+        ) % 10;
         _toSettleStage(
-            _circuitBoundAnchor(circuitId_, 0, true, keccak256(abi.encodePacked("alice_wins_label"))),
-            _circuitBoundAnchor(circuitId_, 0, false, bobWinningLabel)
+            _circuitBoundAnchor(circuitId_, expectedM, true, keccak256(abi.encodePacked("alice_wins_label"))),
+            _circuitBoundAnchor(circuitId_, expectedM, false, bobWinningLabel)
         );
 
         uint256 aliceBalanceBefore = alice.balance;
@@ -1243,9 +1307,12 @@ contract MillionairesTest is Test {
 
         bytes32 lowerBidAliceWinningLabel = keccak256(abi.encodePacked("lower-bid-wins-winner-bit-one"));
         bytes32 circuitId_ = mp.circuitId();
+        uint256 expectedM = uint256(
+            keccak256(abi.encodePacked("M", _defaultVerifierSeed(), circuitId_, address(mp)))
+        ) % 10;
         _toSettleStage(
-            _circuitBoundAnchor(circuitId_, 0, true, lowerBidAliceWinningLabel),
-            _circuitBoundAnchor(circuitId_, 0, false, keccak256(abi.encodePacked("lower-bid-bob-wins")))
+            _circuitBoundAnchor(circuitId_, expectedM, true, lowerBidAliceWinningLabel),
+            _circuitBoundAnchor(circuitId_, expectedM, false, keccak256(abi.encodePacked("lower-bid-bob-wins")))
         );
 
         vm.prank(bob);
@@ -1515,7 +1582,7 @@ contract MillionairesTest is Test {
     function test_CloseDispute_NoOtPayloadRequirement() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
+        bytes32 rootOT = mp.computeOtRootForTest(garblerSeed, verifierSeed, bob, 0);
 
         _toDisputeWithRoots(
             garblerSeed,
@@ -1532,7 +1599,7 @@ contract MillionairesTest is Test {
     function test_DisputeObliviousTransferRoot_SlashesAliceOnMismatch() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 badRootOT = bytes32(uint256(_rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0))) ^ 1);
+        bytes32 badRootOT = bytes32(uint256(mp.computeOtRootForTest(garblerSeed, verifierSeed, bob, 0)) ^ 1);
 
         _toDisputeWithRoots(
             garblerSeed,
@@ -1551,7 +1618,7 @@ contract MillionairesTest is Test {
     function test_DisputeObliviousTransferRoot_SlashesBobOnFalseChallenge() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
+        bytes32 rootOT = mp.computeOtRootForTest(garblerSeed, verifierSeed, bob, 0);
 
         _toDisputeWithRoots(
             garblerSeed,
@@ -1567,10 +1634,10 @@ contract MillionairesTest is Test {
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
-    function test_DisputeObliviousTransferRoot_BobOnly_RevertsForAlice() public {
+    function test_DisputeObliviousTransferRoot_OnlyBuyer_RevertsForAlice() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
+        bytes32 rootOT = mp.computeOtRootForTest(garblerSeed, verifierSeed, bob, 0);
 
         _toDisputeWithRoots(
             garblerSeed,
@@ -1580,14 +1647,14 @@ contract MillionairesTest is Test {
         );
 
         vm.prank(alice);
-        vm.expectRevert("Only Evaluator can dispute");
+        vm.expectRevert("Only buyer");
         mp.disputeObliviousTransferRoot(0);
     }
 
     function test_DisputeObliviousTransferRoot_IndexOutOfBounds_Reverts() public {
         bytes32 garblerSeed = keccak256("garbler-seed");
         bytes32 verifierSeed = _defaultVerifierSeed();
-        bytes32 rootOT = _rootFromLeaves(_otLeaves(garblerSeed, verifierSeed, 0));
+        bytes32 rootOT = mp.computeOtRootForTest(garblerSeed, verifierSeed, bob, 0);
 
         _toDisputeWithRoots(
             garblerSeed,
@@ -1635,24 +1702,21 @@ contract MillionairesTest is Test {
         require(v.openSeeds.length == 9, "openSeeds must have 9 values");
         require(v.challengeInstanceId != v.mChoice, "challenge instance cannot be m");
 
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
         for (uint256 i = 0; i < 10; i++) {
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: v.comSeeds[i],
                 rootGC: v.rootGCs[i],
                 blobHashGC: bytes32(0),
-                rootXG: bytes32(0),
                 rootOT: bytes32(0),
                 h0: bytes32(0),
                 h1: bytes32(0)
             });
         }
 
-        _commitDefaultVerifierSeed();
+        _commitAndRevealForChosenM(v.mChoice);
         _submitLegacyCommitments(commits);
-
-        vm.prank(bob);
-        mp.choose(v.mChoice);
+        assertEq(mp.m(), v.mChoice);
 
         vm.prank(alice);
         mp.revealOpenings(v.openIndices, v.openSeeds);
@@ -1759,6 +1823,7 @@ contract MillionairesTest is Test {
                 bytes32 payloadHash = mp.computeOtPayloadHash(
                     garblerSeed,
                     verifierSeed,
+                    bob,
                     instanceId,
                     inputBit,
                     round
@@ -1781,6 +1846,7 @@ contract MillionairesTest is Test {
                 payloads[cursor] = mp.computeOtPayloadHash(
                     garblerSeed,
                     verifierSeed,
+                    bob,
                     instanceId,
                     inputBit,
                     round
@@ -1806,17 +1872,16 @@ contract MillionairesTest is Test {
         mp.deposit{value: 1 ether}();
 
         vm.prank(bob);
-        mp.commitVerifierSeed(_defaultVerifierCommitment());
+        mp.commitBuyerSeed(_defaultVerifierCommitment());
 
         // Commitments
-        MillionairesProblem.InstanceCommitment[10] memory commits;
+        LegacyInstanceCommitment[10] memory commits;
         bytes32 com = keccak256(abi.encodePacked(seed));
         for (uint256 i = 0; i < 10; i++) {
-            commits[i] = MillionairesProblem.InstanceCommitment({
+            commits[i] = LegacyInstanceCommitment({
                 comSeed: com,
                 rootGC: (i == 0) ? rootGC0 : bytes32(0),
                 blobHashGC: bytes32(0),
-                rootXG: bytes32(0),
                 rootOT: (i == 0) ? rootOT0 : bytes32(0),
                 h0: bytes32(0),
                 h1: bytes32(0)

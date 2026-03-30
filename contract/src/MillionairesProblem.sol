@@ -4,7 +4,6 @@ import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProo
 
 contract MillionairesProblem {
     address public alice; //Garbler
-    address public bob; //Evaluator
     bool public result;
 
     // Number of instances for Cut-and-Choose
@@ -14,53 +13,55 @@ contract MillionairesProblem {
     uint256 public m;
     uint256[] public sOpen;
 
-    bytes32 public evaluationTableBlobHash;
     bytes32 public circuitLayoutRoot;
 
     bytes32[] public garblerLabels;
 
     struct Deadlines {
-        uint256 deposit;          // Phase 1: Alice & Bob must lock funds
-        uint256 verifierSeed;    // Phase 2: Bob commit/reveal verifier randomness for OT replay
+        uint256 deposit;          // Phase 1: Alice + buyers must lock funds
+        uint256 verifierSeed;    // Phase 2: buyer seed commit/reveal windows
         uint256 commit;          // Phase 3: Alice submit core commitments, then OT roots
-        uint256 choose;          // Phase 4: Bob must pick index m
+        uint256 buyerInputOt;    // Phase 4: Buyers finalize input/OT state or get defaulted
         uint256 open;            // Phase 5: Alice must reveal n-1 seeds
         uint256 dispute;         // Phase 6: Off-chain verification + Dispute window
         uint256 labels;          // Phase 7: Alice must reveal garbler input labels
-        uint256 settle;          // Phase 8: Bob must submit final output label (Final result)
+        uint256 settle;          // Phase 8: participant submits final output label
     }
 
     struct InstanceCommitment {
         bytes32 comSeed;   // H(seedG[i])
         bytes32 rootGC;    // Terminal incremental-hash state over garbling artifacts for disputes
         bytes32 blobHashGC; // EIP-4844 versioned hash for evaluation payload blob (instance i)
-        bytes32 rootXG;    // Merkle root over G's input labels
-        bytes32 rootOT;    // Merkle root over public OT transcript leaves
         bytes32 h0;        // Anchor for winner-bit = 1 (Alice wins) under committed circuitId
-        bytes32 h1;        // Anchor for winner-bit = 0 (Bob wins) under committed circuitId
+        bytes32 h1;        // Anchor for winner-bit = 0 (buyer side wins) under committed circuitId
     }
 
     struct CoreInstanceCommitment {
         bytes32 comSeed;
         bytes32 rootGC;
         bytes32 blobHashGC;
-        bytes32 rootXG;
         bytes32 h0;
         bytes32 h1;
     }
 
     enum Stage {
         Deposits,
-        VerifierSeedCommit,
+        BuyerSeedCommit,
         CommitmentsCore,
-        VerifierSeedReveal,
+        BuyerSeedReveal,
         CommitmentsOT,
-        Choose,
+        BuyerInputOT,
         Open,
         Dispute,
         Labels,
         Settle,
         Closed
+    }
+
+    enum BuyerStatus {
+        Pending,
+        Ready,
+        Defaulted
     }
     Stage public currentStage;
 
@@ -74,39 +75,94 @@ contract MillionairesProblem {
 
     // Mapping to store revealed seeds for verification (index => seed)
     mapping(uint256 => bytes32) public revealedSeeds;
-    bytes32 public verifierSeedCommitment;
     bytes32 public verifierSeed;
-    bool public verifierSeedRevealed;
+    bool public verifierSeedFinalized;
     uint16 public bitWidth;
+    address[] private buyers;
+    mapping(address => bool) public isBuyer;
+    mapping(address => bytes32) public buyerSeedCommitment;
+    mapping(address => bytes32) public buyerSeed;
+    mapping(address => bool) public buyerSeedRevealed;
+    uint256 public pendingSeedCommits;
+    uint256 public pendingSeedReveals;
+    mapping(address => BuyerStatus) public buyerStatus;
+    mapping(address => mapping(uint256 => bytes32)) public buyerRootOTCommitment;
+    mapping(address => bool) public buyerOtRootsSubmitted;
+    uint256 public pendingBuyerOtRoots;
+    uint256 public unresolvedBuyers;
+    mapping(address => bool) public disputeClosedByBuyer;
+    uint256 public pendingDisputeBuyerClosures;
 
     constructor(
-        address _bob,
+        address _initialBuyer,
         bytes32 _circuitId,
         bytes32 _circuitLayoutRoot,
         uint16 _bitWidth
     ) {
         require(_bitWidth > 0, "bitWidth must be > 0");
+        require(_initialBuyer != address(0), "Zero buyer");
         alice = msg.sender;
-        bob = _bob;
         circuitId = _circuitId;
         circuitLayoutRoot = _circuitLayoutRoot;
         bitWidth = _bitWidth;
+        buyers.push(_initialBuyer);
+        isBuyer[_initialBuyer] = true;
 
         currentStage = Stage.Deposits;
         deadlines.deposit = block.timestamp + 1 hours;
     }
 
+    /**
+     * @dev Registers additional buyers before deposits begin.
+     * Extends buyer set B1..Bn.
+     */
+    function registerBuyers(address[] calldata additionalBuyers) external {
+        require(currentStage == Stage.Deposits, "Wrong stage");
+        require(msg.sender == alice, "Only Alice");
+        require(vault[alice] == 0, "Deposits already started");
+
+        for (uint256 i = 0; i < additionalBuyers.length; i++) {
+            address buyerAddr = additionalBuyers[i];
+            require(buyerAddr != address(0), "Zero buyer");
+            require(buyerAddr != alice, "Alice cannot be buyer");
+            require(!isBuyer[buyerAddr], "Buyer already registered");
+
+            buyers.push(buyerAddr);
+            isBuyer[buyerAddr] = true;
+        }
+    }
+
+    function buyerCount() external view returns (uint256) {
+        return buyers.length;
+    }
+
+    function buyerAt(uint256 index) external view returns (address) {
+        require(index < buyers.length, "Buyer index out of bounds");
+        return buyers[index];
+    }
+
+    function _allBuyerDepositsPresent() internal view returns (bool) {
+        for (uint256 i = 0; i < buyers.length; i++) {
+            if (vault[buyers[i]] != DEPOSIT_EVALUATOR) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     function deposit() external payable {
         require(currentStage == Stage.Deposits, "Wrong stage");
         require(block.timestamp <= deadlines.deposit, "Deposit deadline missed");
-        require(msg.sender == alice || msg.sender == bob, "Not authorized");
+        require(msg.sender == alice || isBuyer[msg.sender], "Not authorized");
         require(vault[msg.sender] == 0, "Deposit already exists");
         require(msg.value == (msg.sender == alice ?
             DEPOSIT_GARBLER : DEPOSIT_EVALUATOR), "Wrong amount");
 
         vault[msg.sender] += msg.value;
-        if (vault[alice] == DEPOSIT_GARBLER && vault[bob] == DEPOSIT_EVALUATOR) {
-            currentStage = Stage.VerifierSeedCommit;
+        if (vault[alice] == DEPOSIT_GARBLER && _allBuyerDepositsPresent()) {
+            currentStage = Stage.BuyerSeedCommit;
+            pendingSeedCommits = buyers.length;
+            pendingSeedReveals = 0;
             deadlines.verifierSeed = block.timestamp + 1 hours;
         }
     }
@@ -127,41 +183,140 @@ contract MillionairesProblem {
         require(success, "Transfer failed");
     }
 
-    /**
-     * @dev Phase 2a: Bob commits verifier randomness hash before Alice submits commitments.
-     */
-    function commitVerifierSeed(bytes32 commitment) external {
-        require(currentStage == Stage.VerifierSeedCommit, "Wrong stage");
-        require(msg.sender == bob, "Only Evaluator");
-        require(block.timestamp <= deadlines.verifierSeed, "Verifier seed deadline missed");
-        require(verifierSeedCommitment == bytes32(0), "Verifier seed already committed");
-        require(commitment != bytes32(0), "Empty verifier seed commitment");
+    function _isParticipant(address actor) internal view returns (bool) {
+        return actor == alice || isBuyer[actor];
+    }
 
-        verifierSeedCommitment = commitment;
+    function _enterBuyerSeedRevealStage() internal {
+        currentStage = Stage.BuyerSeedReveal;
+        deadlines.verifierSeed = block.timestamp + 1 hours;
+        pendingSeedReveals = 0;
+
+        for (uint256 i = 0; i < buyers.length; i++) {
+            address buyerAddr = buyers[i];
+            if (buyerSeedCommitment[buyerAddr] != bytes32(0)) {
+                if (!buyerSeedRevealed[buyerAddr]) {
+                    pendingSeedReveals += 1;
+                }
+            } else {
+                buyerSeed[buyerAddr] = bytes32(0);
+                buyerSeedRevealed[buyerAddr] = true;
+            }
+        }
+
+        if (pendingSeedReveals == 0) {
+            _finalizeBuyerSeedAndEnterCommitments();
+        }
+    }
+
+    function _finalizeBuyerSeedAndEnterCommitments() internal {
+        bytes32 aggregate = bytes32(0);
+        for (uint256 i = 0; i < buyers.length; i++) {
+            aggregate = bytes32(uint256(aggregate) ^ uint256(buyerSeed[buyers[i]]));
+        }
+        verifierSeed = aggregate;
+        verifierSeedFinalized = true;
+        m = uint256(keccak256(abi.encodePacked("M", verifierSeed, circuitId, address(this)))) % N;
+
+        for (uint256 i = 0; i < sOpen.length; i++) {
+            delete revealedSeeds[sOpen[i]];
+        }
+        delete sOpen;
+        for (uint256 i = 0; i < N; i++) {
+            if (i != m) {
+                sOpen.push(i);
+            }
+        }
+
         currentStage = Stage.CommitmentsCore;
         deadlines.commit = block.timestamp + 1 hours;
     }
 
     /**
-     * @dev Phase 2b: Bob reveals verifier randomness used for opened-instance OT root replay.
-     * Alice uses this seed together with each opened garbler seed to derive rootOT commitments.
+     * @dev Phase 2a: buyer commits seed-hash.
      */
-    function revealVerifierSeed(bytes32 seed, bytes32 salt) external {
-        require(currentStage == Stage.VerifierSeedReveal, "Wrong stage");
-        require(msg.sender == bob, "Only Evaluator");
-        require(block.timestamp <= deadlines.verifierSeed, "Verifier seed deadline missed");
-        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
-        require(!verifierSeedRevealed, "Verifier seed already revealed");
-        require(seed != bytes32(0), "Empty verifier seed");
+    function commitBuyerSeed(bytes32 commitment) public {
+        require(currentStage == Stage.BuyerSeedCommit, "Wrong stage");
+        require(block.timestamp <= deadlines.verifierSeed, "Seed-commit deadline missed");
+        require(isBuyer[msg.sender], "Only buyer");
+        require(commitment != bytes32(0), "Empty buyer seed commitment");
+        require(buyerSeedCommitment[msg.sender] == bytes32(0), "Buyer seed already committed");
+
+        buyerSeedCommitment[msg.sender] = commitment;
+        pendingSeedCommits -= 1;
+        if (pendingSeedCommits == 0) {
+            _enterBuyerSeedRevealStage();
+        }
+    }
+
+    /**
+     * @dev Phase 2a liveness: after deadline, anyone can finalize seed-commit stage.
+     * Non-committed buyers are defaulted to seed=0 and slashed.
+     */
+    function finalizeBuyerSeedCommitAfterDeadline() public {
+        require(currentStage == Stage.BuyerSeedCommit, "Wrong stage");
+        require(block.timestamp > deadlines.verifierSeed, "Seed-commit phase still active");
+        require(_isParticipant(msg.sender), "Only participant");
+
+        for (uint256 i = 0; i < buyers.length; i++) {
+            address buyerAddr = buyers[i];
+            if (buyerSeedCommitment[buyerAddr] == bytes32(0)) {
+                uint256 slashed = vault[buyerAddr];
+                vault[buyerAddr] = 0;
+                vault[alice] += slashed;
+                buyerSeed[buyerAddr] = bytes32(0);
+                buyerSeedRevealed[buyerAddr] = true;
+            }
+        }
+
+        pendingSeedCommits = 0;
+        _enterBuyerSeedRevealStage();
+    }
+
+    /**
+     * @dev Phase 2b: buyer reveals seed and salt against prior commitment.
+     */
+    function revealBuyerSeed(bytes32 seed, bytes32 salt) public {
+        require(currentStage == Stage.BuyerSeedReveal, "Wrong stage");
+        require(block.timestamp <= deadlines.verifierSeed, "Seed-reveal deadline missed");
+        require(isBuyer[msg.sender], "Only buyer");
+        require(buyerSeedCommitment[msg.sender] != bytes32(0), "Buyer seed not committed");
+        require(!buyerSeedRevealed[msg.sender], "Buyer seed already revealed");
         require(
-            keccak256(abi.encodePacked(seed, salt)) == verifierSeedCommitment,
-            "Invalid verifier seed reveal"
+            keccak256(abi.encodePacked(seed, salt)) == buyerSeedCommitment[msg.sender],
+            "Invalid buyer seed reveal"
         );
 
-        verifierSeed = seed;
-        verifierSeedRevealed = true;
-        currentStage = Stage.CommitmentsOT;
-        deadlines.commit = block.timestamp + 1 hours;
+        buyerSeed[msg.sender] = seed;
+        buyerSeedRevealed[msg.sender] = true;
+        pendingSeedReveals -= 1;
+        if (pendingSeedReveals == 0) {
+            _finalizeBuyerSeedAndEnterCommitments();
+        }
+    }
+
+    /**
+     * @dev Phase 2b liveness: after deadline, anyone can finalize seed-reveal stage.
+     * Non-revealed committed buyers are defaulted to seed=0 and slashed.
+     */
+    function finalizeBuyerSeedRevealAfterDeadline() public {
+        require(currentStage == Stage.BuyerSeedReveal, "Wrong stage");
+        require(block.timestamp > deadlines.verifierSeed, "Seed-reveal phase still active");
+        require(_isParticipant(msg.sender), "Only participant");
+
+        for (uint256 i = 0; i < buyers.length; i++) {
+            address buyerAddr = buyers[i];
+            if (buyerSeedCommitment[buyerAddr] != bytes32(0) && !buyerSeedRevealed[buyerAddr]) {
+                uint256 slashed = vault[buyerAddr];
+                vault[buyerAddr] = 0;
+                vault[alice] += slashed;
+                buyerSeed[buyerAddr] = bytes32(0);
+                buyerSeedRevealed[buyerAddr] = true;
+            }
+        }
+
+        pendingSeedReveals = 0;
+        _finalizeBuyerSeedAndEnterCommitments();
     }
 
     /**
@@ -171,13 +326,12 @@ contract MillionairesProblem {
         require(currentStage == Stage.CommitmentsCore, "Wrong stage");
         require(msg.sender == alice, "Only Garbler");
         require(block.timestamp <= deadlines.commit, "Commitment deadline missed");
-        require(verifierSeedCommitment != bytes32(0), "Verifier seed not committed");
+        require(verifierSeedFinalized, "Verifier seed not finalized");
 
         for (uint256 i = 0; i < N; i++) {
             require(commitments[i].comSeed != bytes32(0), "Empty comSeed");
             require(commitments[i].rootGC != bytes32(0), "Empty rootGC");
             require(commitments[i].blobHashGC != bytes32(0), "Empty blobHashGC");
-            require(commitments[i].rootXG != bytes32(0), "Empty rootXG");
             require(commitments[i].h0 != bytes32(0), "Empty h0");
             require(commitments[i].h1 != bytes32(0), "Empty h1");
             require(commitments[i].h0 != commitments[i].h1, "h0 and h1 must differ");
@@ -185,93 +339,105 @@ contract MillionairesProblem {
             instanceCommitments[i].comSeed = commitments[i].comSeed;
             instanceCommitments[i].rootGC = commitments[i].rootGC;
             instanceCommitments[i].blobHashGC = commitments[i].blobHashGC;
-            instanceCommitments[i].rootXG = commitments[i].rootXG;
             instanceCommitments[i].h0 = commitments[i].h0;
             instanceCommitments[i].h1 = commitments[i].h1;
-            instanceCommitments[i].rootOT = bytes32(0);
         }
 
-        currentStage = Stage.VerifierSeedReveal;
-        deadlines.verifierSeed = block.timestamp + 1 hours;
+        currentStage = Stage.CommitmentsOT;
+        deadlines.commit = block.timestamp + 1 hours;
+        pendingBuyerOtRoots = buyers.length;
+        for (uint256 i = 0; i < buyers.length; i++) {
+            buyerOtRootsSubmitted[buyers[i]] = false;
+        }
     }
 
     /**
-     * @dev Phase 3b: Garbler submits OT roots for all N instances after Bob reveals verifier seed.
+     * @dev Phase 3b: Alice (garbler) commits buyer-scoped OT roots for all N instances.
+     * OT disputes verify this Alice commitment by recomputing expected buyer-bound roots.
      */
-    function submitOtRoots(bytes32[N] calldata rootOTs) external {
+    function submitOtRootsForBuyer(address buyerAddr, bytes32[N] calldata rootOTs) public {
         require(currentStage == Stage.CommitmentsOT, "Wrong stage");
         require(msg.sender == alice, "Only Garbler");
         require(block.timestamp <= deadlines.commit, "OT root deadline missed");
-        require(verifierSeedRevealed, "Verifier seed not revealed");
+        require(verifierSeedFinalized, "Verifier seed not finalized");
+        require(isBuyer[buyerAddr], "Not buyer");
+        require(!buyerOtRootsSubmitted[buyerAddr], "Buyer OT roots already submitted");
 
         for (uint256 i = 0; i < N; i++) {
             require(rootOTs[i] != bytes32(0), "Empty rootOT");
-            instanceCommitments[i].rootOT = rootOTs[i];
+            buyerRootOTCommitment[buyerAddr][i] = rootOTs[i];
         }
 
-        currentStage = Stage.Choose;
-        deadlines.choose = block.timestamp + 1 hours;
-    }
+        buyerOtRootsSubmitted[buyerAddr] = true;
+        pendingBuyerOtRoots -= 1;
 
-    /**
-     * @dev Phase 2 Timeout: If Bob fails to reveal verifier randomness, Alice can claim the penalty.
-     */
-    function abortVerifierSeedStage() external {
-        require(
-            currentStage == Stage.VerifierSeedCommit || currentStage == Stage.VerifierSeedReveal,
-            "Not in verifier-seed stage"
-        );
-        require(block.timestamp > deadlines.verifierSeed, "Bob is not late yet");
-        require(msg.sender == alice, "Only Alice can trigger this abort");
+        if (pendingBuyerOtRoots == 0) {
+            unresolvedBuyers = buyers.length;
+            for (uint256 i = 0; i < buyers.length; i++) {
+                address b = buyers[i];
+                buyerStatus[b] = BuyerStatus.Pending;
+            }
 
-        _slash(alice, bob);
-    }
-
-    /**
-     * @dev Phase 3 Timeout: If Alice fails to submit GC by the deadline.
-     * Bob can call this to reclaim his funds and Alice's collateral.
-     */
-    function abortPhase2() external {
-        require(
-            currentStage == Stage.CommitmentsCore || currentStage == Stage.CommitmentsOT,
-            "Not in commitment stage"
-        );
-        require(block.timestamp > deadlines.commit, "Alice is not late yet");
-        require(msg.sender == bob, "Only Bob can trigger this abort");
-
-        uint256 amountBob = vault[bob];
-        uint256 amountAlice = vault[alice];
-
-        vault[bob] = 0;
-        vault[alice] = 0;
-
-        uint256 totalPayout = amountBob + amountAlice;
-
-        (bool success, ) = payable(bob).call{value: totalPayout}("");
-        require(success, "Refund to Bob failed");
-        // Optional: Send a small amount to address(0)
-
-        currentStage = Stage.Closed;
-    }
-
-    /**
-     * @dev Phase 4: Bob chooses which instance to evaluate.
-     */
-    function choose(uint256 _m) external {
-        require(currentStage == Stage.Choose, "Wrong stage");
-        require(msg.sender == bob, "Only Evaluator");
-        require(block.timestamp <= deadlines.choose, "Choice deadline missed");
-        require(_m < N, "Index out of bounds");
-
-        // Defensive cleanup in case of re-entry/reuse in future protocol variants.
-        for (uint256 i = 0; i < sOpen.length; i++) {
-            delete revealedSeeds[sOpen[i]];
+            currentStage = Stage.BuyerInputOT;
+            deadlines.buyerInputOt = block.timestamp + 1 hours;
+            _tryAdvanceFromBuyerInputPhase();
         }
-        delete sOpen;
+    }
 
-        m = _m;
-        for (uint256 i = 0; i < N; i++) {
-            if (i != m) { sOpen.push(i); }
+    /**
+     * @dev Buyer-level liveness signal: buyer confirms readiness before deadline.
+     */
+    function submitBuyerReady() external {
+        require(currentStage == Stage.BuyerInputOT, "Wrong stage");
+        require(block.timestamp <= deadlines.buyerInputOt, "Buyer input deadline missed");
+        require(isBuyer[msg.sender], "Only buyer");
+        require(buyerStatus[msg.sender] == BuyerStatus.Pending, "Buyer already resolved");
+
+        buyerStatus[msg.sender] = BuyerStatus.Ready;
+        unresolvedBuyers -= 1;
+        _tryAdvanceFromBuyerInputPhase();
+    }
+
+    function _defaultBuyerInput(address buyerAddr) internal {
+        buyerStatus[buyerAddr] = BuyerStatus.Defaulted;
+        unresolvedBuyers -= 1;
+
+        uint256 slashed = vault[buyerAddr];
+        vault[buyerAddr] = 0;
+        vault[alice] += slashed;
+    }
+
+    function defaultBuyerInput(address buyerAddr) external {
+        require(currentStage == Stage.BuyerInputOT, "Wrong stage");
+        require(block.timestamp > deadlines.buyerInputOt, "Buyer input phase still active");
+        require(isBuyer[buyerAddr], "Not buyer");
+        require(buyerStatus[buyerAddr] == BuyerStatus.Pending, "Buyer already resolved");
+        _defaultBuyerInput(buyerAddr);
+
+        _tryAdvanceFromBuyerInputPhase();
+    }
+
+    function finalizeBuyerInputAfterDeadline() external {
+        require(currentStage == Stage.BuyerInputOT, "Wrong stage");
+        require(block.timestamp > deadlines.buyerInputOt, "Buyer input phase still active");
+        require(_isParticipant(msg.sender), "Only participant");
+
+        for (uint256 i = 0; i < buyers.length; i++) {
+            address buyerAddr = buyers[i];
+            if (buyerStatus[buyerAddr] == BuyerStatus.Pending) {
+                _defaultBuyerInput(buyerAddr);
+            }
+        }
+
+        _tryAdvanceFromBuyerInputPhase();
+    }
+
+    function _tryAdvanceFromBuyerInputPhase() internal {
+        if (currentStage != Stage.BuyerInputOT) {
+            return;
+        }
+        if (unresolvedBuyers != 0) {
+            return;
         }
 
         currentStage = Stage.Open;
@@ -279,23 +445,31 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 4 Timeout: If Bob fails to choose index m by the deadline.
-     * Alice can call this to reclaim her funds and Bob's collateral.
+     * @dev Phase 3 Timeout: If Alice misses deadlines.commit in CommitmentsCore or CommitmentsOT.
+     * This also covers missing per-buyer OT roots in CommitmentsOT.
+     * Any deposited buyer can abort and reclaim own deposit plus Alice collateral.
      */
-    function abortPhase3() external {
-        require(currentStage == Stage.Choose, "Not in choose stage");
-        require(block.timestamp > deadlines.choose, "Bob is not late yet");
-        require(msg.sender == alice, "Only Alice can trigger this abort");
+    function abortPhase2() external {
+        require(
+            currentStage == Stage.CommitmentsCore || currentStage == Stage.CommitmentsOT,
+            "Not in commitment stage"
+        );
+        require(block.timestamp > deadlines.commit, "Alice is not late yet");
+        require(isBuyer[msg.sender], "Only buyer can trigger this abort");
 
+        uint256 amountBuyer = vault[msg.sender];
         uint256 amountAlice = vault[alice];
-        uint256 amountBob = vault[bob];
 
+        vault[msg.sender] = 0;
         vault[alice] = 0;
-        vault[bob] = 0;
-        uint256 totalPayout = amountAlice + amountBob;
 
-        (bool success, ) = payable(alice).call{value: totalPayout}("");
-        require(success, "Refund to Alice failed");
+        _refundPassiveBuyers(msg.sender, msg.sender);
+        uint256 totalPayout = amountBuyer + amountAlice;
+
+        (bool success, ) = payable(msg.sender).call{value: totalPayout}("");
+        require(success, "Refund to buyer failed");
+        // Optional: Send a small amount to address(0)
+
         currentStage = Stage.Closed;
     }
 
@@ -343,6 +517,17 @@ contract MillionairesProblem {
             require(seen[sOpen[i]], "Missing sOpen index");
         }
 
+        pendingDisputeBuyerClosures = 0;
+        for (uint256 i = 0; i < buyers.length; i++) {
+            address buyerAddr = buyers[i];
+            if (buyerStatus[buyerAddr] == BuyerStatus.Ready) {
+                disputeClosedByBuyer[buyerAddr] = false;
+                pendingDisputeBuyerClosures += 1;
+            } else {
+                disputeClosedByBuyer[buyerAddr] = true;
+            }
+        }
+
         currentStage = Stage.Dispute;
         deadlines.dispute = block.timestamp + 1 hours;
         deadlines.labels  = deadlines.dispute + 1 hours;
@@ -350,21 +535,21 @@ contract MillionairesProblem {
 
     /**
      * @dev Phase 5 Timeout: If Alice fails to reveal seeds by the deadline.
-     * Bob can claim the penalty.
+     * Any buyer can claim the penalty.
      */
     function abortPhase4() external {
         require(currentStage == Stage.Open, "Not in open stage");
         require(block.timestamp > deadlines.open, "Alice is not late yet");
-        require(msg.sender == bob, "Only Bob can trigger this");
+        require(isBuyer[msg.sender], "Only buyer can trigger this");
 
         uint256 amountAlice = vault[alice];
-        uint256 amountBob = vault[bob];
+        uint256 amountBuyer = vault[msg.sender];
 
         vault[alice] = 0;
-        vault[bob] = 0;
+        vault[msg.sender] = 0;
+        _refundPassiveBuyers(msg.sender, msg.sender);
 
-        // Bob gets everything as compensation
-        (bool success, ) = payable(bob).call{value: amountAlice + amountBob}("");
+        (bool success, ) = payable(msg.sender).call{value: amountAlice + amountBuyer}("");
         require(success, "Penalty transfer failed");
 
         currentStage = Stage.Closed;
@@ -385,7 +570,6 @@ contract MillionairesProblem {
         require(bHash != bytes32(0), "Garbled Table Blob missing");
         require(bHash == instanceCommitments[m].blobHashGC, "Blob does not match Phase 2 commitment");
 
-        evaluationTableBlobHash = bHash;
         garblerLabels = _labels;
 
         currentStage = Stage.Settle;
@@ -394,25 +578,26 @@ contract MillionairesProblem {
 
     /**
      * @dev Phase 7 Timeout: If Alice fails to provide her input labels.
-     * Bob claims the penalty because he cannot evaluate the circuit.
+     * Any buyer can claim the penalty because they cannot evaluate the circuit.
      */
     function abortPhase5() external {
         require(currentStage == Stage.Labels, "Not in labels stage");
         require(block.timestamp > deadlines.labels, "Alice is not late yet");
-        require(msg.sender == bob, "Only Bob can trigger this");
+        require(isBuyer[msg.sender], "Only buyer can trigger this");
 
-        uint256 total = vault[alice] + vault[bob];
+        uint256 total = vault[alice] + vault[msg.sender];
         vault[alice] = 0;
-        vault[bob] = 0;
+        vault[msg.sender] = 0;
+        _refundPassiveBuyers(msg.sender, msg.sender);
 
-        (bool success, ) = payable(bob).call{value: total}("");
+        (bool success, ) = payable(msg.sender).call{value: total}("");
         require(success, "Penalty transfer failed");
 
         currentStage = Stage.Closed;
     }
 
 /**
-     * @dev Phase 6 (Dispute): Bob challenges one gate from one opened check-circuit.
+     * @dev Phase 6 (Dispute): Buyer challenges one gate from one opened check-circuit.
      * Delegates to `challengeGateLeaf` after explicit seed checks.
      * @param _idx Index of the opened circuit to challenge (must be in sOpen).
      * @param _seed Revealed seed for `_idx`, must match commitment.
@@ -425,7 +610,7 @@ contract MillionairesProblem {
     function disputeGarbledTable(uint256 _idx, bytes32 _seed, uint256 gateIndex, GateDesc calldata g, bytes calldata leafBytes,
         bytes32[] calldata ihProof, bytes32[] calldata layoutProof) external {
         require(currentStage == Stage.Dispute, "Not in Dispute stage");
-        require(msg.sender == bob, "Only Evaluator can dispute");
+        require(isBuyer[msg.sender], "Only buyer can dispute");
         require(_idx < N, "Index out of bounds");
         require(_isOpenInstance(_idx), "Not an opened instance");
         require(revealedSeeds[_idx] == _seed, "Seed mismatch");
@@ -460,41 +645,52 @@ contract MillionairesProblem {
     }
 
     /**
-     * @dev Phase 8: Bob (Evaluator) submits the final output label.
+     * @dev Phase 8: participant submits the final output label.
      * `_outputLabel` is a bytes16 GC output label zero-padded to bytes32 before submission.
      * Matching is done against circuit-bound winner anchors committed in `h0/h1`.
      * @param _outputLabel The label resulting from Ev(F, X).
      */
     function settle(bytes32 _outputLabel) external {
         require(currentStage == Stage.Settle, "Wrong stage");
-        require(msg.sender == bob, "Only Evaluator");
+        require(_isParticipant(msg.sender), "Only participant");
         require(block.timestamp <= deadlines.settle, "Settlement deadline missed");
 
         result = _decodeOutputBitFromLabel(_outputLabel);
 
         uint256 payoutAlice = vault[alice];
-        uint256 payoutBob = vault[bob];
         vault[alice] = 0;
-        vault[bob] = 0;
         (bool s1, ) = payable(alice).call{value: payoutAlice}("");
         require(s1, "Payout to Alice failed");
-        (bool s2, ) = payable(bob).call{value: payoutBob}("");
-        require(s2, "Payout to Bob failed");
+
+        for (uint256 i = 0; i < buyers.length; i++) {
+            address buyerAddr = buyers[i];
+            uint256 payoutBuyer = vault[buyerAddr];
+            vault[buyerAddr] = 0;
+            if (payoutBuyer == 0) {
+                continue;
+            }
+            (bool sBuyer, ) = payable(buyerAddr).call{value: payoutBuyer}("");
+            require(sBuyer, "Payout to buyer failed");
+        }
 
         currentStage = Stage.Closed;
     }
 
     /**
-     * @dev Phase 8 Timeout: If Bob fails to settle by deadline, Alice can claim funds.
+     * @dev Phase 8 Timeout: If settlement is not submitted by deadline, Alice can claim funds.
      */
     function abortPhase6() external {
         require(currentStage == Stage.Settle, "Not in settle stage");
         require(msg.sender == alice, "Only Alice can trigger this");
-        require(block.timestamp > deadlines.settle, "Bob is not late yet");
+        require(block.timestamp > deadlines.settle, "Settle deadline not reached");
 
-        uint256 total = vault[alice] + vault[bob];
+        uint256 total = vault[alice];
         vault[alice] = 0;
-        vault[bob] = 0;
+        for (uint256 i = 0; i < buyers.length; i++) {
+            address buyerAddr = buyers[i];
+            total += vault[buyerAddr];
+            vault[buyerAddr] = 0;
+        }
 
         (bool success, ) = payable(alice).call{value: total}("");
         require(success, "Refund to Alice failed");
@@ -507,12 +703,32 @@ contract MillionairesProblem {
     }
 
     /**
+     * @dev Refunds all registered buyers except the provided addresses.
+     */
+    function _refundPassiveBuyers(address skipA, address skipB) internal {
+        for (uint256 i = 0; i < buyers.length; i++) {
+            address buyerAddr = buyers[i];
+            if (buyerAddr == skipA || buyerAddr == skipB) {
+                continue;
+            }
+            uint256 amount = vault[buyerAddr];
+            vault[buyerAddr] = 0;
+            if (amount == 0) {
+                continue;
+            }
+            (bool ok, ) = payable(buyerAddr).call{value: amount}("");
+            require(ok, "Buyer refund failed");
+        }
+    }
+
+    /**
      * @dev Private helper to transfer all funds to the winner and close the contract.
      */
     function _slash(address _winner, address _loser) private {
         uint256 prize = vault[_winner] + vault[_loser];
         vault[_winner] = 0;
         vault[_loser] = 0;
+        _refundPassiveBuyers(_winner, _loser);
 
         (bool success, ) = payable(_winner).call{value: prize}("");
         require(success, "Slashed transfer failed");
@@ -522,15 +738,32 @@ contract MillionairesProblem {
 
     function closeDispute() external {
         require(currentStage == Stage.Dispute, "Wrong stage");
+        require(_isParticipant(msg.sender), "Only participant");
 
-        if (msg.sender == bob) {
+        if (block.timestamp > deadlines.dispute || pendingDisputeBuyerClosures == 0) {
             currentStage = Stage.Labels;
             return;
         }
 
-        require(msg.sender == alice, "Only Alice can close after deadline");
-        require(block.timestamp > deadlines.dispute, "Dispute window still open");
-        currentStage = Stage.Labels;
+        if (isBuyer[msg.sender]) {
+            require(buyerStatus[msg.sender] == BuyerStatus.Ready, "Buyer not active in dispute");
+            if (!disputeClosedByBuyer[msg.sender]) {
+                disputeClosedByBuyer[msg.sender] = true;
+                pendingDisputeBuyerClosures -= 1;
+            }
+            if (pendingDisputeBuyerClosures == 0) {
+                currentStage = Stage.Labels;
+            }
+            return;
+        }
+
+        if (msg.sender == alice) {
+            require(block.timestamp > deadlines.dispute, "Dispute window still open");
+            currentStage = Stage.Labels;
+            return;
+        }
+
+        revert("Only participant");
     }
 
     // ------ GC part ------
@@ -684,6 +917,7 @@ contract MillionairesProblem {
 
     event GateLeafChallenged(uint256 indexed instanceId, uint256 indexed gateIndex, bool mismatch);
     event OTInstanceRootChallenged(uint256 indexed instanceId, bool mismatch);
+    event OTBuyerRootChallenged(address indexed buyer, uint256 indexed instanceId, bool mismatch);
     event CheaterSlashed(address indexed cheater, address indexed beneficiary);
 
     function _isOpenInstance(uint256 instanceId) internal view returns (bool) {
@@ -735,7 +969,7 @@ contract MillionairesProblem {
         bytes32[] calldata ihProof, bytes32[] calldata layoutProof) public {
         require(currentStage == Stage.Dispute, "Wrong stage");
         require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
-        require(msg.sender == bob, "Only Bob for MVP");
+        require(isBuyer[msg.sender], "Only buyer for dispute");
 
         _assertValidLayoutProof(gateIndex, g, layoutProof);
         bytes32 seed = _requireRevealedSeedForOpenedInstance(instanceId);
@@ -754,28 +988,39 @@ contract MillionairesProblem {
         // 3) Slash depending on result
         if (!matchLeaf) {
             emit GateLeafChallenged(instanceId, gateIndex, true);
-            emit CheaterSlashed(alice, bob);
-            _slash(bob, alice);
+            emit CheaterSlashed(alice, msg.sender);
+            _slash(msg.sender, alice);
         } else {
             emit GateLeafChallenged(instanceId, gateIndex, false);
-            emit CheaterSlashed(bob, alice);
-            _slash(alice, bob);
+            emit CheaterSlashed(msg.sender, alice);
+            _slash(alice, msg.sender);
         }
     }
 
     /**
-     * @dev Phase 6 (Dispute): Bob challenges OT root commitment for one opened instance.
+     * @dev Phase 6 (Dispute): Buyer challenges OT root commitment for one opened instance.
      * Contract deterministically recomputes rootOT from (revealed garbler seed, revealed verifier seed)
      * and immediately resolves/slashes on mismatch or false challenge.
      */
     function disputeObliviousTransferRoot(uint256 instanceId) external {
+        require(isBuyer[msg.sender], "Only buyer");
+        disputeObliviousTransferRootForBuyer(msg.sender, instanceId);
+    }
+
+    /**
+     * @dev Buyer-scoped OT dispute for opened instances.
+     * Buyer can challenge only their own OT root commitment.
+     */
+    function disputeObliviousTransferRootForBuyer(address buyerAddr, uint256 instanceId) public {
         require(currentStage == Stage.Dispute, "Wrong stage");
         require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
-        require(msg.sender == bob, "Only Evaluator can dispute");
+        require(isBuyer[buyerAddr], "Not buyer");
+        require(msg.sender == buyerAddr, "Only challenged buyer");
+        require(vault[msg.sender] == DEPOSIT_EVALUATOR, "Challenger not deposited");
         require(instanceId < N, "Index out of bounds");
         require(instanceId != m, "Cannot dispute evaluation circuit m");
-        require(verifierSeedRevealed, "Verifier seed not revealed");
-        _resolveOtRootChallenge(instanceId);
+        require(verifierSeedFinalized, "Verifier seed not finalized");
+        _resolveOtRootChallenge(buyerAddr, instanceId, msg.sender);
     }
 
     // leaf = H(circuitId || gateIndex || gateType || wireA || wireB || wireC)
@@ -826,7 +1071,14 @@ contract MillionairesProblem {
         return bitWidth + inputBit;
     }
 
-    function _computeOtPayloadHash(bytes32 garblerSeed, bytes32 verifierSeedValue, uint256 instanceId, uint16 inputBit, uint8 round)
+    function _computeOtPayloadHash(
+        bytes32 garblerSeed,
+        bytes32 verifierSeedValue,
+        address buyerAddr,
+        uint256 instanceId,
+        uint16 inputBit,
+        uint8 round
+    )
         internal
         view
         returns (bytes32)
@@ -836,10 +1088,10 @@ contract MillionairesProblem {
         bytes16 label1 = deriveWireLabel(garblerSeed, instanceId, wireId, 1);
 
         bytes32 senderRandomness = keccak256(
-            abi.encodePacked("OT-S", circuitId, instanceId, wireId, garblerSeed)
+            abi.encodePacked("OT-S", circuitId, buyerAddr, instanceId, wireId, garblerSeed)
         );
         bytes32 verifierRandomness = keccak256(
-            abi.encodePacked("OT-R", circuitId, instanceId, wireId, verifierSeedValue)
+            abi.encodePacked("OT-R", circuitId, buyerAddr, instanceId, wireId, verifierSeedValue)
         );
 
         if (round == 0) {
@@ -847,6 +1099,7 @@ contract MillionairesProblem {
                 abi.encodePacked(
                     "OT-M0",
                     circuitId,
+                    buyerAddr,
                     instanceId,
                     inputBit,
                     wireId,
@@ -862,6 +1115,7 @@ contract MillionairesProblem {
                 abi.encodePacked(
                     "OT-M1",
                     circuitId,
+                    buyerAddr,
                     instanceId,
                     inputBit,
                     wireId,
@@ -875,6 +1129,7 @@ contract MillionairesProblem {
             abi.encodePacked(
                 "OT-M2",
                 circuitId,
+                buyerAddr,
                 instanceId,
                 inputBit,
                 wireId,
@@ -886,7 +1141,12 @@ contract MillionairesProblem {
         );
     }
 
-    function _recomputeOtRoot(bytes32 garblerSeed, bytes32 verifierSeedValue, uint256 instanceId)
+    function _recomputeOtRoot(
+        bytes32 garblerSeed,
+        bytes32 verifierSeedValue,
+        address buyerAddr,
+        uint256 instanceId
+    )
         internal
         view
         returns (bytes32)
@@ -898,7 +1158,14 @@ contract MillionairesProblem {
         for (uint16 inputBit = 0; inputBit < bitWidth; inputBit++) {
             for (uint8 round = 0; round < OT_ROUNDS_PER_INPUT; round++) {
                 uint8 author = _otMessageAuthor(round);
-                bytes32 payloadHash = _computeOtPayloadHash(garblerSeed, verifierSeedValue, instanceId, inputBit, round);
+                bytes32 payloadHash = _computeOtPayloadHash(
+                    garblerSeed,
+                    verifierSeedValue,
+                    buyerAddr,
+                    instanceId,
+                    inputBit,
+                    round
+                );
                 level[cursor] = _otTranscriptLeafHash(inputBit, round, author, payloadHash);
                 cursor++;
             }
@@ -919,20 +1186,23 @@ contract MillionairesProblem {
         return level[0];
     }
 
-    function _resolveOtRootChallenge(uint256 instanceId) internal {
+    function _resolveOtRootChallenge(address buyerAddr, uint256 instanceId, address challenger) internal {
         bytes32 garblerSeed = _requireRevealedSeedForOpenedInstance(instanceId);
-        bytes32 expectedRoot = _recomputeOtRoot(garblerSeed, verifierSeed, instanceId);
-        bool matchRoot = expectedRoot == instanceCommitments[instanceId].rootOT;
+        bytes32 expectedRoot = _recomputeOtRoot(garblerSeed, verifierSeed, buyerAddr, instanceId);
+        bytes32 committedRoot = buyerRootOTCommitment[buyerAddr][instanceId];
+        require(committedRoot != bytes32(0), "Buyer OT root not committed");
+        bool matchRoot = expectedRoot == committedRoot;
 
         if (!matchRoot) {
             emit OTInstanceRootChallenged(instanceId, true);
-            emit CheaterSlashed(alice, bob);
-            _slash(bob, alice);
+            emit OTBuyerRootChallenged(buyerAddr, instanceId, true);
+            emit CheaterSlashed(alice, challenger);
+            _slash(challenger, alice);
         } else {
             emit OTInstanceRootChallenged(instanceId, false);
-            emit CheaterSlashed(bob, alice);
-            _slash(alice, bob);
+            emit OTBuyerRootChallenged(buyerAddr, instanceId, false);
+            emit CheaterSlashed(challenger, alice);
+            _slash(alice, challenger);
         }
     }
-    // ------ gc part end ------
 }
