@@ -4,7 +4,10 @@ import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProo
 
 contract MillionairesProblem {
     address public alice; //Garbler
-    bool public result;
+    uint16 public winnerId;
+    uint64 public winningBid;
+    address public winnerBuyer;
+    address public winnerReceiver;
 
     // Number of instances for Cut-and-Choose
     uint256 public constant N = 10;
@@ -32,16 +35,14 @@ contract MillionairesProblem {
         bytes32 comSeed;   // H(seedG[i])
         bytes32 rootGC;    // Terminal incremental-hash state over garbling artifacts for disputes
         bytes32 blobHashGC; // EIP-4844 versioned hash for evaluation payload blob (instance i)
-        bytes32 h0;        // Anchor for winner-bit = 1 (Alice wins) under committed circuitId
-        bytes32 h1;        // Anchor for winner-bit = 0 (buyer side wins) under committed circuitId
+        bytes32 hOut;      // H("OUT", circuitId, instanceId, outputBytes)
     }
 
     struct CoreInstanceCommitment {
         bytes32 comSeed;
         bytes32 rootGC;
         bytes32 blobHashGC;
-        bytes32 h0;
-        bytes32 h1;
+        bytes32 hOut;
     }
 
     enum Stage {
@@ -80,6 +81,7 @@ contract MillionairesProblem {
     uint16 public bitWidth;
     address[] private buyers;
     mapping(address => bool) public isBuyer;
+    mapping(address => address) public buyerReceiver;
     mapping(address => bytes32) public buyerSeedCommitment;
     mapping(address => bytes32) public buyerSeed;
     mapping(address => bool) public buyerSeedRevealed;
@@ -92,21 +94,30 @@ contract MillionairesProblem {
     uint256 public unresolvedBuyers;
     mapping(address => bool) public disputeClosedByBuyer;
     uint256 public pendingDisputeBuyerClosures;
+    uint16 private constant OUTPUT_WINNER_ID_BYTES = 2;
+    uint16 private constant OUTPUT_WINNING_BID_BYTES = 8;
+    uint16 private constant OUTPUT_TOTAL_BYTES = OUTPUT_WINNER_ID_BYTES + OUTPUT_WINNING_BID_BYTES;
+
+    event WinnerResolved(uint16 indexed winnerId, address indexed buyer, address indexed receiver, uint64 winningBid);
 
     constructor(
         address _initialBuyer,
+        address _initialReceiver,
         bytes32 _circuitId,
         bytes32 _circuitLayoutRoot,
         uint16 _bitWidth
     ) {
         require(_bitWidth > 0, "bitWidth must be > 0");
+        require(_bitWidth <= 64, "bitWidth must be <= 64");
         require(_initialBuyer != address(0), "Zero buyer");
+        require(_initialReceiver != address(0), "Zero receiver");
         alice = msg.sender;
         circuitId = _circuitId;
         circuitLayoutRoot = _circuitLayoutRoot;
         bitWidth = _bitWidth;
         buyers.push(_initialBuyer);
         isBuyer[_initialBuyer] = true;
+        buyerReceiver[_initialBuyer] = _initialReceiver;
 
         currentStage = Stage.Deposits;
         deadlines.deposit = block.timestamp + 1 hours;
@@ -116,19 +127,23 @@ contract MillionairesProblem {
      * @dev Registers additional buyers before deposits begin.
      * Extends buyer set B1..Bn.
      */
-    function registerBuyers(address[] calldata additionalBuyers) external {
+    function registerBuyers(address[] calldata additionalBuyers, address[] calldata additionalReceivers) external {
         require(currentStage == Stage.Deposits, "Wrong stage");
         require(msg.sender == alice, "Only Alice");
         require(vault[alice] == 0, "Deposits already started");
+        require(additionalBuyers.length == additionalReceivers.length, "Length mismatch");
 
         for (uint256 i = 0; i < additionalBuyers.length; i++) {
             address buyerAddr = additionalBuyers[i];
+            address receiverAddr = additionalReceivers[i];
             require(buyerAddr != address(0), "Zero buyer");
+            require(receiverAddr != address(0), "Zero receiver");
             require(buyerAddr != alice, "Alice cannot be buyer");
             require(!isBuyer[buyerAddr], "Buyer already registered");
 
             buyers.push(buyerAddr);
             isBuyer[buyerAddr] = true;
+            buyerReceiver[buyerAddr] = receiverAddr;
         }
     }
 
@@ -332,15 +347,12 @@ contract MillionairesProblem {
             require(commitments[i].comSeed != bytes32(0), "Empty comSeed");
             require(commitments[i].rootGC != bytes32(0), "Empty rootGC");
             require(commitments[i].blobHashGC != bytes32(0), "Empty blobHashGC");
-            require(commitments[i].h0 != bytes32(0), "Empty h0");
-            require(commitments[i].h1 != bytes32(0), "Empty h1");
-            require(commitments[i].h0 != commitments[i].h1, "h0 and h1 must differ");
+            require(commitments[i].hOut != bytes32(0), "Empty hOut");
 
             instanceCommitments[i].comSeed = commitments[i].comSeed;
             instanceCommitments[i].rootGC = commitments[i].rootGC;
             instanceCommitments[i].blobHashGC = commitments[i].blobHashGC;
-            instanceCommitments[i].h0 = commitments[i].h0;
-            instanceCommitments[i].h1 = commitments[i].h1;
+            instanceCommitments[i].hOut = commitments[i].hOut;
         }
 
         currentStage = Stage.CommitmentsOT;
@@ -420,7 +432,6 @@ contract MillionairesProblem {
     function finalizeBuyerInputAfterDeadline() external {
         require(currentStage == Stage.BuyerInputOT, "Wrong stage");
         require(block.timestamp > deadlines.buyerInputOt, "Buyer input phase still active");
-        require(_isParticipant(msg.sender), "Only participant");
 
         for (uint256 i = 0; i < buyers.length; i++) {
             address buyerAddr = buyers[i];
@@ -611,6 +622,7 @@ contract MillionairesProblem {
         bytes32[] calldata ihProof, bytes32[] calldata layoutProof) external {
         require(currentStage == Stage.Dispute, "Not in Dispute stage");
         require(isBuyer[msg.sender], "Only buyer can dispute");
+        require(buyerStatus[msg.sender] == BuyerStatus.Ready, "Buyer not active in dispute");
         require(_idx < N, "Index out of bounds");
         require(_isOpenInstance(_idx), "Not an opened instance");
         require(revealedSeeds[_idx] == _seed, "Seed mismatch");
@@ -618,44 +630,44 @@ contract MillionairesProblem {
         challengeGateLeaf(_idx, gateIndex, g, leafBytes, ihProof, layoutProof);
     }
 
-
-
-
-    function _computeOutputAnchor(bytes32 outputLabel, bool winnerBit) internal view returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                "OUT",
-                circuitId,
-                m,
-                winnerBit ? uint8(1) : uint8(0),
-                outputLabel
-            )
-        );
+    function _computeOutputAnchor(uint256 instanceId, bytes calldata outputBytes) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("OUT", circuitId, instanceId, outputBytes));
     }
 
-    function _decodeOutputBitFromLabel(bytes32 outputLabel) internal view returns (bool) {
-        InstanceCommitment storage evalInstance = instanceCommitments[m];
-        if (_computeOutputAnchor(outputLabel, true) == evalInstance.h0) {
-            return true;
+    function _decodeOutput(bytes calldata outputBytes) internal pure returns (uint16 outWinnerId, uint64 outWinningBid) {
+        require(outputBytes.length == OUTPUT_TOTAL_BYTES, "Bad output length");
+        uint256 word;
+        assembly {
+            word := calldataload(outputBytes.offset)
         }
-        if (_computeOutputAnchor(outputLabel, false) == evalInstance.h1) {
-            return false;
-        }
-        revert("Invalid output label");
+        outWinnerId = uint16(word >> 240);
+        outWinningBid = uint64((word >> 176) & 0xFFFFFFFFFFFFFFFF);
     }
 
     /**
      * @dev Phase 8: participant submits the final output label.
-     * `_outputLabel` is a bytes16 GC output label zero-padded to bytes32 before submission.
-     * Matching is done against circuit-bound winner anchors committed in `h0/h1`.
-     * @param _outputLabel The label resulting from Ev(F, X).
+     * Output bytes encoding is fixed-width packed:
+     * abi.encodePacked(uint16 winnerId, uint64 winningBid).
+     * Matching is done against circuit-bound output anchor committed in `hOut`.
      */
-    function settle(bytes32 _outputLabel) external {
+    function settle(bytes calldata outputBytes) external {
         require(currentStage == Stage.Settle, "Wrong stage");
         require(_isParticipant(msg.sender), "Only participant");
         require(block.timestamp <= deadlines.settle, "Settlement deadline missed");
 
-        result = _decodeOutputBitFromLabel(_outputLabel);
+        InstanceCommitment storage evalInstance = instanceCommitments[m];
+        require(_computeOutputAnchor(m, outputBytes) == evalInstance.hOut, "Invalid output commitment");
+
+        (uint16 outWinnerId, uint64 outWinningBid) = _decodeOutput(outputBytes);
+        require(outWinnerId < buyers.length, "winnerId out of bounds");
+        uint256 winningBidLimit = uint256(1) << uint256(bitWidth);
+        require(uint256(outWinningBid) < winningBidLimit, "winningBid out of range");
+        winnerId = outWinnerId;
+        winningBid = outWinningBid;
+        winnerBuyer = buyers[outWinnerId];
+        winnerReceiver = buyerReceiver[winnerBuyer];
+
+        emit WinnerResolved(winnerId, winnerBuyer, winnerReceiver, winningBid);
 
         uint256 payoutAlice = vault[alice];
         vault[alice] = 0;
@@ -724,15 +736,38 @@ contract MillionairesProblem {
     /**
      * @dev Private helper to transfer all funds to the winner and close the contract.
      */
-    function _slash(address _winner, address _loser) private {
-        uint256 prize = vault[_winner] + vault[_loser];
-        vault[_winner] = 0;
-        vault[_loser] = 0;
-        _refundPassiveBuyers(_winner, _loser);
+    function _slashBuyerToAlice(address buyerAddr) private {
+        uint256 prize = vault[alice] + vault[buyerAddr];
+        vault[alice] = 0;
+        vault[buyerAddr] = 0;
+        _refundPassiveBuyers(alice, buyerAddr);
 
-        (bool success, ) = payable(_winner).call{value: prize}("");
+        (bool success, ) = payable(alice).call{value: prize}("");
         require(success, "Slashed transfer failed");
+        currentStage = Stage.Closed;
+    }
 
+    function _slashAliceToAllBuyers() private {
+        uint256 aliceCollateral = vault[alice];
+        vault[alice] = 0;
+
+        uint256 buyersLen = buyers.length;
+        uint256 share = buyersLen == 0 ? 0 : aliceCollateral / buyersLen;
+        uint256 remainder = buyersLen == 0 ? 0 : aliceCollateral % buyersLen;
+
+        for (uint256 i = 0; i < buyersLen; i++) {
+            address buyerAddr = buyers[i];
+            uint256 payout = vault[buyerAddr] + share;
+            if (i == 0) {
+                payout += remainder;
+            }
+            vault[buyerAddr] = 0;
+            if (payout == 0) {
+                continue;
+            }
+            (bool successBuyer, ) = payable(buyerAddr).call{value: payout}("");
+            require(successBuyer, "Buyer payout failed");
+        }
         currentStage = Stage.Closed;
     }
 
@@ -970,6 +1005,7 @@ contract MillionairesProblem {
         require(currentStage == Stage.Dispute, "Wrong stage");
         require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
         require(isBuyer[msg.sender], "Only buyer for dispute");
+        require(buyerStatus[msg.sender] == BuyerStatus.Ready, "Buyer not active in dispute");
 
         _assertValidLayoutProof(gateIndex, g, layoutProof);
         bytes32 seed = _requireRevealedSeedForOpenedInstance(instanceId);
@@ -988,12 +1024,12 @@ contract MillionairesProblem {
         // 3) Slash depending on result
         if (!matchLeaf) {
             emit GateLeafChallenged(instanceId, gateIndex, true);
-            emit CheaterSlashed(alice, msg.sender);
-            _slash(msg.sender, alice);
+            emit CheaterSlashed(alice, address(0));
+            _slashAliceToAllBuyers();
         } else {
             emit GateLeafChallenged(instanceId, gateIndex, false);
             emit CheaterSlashed(msg.sender, alice);
-            _slash(alice, msg.sender);
+            _slashBuyerToAlice(msg.sender);
         }
     }
 
@@ -1017,6 +1053,7 @@ contract MillionairesProblem {
         require(isBuyer[buyerAddr], "Not buyer");
         require(msg.sender == buyerAddr, "Only challenged buyer");
         require(vault[msg.sender] == DEPOSIT_EVALUATOR, "Challenger not deposited");
+        require(buyerStatus[msg.sender] == BuyerStatus.Ready, "Buyer not active in dispute");
         require(instanceId < N, "Index out of bounds");
         require(instanceId != m, "Cannot dispute evaluation circuit m");
         require(verifierSeedFinalized, "Verifier seed not finalized");
@@ -1196,13 +1233,13 @@ contract MillionairesProblem {
         if (!matchRoot) {
             emit OTInstanceRootChallenged(instanceId, true);
             emit OTBuyerRootChallenged(buyerAddr, instanceId, true);
-            emit CheaterSlashed(alice, challenger);
-            _slash(challenger, alice);
+            emit CheaterSlashed(alice, address(0));
+            _slashAliceToAllBuyers();
         } else {
             emit OTInstanceRootChallenged(instanceId, false);
             emit OTBuyerRootChallenged(buyerAddr, instanceId, false);
             emit CheaterSlashed(challenger, alice);
-            _slash(alice, challenger);
+            _slashBuyerToAlice(challenger);
         }
     }
 }

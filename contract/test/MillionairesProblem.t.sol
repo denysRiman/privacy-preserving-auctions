@@ -5,8 +5,8 @@ import "forge-std/Test.sol";
 import "../src/MillionairesProblem.sol";
 
 contract MillionairesProblemHarness is MillionairesProblem {
-    constructor(address _bob, bytes32 _circuitId, bytes32 _circuitLayoutRoot, uint16 _bitWidth)
-    MillionairesProblem(_bob, _circuitId, _circuitLayoutRoot, _bitWidth)
+    constructor(address _bob, address _receiver, bytes32 _circuitId, bytes32 _circuitLayoutRoot, uint16 _bitWidth)
+    MillionairesProblem(_bob, _receiver, _circuitId, _circuitLayoutRoot, _bitWidth)
     {}
 
     function computeLeaf(bytes32 seed, uint256 instanceId, uint256 gateIndex, GateDesc calldata g)
@@ -126,6 +126,7 @@ contract MillionairesTest is Test {
         vm.prank(alice);
         mp = new MillionairesProblemHarness(
             bob,
+            bob,
             circuitId_,
             _canonicalLayoutRoot(0),
             BIT_WIDTH
@@ -139,6 +140,7 @@ contract MillionairesTest is Test {
         bytes32 circuitId_ = _supportedCircuitId(variant);
         vm.prank(alice);
         mp = new MillionairesProblemHarness(
+            bob,
             bob,
             circuitId_,
             _canonicalLayoutRoot(variant),
@@ -239,23 +241,15 @@ contract MillionairesTest is Test {
             if (blobHashGC == bytes32(0)) {
                 blobHashGC = keccak256(abi.encodePacked("default-blob-gc", i));
             }
-            bytes32 h0 = commits[i].h0;
-            if (h0 == bytes32(0)) {
-                h0 = keccak256(abi.encodePacked("default-h0", i));
-            }
-            bytes32 h1 = commits[i].h1;
-            if (h1 == bytes32(0) || h1 == h0) {
-                h1 = keccak256(abi.encodePacked("default-h1", i));
-                if (h1 == h0) {
-                    h1 = keccak256(abi.encodePacked("default-h1-alt", i));
-                }
+            bytes32 hOut = commits[i].h0;
+            if (hOut == bytes32(0)) {
+                hOut = keccak256(abi.encodePacked("default-hOut", i));
             }
             core[i] = MillionairesProblem.CoreInstanceCommitment({
                 comSeed: comSeed,
                 rootGC: rootGC,
                 blobHashGC: blobHashGC,
-                h0: h0,
-                h1: h1
+                hOut: hOut
             });
             if (commits[i].rootOT == bytes32(0)) {
                 otRoots[i] = keccak256(abi.encodePacked("default-root-ot", i));
@@ -290,8 +284,7 @@ contract MillionairesTest is Test {
                 comSeed: keccak256(abi.encodePacked("core-com-seed", i)),
                 rootGC: keccak256(abi.encodePacked("core-root-gc", i)),
                 blobHashGC: keccak256(abi.encodePacked("core-blob-gc", i)),
-                h0: keccak256(abi.encodePacked("core-h0", i)),
-                h1: keccak256(abi.encodePacked("core-h1", i))
+                hOut: keccak256(abi.encodePacked("core-hOut", i))
             });
         }
     }
@@ -341,7 +334,7 @@ contract MillionairesTest is Test {
         return a <= b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
     }
 
-    function _toSettleStage(bytes32 h0, bytes32 h1) internal {
+    function _toSettleStage(bytes32 hOut, bytes32) internal {
         _toCommitmentsCoreStage();
         uint256 chosenM = mp.m();
 
@@ -353,8 +346,8 @@ contract MillionairesTest is Test {
                 rootGC: bytes32(0),
                 blobHashGC: i == chosenM ? evalBlobHash : bytes32(0),
                 rootOT: bytes32(0),
-                h0: h0,
-                h1: h1
+                h0: hOut,
+                h1: bytes32(0)
             });
         }
 
@@ -384,21 +377,16 @@ contract MillionairesTest is Test {
         mp.revealGarblerLabels(mockLabels);
     }
 
-    function _circuitBoundAnchor(
-        bytes32 circuitId_,
-        uint256 instanceId,
-        bool winnerBit,
-        bytes32 outputLabel
-    ) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                "OUT",
-                circuitId_,
-                instanceId,
-                winnerBit ? uint8(1) : uint8(0),
-                outputLabel
-            )
-        );
+    function _encodeOutput(uint16 outWinnerId, uint64 outWinningBid) internal pure returns (bytes memory) {
+        return abi.encodePacked(outWinnerId, outWinningBid);
+    }
+
+    function _circuitBoundAnchor(bytes32 circuitId_, uint256 instanceId, bytes memory outputBytes)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encodePacked("OUT", circuitId_, instanceId, outputBytes));
     }
 
     function test_Constructor_AllowsArbitraryCircuitIdAndLayoutRoot() public {
@@ -407,6 +395,7 @@ contract MillionairesTest is Test {
 
         vm.prank(alice);
         MillionairesProblemHarness deployed = new MillionairesProblemHarness(
+            bob,
             bob,
             arbitraryCircuitId,
             arbitraryLayoutRoot,
@@ -425,6 +414,7 @@ contract MillionairesTest is Test {
         vm.prank(alice);
         MillionairesProblemHarness variant0 = new MillionairesProblemHarness(
             bob,
+            bob,
             _supportedCircuitId(0),
             rootVariant0,
             8
@@ -434,6 +424,7 @@ contract MillionairesTest is Test {
 
         vm.prank(alice);
         MillionairesProblemHarness variant1 = new MillionairesProblemHarness(
+            bob,
             bob,
             _supportedCircuitId(1),
             rootVariant1,
@@ -446,6 +437,7 @@ contract MillionairesTest is Test {
     function test_Constructor_AllowsMismatchedLayoutRootForKnownCircuitId() public {
         vm.prank(alice);
         MillionairesProblemHarness deployed = new MillionairesProblemHarness(
+            bob,
             bob,
             _supportedCircuitId(0),
             hex"35507759e0f8a618b62ca6fd10193e20c63ba04b5e3f520eff66af46b12c301d", // formula=1 root
@@ -569,33 +561,13 @@ contract MillionairesTest is Test {
         mp.submitCommitments(core);
     }
 
-    function test_SubmitCommitments_RevertsOnZeroH0() public {
+    function test_SubmitCommitments_RevertsOnZeroHOut() public {
         _toCommitmentsCoreStage();
         MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
-        core[0].h0 = bytes32(0);
+        core[0].hOut = bytes32(0);
 
         vm.prank(alice);
-        vm.expectRevert("Empty h0");
-        mp.submitCommitments(core);
-    }
-
-    function test_SubmitCommitments_RevertsOnZeroH1() public {
-        _toCommitmentsCoreStage();
-        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
-        core[0].h1 = bytes32(0);
-
-        vm.prank(alice);
-        vm.expectRevert("Empty h1");
-        mp.submitCommitments(core);
-    }
-
-    function test_SubmitCommitments_RevertsWhenH0EqualsH1() public {
-        _toCommitmentsCoreStage();
-        MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
-        core[0].h1 = core[0].h0;
-
-        vm.prank(alice);
-        vm.expectRevert("h0 and h1 must differ");
+        vm.expectRevert("Empty hOut");
         mp.submitCommitments(core);
     }
 
@@ -1254,100 +1226,105 @@ contract MillionairesTest is Test {
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
-    function test_FinalSettlement_AliceWins_RefundsBothDeposits() public {
-        bytes32 aliceWinningLabel = keccak256(abi.encodePacked("alice_is_richer_label"));
+    function test_FinalSettlement_ValidOutput_RefundsBothDeposits() public {
+        bytes memory output = _encodeOutput(0, 77);
         bytes32 circuitId_ = mp.circuitId();
         uint256 expectedM = uint256(
             keccak256(abi.encodePacked("M", _defaultVerifierSeed(), circuitId_, address(mp)))
         ) % 10;
         _toSettleStage(
-            _circuitBoundAnchor(circuitId_, expectedM, true, aliceWinningLabel),
-            _circuitBoundAnchor(circuitId_, expectedM, false, keccak256(abi.encodePacked("bob_wins_label")))
+            _circuitBoundAnchor(circuitId_, expectedM, output),
+            bytes32(0)
         );
 
         uint256 aliceBalanceBefore = alice.balance;
         uint256 bobBalanceBefore = bob.balance;
         vm.prank(bob);
-        mp.settle(aliceWinningLabel);
+        mp.settle(output);
 
         // --- Assertions ---
         assertEq(alice.balance, aliceBalanceBefore + 1 ether);
         assertEq(bob.balance, bobBalanceBefore + 1 ether);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
-        assertTrue(mp.result());
+        assertEq(mp.winnerId(), 0);
+        assertEq(mp.winningBid(), 77);
+        assertEq(mp.winnerBuyer(), bob);
+        assertEq(mp.winnerReceiver(), bob);
     }
 
-    function test_FinalSettlement_BobWins_RefundsBothDeposits() public {
-        bytes32 bobWinningLabel = keccak256(abi.encodePacked("bob_wins_label"));
+    function test_FinalSettlement_AnotherBid_RefundsBothDeposits() public {
+        bytes memory output = _encodeOutput(0, 5);
         bytes32 circuitId_ = mp.circuitId();
         uint256 expectedM = uint256(
             keccak256(abi.encodePacked("M", _defaultVerifierSeed(), circuitId_, address(mp)))
         ) % 10;
         _toSettleStage(
-            _circuitBoundAnchor(circuitId_, expectedM, true, keccak256(abi.encodePacked("alice_wins_label"))),
-            _circuitBoundAnchor(circuitId_, expectedM, false, bobWinningLabel)
+            _circuitBoundAnchor(circuitId_, expectedM, output),
+            bytes32(0)
         );
 
         uint256 aliceBalanceBefore = alice.balance;
         uint256 bobBalanceBefore = bob.balance;
         vm.prank(bob);
-        mp.settle(bobWinningLabel);
+        mp.settle(output);
 
         // --- Assertions ---
         assertEq(alice.balance, aliceBalanceBefore + 1 ether);
         assertEq(bob.balance, bobBalanceBefore + 1 ether);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
-        assertFalse(mp.result());
+        assertEq(mp.winnerId(), 0);
+        assertEq(mp.winningBid(), 5);
     }
 
-    function test_FinalSettlement_LowerCircuit_AliceWinsOnWinnerBitOne() public {
+    function test_FinalSettlement_LowerCircuit_ValidOutput() public {
         _deployHarnessWithCircuit(1);
         vm.deal(alice, 10 ether);
         vm.deal(bob, 10 ether);
 
-        bytes32 lowerBidAliceWinningLabel = keccak256(abi.encodePacked("lower-bid-wins-winner-bit-one"));
+        bytes memory output = _encodeOutput(0, 9);
         bytes32 circuitId_ = mp.circuitId();
         uint256 expectedM = uint256(
             keccak256(abi.encodePacked("M", _defaultVerifierSeed(), circuitId_, address(mp)))
         ) % 10;
         _toSettleStage(
-            _circuitBoundAnchor(circuitId_, expectedM, true, lowerBidAliceWinningLabel),
-            _circuitBoundAnchor(circuitId_, expectedM, false, keccak256(abi.encodePacked("lower-bid-bob-wins")))
+            _circuitBoundAnchor(circuitId_, expectedM, output),
+            bytes32(0)
         );
 
         vm.prank(bob);
-        mp.settle(lowerBidAliceWinningLabel);
+        mp.settle(output);
 
-        assertTrue(mp.result());
+        assertEq(mp.winnerId(), 0);
+        assertEq(mp.winningBid(), 9);
     }
 
-    function test_FinalSettlement_CrossCircuitAnchors_RevertInvalidOutputLabel() public {
+    function test_FinalSettlement_CrossCircuitAnchors_RevertInvalidOutputCommitment() public {
         _deployHarnessWithCircuit(1);
         vm.deal(alice, 10 ether);
         vm.deal(bob, 10 ether);
 
-        bytes32 label = keccak256(abi.encodePacked("shared-output-label"));
+        bytes memory output = _encodeOutput(0, 11);
         _toSettleStage(
-            _circuitBoundAnchor(_supportedCircuitId(0), 0, true, label), // Anchors committed for circuit variant 0
-            _circuitBoundAnchor(_supportedCircuitId(0), 0, false, label)
+            _circuitBoundAnchor(_supportedCircuitId(0), 0, output), // Anchors committed for circuit variant 0
+            bytes32(0)
         );
 
         vm.prank(bob);
-        vm.expectRevert("Invalid output label");
-        mp.settle(label); // Decoding runs with circuit variant 1 and must not match variant-0 anchors
+        vm.expectRevert("Invalid output commitment");
+        mp.settle(output); // Decoding runs with circuit variant 1 and must not match variant-0 anchor
     }
 
-    function test_FinalSettlement_InstanceMismatchAnchors_RevertInvalidOutputLabel() public {
-        bytes32 label = keccak256(abi.encodePacked("instance-bound-output-label"));
+    function test_FinalSettlement_InstanceMismatchAnchors_RevertInvalidOutputCommitment() public {
+        bytes memory output = _encodeOutput(0, 22);
         bytes32 circuitId_ = mp.circuitId();
         _toSettleStage(
-            _circuitBoundAnchor(circuitId_, 1, true, label), // Wrong instance; settle runs on m=0
-            _circuitBoundAnchor(circuitId_, 1, false, keccak256(abi.encodePacked("instance-bound-bob-wins")))
+            _circuitBoundAnchor(circuitId_, 1, output), // Wrong instance; settle runs on m=0
+            bytes32(0)
         );
 
         vm.prank(bob);
-        vm.expectRevert("Invalid output label");
-        mp.settle(label);
+        vm.expectRevert("Invalid output commitment");
+        mp.settle(output);
     }
 
     function test_ChallengeGateLeaf_FalseChallenge_SlashesBob() public {
@@ -1689,7 +1666,7 @@ contract MillionairesTest is Test {
 
         // Deploy fresh contract with Rust vector identifiers.
         vm.prank(alice);
-        mp = new MillionairesProblemHarness(bob, v.circuitId, v.circuitLayoutRoot, BIT_WIDTH);
+        mp = new MillionairesProblemHarness(bob, bob, v.circuitId, v.circuitLayoutRoot, BIT_WIDTH);
 
         vm.prank(alice);
         mp.deposit{value: 1 ether}();
