@@ -2,12 +2,19 @@ pragma solidity ^0.8.24;
 
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
+interface IEnsAuctionAdapter {
+    function assign(bytes32 namehash, address to) external;
+}
+
 contract MillionairesProblem {
     address public alice; //Garbler
     uint16 public winnerId;
     uint64 public winningBid;
     address public winnerBuyer;
     address public winnerReceiver;
+    bytes32 public ensNamehash;
+    address public ensAdapter;
+    bool public assigned;
 
     // Number of instances for Cut-and-Choose
     uint256 public constant N = 10;
@@ -56,6 +63,7 @@ contract MillionairesProblem {
         Dispute,
         Labels,
         Settle,
+        Assignment,
         Closed
     }
 
@@ -66,8 +74,8 @@ contract MillionairesProblem {
     }
     Stage public currentStage;
 
-    uint256 public constant DEPOSIT_GARBLER = 1 ether;
-    uint256 public constant DEPOSIT_EVALUATOR = 1 ether;
+    uint256 public constant DEPOSIT_GARBLER = 1.2 ether;
+    uint256 public constant DEPOSIT_EVALUATOR = 1.2 ether;
     uint8 private constant OT_ROUNDS_PER_INPUT = 3;
     uint8 private constant OT_DUMMY_CHOICE = 0;
 
@@ -99,19 +107,26 @@ contract MillionairesProblem {
     uint16 private constant OUTPUT_TOTAL_BYTES = OUTPUT_WINNER_ID_BYTES + OUTPUT_WINNING_BID_BYTES;
 
     event WinnerResolved(uint16 indexed winnerId, address indexed buyer, address indexed receiver, uint64 winningBid);
+    event EnsAssigned(bytes32 indexed namehash, address indexed receiver);
 
     constructor(
         address _initialBuyer,
         address _initialReceiver,
+        bytes32 _ensNamehash,
+        address _ensAdapter,
         bytes32 _circuitId,
         bytes32 _circuitLayoutRoot,
         uint16 _bitWidth
     ) {
         require(_bitWidth > 0, "bitWidth must be > 0");
-        require(_bitWidth <= 64, "bitWidth must be <= 64");
+        require(_bitWidth <= 60, "bitWidth must be <= 60");
         require(_initialBuyer != address(0), "Zero buyer");
         require(_initialReceiver != address(0), "Zero receiver");
+        require(_ensNamehash != bytes32(0), "Zero ENS namehash");
+        require(_ensAdapter != address(0), "Zero ENS adapter");
         alice = msg.sender;
+        ensNamehash = _ensNamehash;
+        ensAdapter = _ensAdapter;
         circuitId = _circuitId;
         circuitLayoutRoot = _circuitLayoutRoot;
         bitWidth = _bitWidth;
@@ -662,12 +677,32 @@ contract MillionairesProblem {
         require(outWinnerId < buyers.length, "winnerId out of bounds");
         uint256 winningBidLimit = uint256(1) << uint256(bitWidth);
         require(uint256(outWinningBid) < winningBidLimit, "winningBid out of range");
+        address outWinnerBuyer = buyers[outWinnerId];
+        require(uint256(outWinningBid) <= DEPOSIT_EVALUATOR, "winningBid exceeds max deposit");
+        require(uint256(outWinningBid) <= vault[outWinnerBuyer], "winningBid exceeds winner vault");
+
+        // First-price auction transfer: winner pays own bid to Alice from winner collateral vault.
+        vault[outWinnerBuyer] -= uint256(outWinningBid);
+        vault[alice] += uint256(outWinningBid);
+
         winnerId = outWinnerId;
         winningBid = outWinningBid;
-        winnerBuyer = buyers[outWinnerId];
+        winnerBuyer = outWinnerBuyer;
         winnerReceiver = buyerReceiver[winnerBuyer];
 
         emit WinnerResolved(winnerId, winnerBuyer, winnerReceiver, winningBid);
+        currentStage = Stage.Assignment;
+    }
+
+    function finalizeAssignment() external {
+        require(currentStage == Stage.Assignment, "Wrong stage");
+        require(!assigned, "Assignment already finalized");
+        require(winnerBuyer != address(0), "Winner buyer not set");
+        require(winnerReceiver != address(0), "Winner receiver not set");
+
+        assigned = true;
+        IEnsAuctionAdapter(ensAdapter).assign(ensNamehash, winnerReceiver);
+        emit EnsAssigned(ensNamehash, winnerReceiver);
 
         uint256 payoutAlice = vault[alice];
         vault[alice] = 0;
@@ -692,7 +727,10 @@ contract MillionairesProblem {
      * @dev Phase 8 Timeout: If settlement is not submitted by deadline, Alice can claim funds.
      */
     function abortPhase6() external {
-        require(currentStage == Stage.Settle, "Not in settle stage");
+        require(
+            currentStage == Stage.Settle || currentStage == Stage.Assignment,
+            "Not in settle/assignment stage"
+        );
         require(msg.sender == alice, "Only Alice can trigger this");
         require(block.timestamp > deadlines.settle, "Settle deadline not reached");
 

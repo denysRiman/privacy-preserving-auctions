@@ -4,9 +4,37 @@ pragma solidity ^0.8.20;
 import "forge-std/Test.sol";
 import "../src/MillionairesProblem.sol";
 
+contract MockEnsAuctionAdapter is IEnsAuctionAdapter {
+    bytes32 public lastNamehash;
+    address public lastReceiver;
+    uint256 public assignCalls;
+    bool public shouldRevert;
+
+    function setShouldRevert(bool value) external {
+        shouldRevert = value;
+    }
+
+    function assign(bytes32 namehash, address to) external override {
+        if (shouldRevert) {
+            revert("adapter failed");
+        }
+        assignCalls += 1;
+        lastNamehash = namehash;
+        lastReceiver = to;
+    }
+}
+
 contract MillionairesProblemHarness is MillionairesProblem {
-    constructor(address _bob, address _receiver, bytes32 _circuitId, bytes32 _circuitLayoutRoot, uint16 _bitWidth)
-    MillionairesProblem(_bob, _receiver, _circuitId, _circuitLayoutRoot, _bitWidth)
+    constructor(
+        address _bob,
+        address _receiver,
+        bytes32 _ensNamehash,
+        address _ensAdapter,
+        bytes32 _circuitId,
+        bytes32 _circuitLayoutRoot,
+        uint16 _bitWidth
+    )
+    MillionairesProblem(_bob, _receiver, _ensNamehash, _ensAdapter, _circuitId, _circuitLayoutRoot, _bitWidth)
     {}
 
     function computeLeaf(bytes32 seed, uint256 instanceId, uint256 gateIndex, GateDesc calldata g)
@@ -68,9 +96,13 @@ contract MillionairesProblemHarness is MillionairesProblem {
 
 contract MillionairesTest is Test {
     MillionairesProblemHarness mp;
+    MockEnsAuctionAdapter adapter;
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
     uint16 constant BIT_WIDTH = 8;
+    uint256 constant GARBLER_DEPOSIT = 1.2 ether;
+    uint256 constant EVALUATOR_DEPOSIT = 1.2 ether;
+    bytes32 constant ENS_NAMEHASH = keccak256(abi.encodePacked("auction-example.eth"));
 
     struct LegacyInstanceCommitment {
         bytes32 comSeed;
@@ -123,10 +155,13 @@ contract MillionairesTest is Test {
 
     function setUp() public {
         bytes32 circuitId_ = _supportedCircuitId(0);
+        adapter = new MockEnsAuctionAdapter();
         vm.prank(alice);
         mp = new MillionairesProblemHarness(
             bob,
             bob,
+            ENS_NAMEHASH,
+            address(adapter),
             circuitId_,
             _canonicalLayoutRoot(0),
             BIT_WIDTH
@@ -142,6 +177,8 @@ contract MillionairesTest is Test {
         mp = new MillionairesProblemHarness(
             bob,
             bob,
+            ENS_NAMEHASH,
+            address(adapter),
             circuitId_,
             _canonicalLayoutRoot(variant),
             BIT_WIDTH
@@ -271,9 +308,9 @@ contract MillionairesTest is Test {
 
     function _toCommitmentsCoreStage() internal {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
         _commitDefaultVerifierSeed();
         _revealDefaultVerifierSeed();
     }
@@ -307,9 +344,9 @@ contract MillionairesTest is Test {
 
     function _toOpenStageWithRealSeeds(uint256 chosenM) internal returns (bytes32[] memory realSeeds) {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         realSeeds = new bytes32[](10);
         LegacyInstanceCommitment[10] memory commits;
@@ -397,6 +434,8 @@ contract MillionairesTest is Test {
         MillionairesProblemHarness deployed = new MillionairesProblemHarness(
             bob,
             bob,
+            ENS_NAMEHASH,
+            address(adapter),
             arbitraryCircuitId,
             arbitraryLayoutRoot,
             BIT_WIDTH
@@ -415,6 +454,8 @@ contract MillionairesTest is Test {
         MillionairesProblemHarness variant0 = new MillionairesProblemHarness(
             bob,
             bob,
+            ENS_NAMEHASH,
+            address(adapter),
             _supportedCircuitId(0),
             rootVariant0,
             8
@@ -426,6 +467,8 @@ contract MillionairesTest is Test {
         MillionairesProblemHarness variant1 = new MillionairesProblemHarness(
             bob,
             bob,
+            ENS_NAMEHASH,
+            address(adapter),
             _supportedCircuitId(1),
             rootVariant1,
             8
@@ -439,6 +482,8 @@ contract MillionairesTest is Test {
         MillionairesProblemHarness deployed = new MillionairesProblemHarness(
             bob,
             bob,
+            ENS_NAMEHASH,
+            address(adapter),
             _supportedCircuitId(0),
             hex"35507759e0f8a618b62ca6fd10193e20c63ba04b5e3f520eff66af46b12c301d", // formula=1 root
             8
@@ -454,12 +499,12 @@ contract MillionairesTest is Test {
 
     function test_SuccessfulDeposits() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
-        assertEq(mp.vault(alice), 1 ether);
+        mp.deposit{value: GARBLER_DEPOSIT}();
+        assertEq(mp.vault(alice), GARBLER_DEPOSIT);
 
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
-        assertEq(mp.vault(bob), 1 ether);
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
+        assertEq(mp.vault(bob), EVALUATOR_DEPOSIT);
 
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.BuyerSeedCommit));
     }
@@ -467,10 +512,10 @@ contract MillionairesTest is Test {
     function test_Fail_DoubleDeposit() public {
         vm.startPrank(alice);
 
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
 
         vm.expectRevert("Deposit already exists");
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
 
         vm.stopPrank();
     }
@@ -483,16 +528,16 @@ contract MillionairesTest is Test {
 
     function test_Fail_Unauthorized() public {
         address hacker = makeAddr("hacker");
-        vm.deal(hacker, 1 ether);
+        vm.deal(hacker, GARBLER_DEPOSIT);
 
         vm.prank(hacker);
         vm.expectRevert("Not authorized");
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
     }
 
     function test_RefundAfterTimeout() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
 
         vm.warp(block.timestamp + 1 hours + 1);
 
@@ -500,15 +545,15 @@ contract MillionairesTest is Test {
         vm.prank(alice);
         mp.refund();
 
-        assertEq(alice.balance, balanceBefore + 1 ether);
+        assertEq(alice.balance, balanceBefore + GARBLER_DEPOSIT);
         assertEq(mp.vault(alice), 0);
     }
 
     function test_SubmitCommitments() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         // 2. Prepare mock commitments for N=10 instances
         LegacyInstanceCommitment[10] memory commits;
@@ -649,7 +694,7 @@ contract MillionairesTest is Test {
         assertEq(mp.unresolvedBuyers(), 0);
         assertEq(uint(mp.buyerStatus(bob)), uint(MillionairesProblem.BuyerStatus.Defaulted));
         assertEq(mp.vault(bob), 0);
-        assertEq(mp.vault(alice), 2 ether);
+        assertEq(mp.vault(alice), GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
     }
 
     function test_BuyerInputOt_DoesNotAdvanceUntilBuyerResolved() public {
@@ -670,9 +715,9 @@ contract MillionairesTest is Test {
 
     function test_RevealVerifierSeed_Success() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         vm.prank(bob);
         mp.commitBuyerSeed(_defaultVerifierCommitment());
@@ -685,9 +730,9 @@ contract MillionairesTest is Test {
 
     function test_RevealVerifierSeed_Twice_Reverts() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         vm.prank(bob);
         mp.commitBuyerSeed(_defaultVerifierCommitment());
@@ -701,9 +746,9 @@ contract MillionairesTest is Test {
 
     function test_RevealVerifierSeed_WrongSalt_Reverts() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         vm.prank(bob);
         mp.commitBuyerSeed(_defaultVerifierCommitment());
@@ -715,9 +760,9 @@ contract MillionairesTest is Test {
 
     function test_RevealVerifierSeed_EmptySeed_Reverts() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         vm.prank(bob);
         mp.commitBuyerSeed(_defaultVerifierCommitment());
@@ -729,9 +774,9 @@ contract MillionairesTest is Test {
 
     function test_FinalizeBuyerSeedCommitAfterDeadline_AlicePenalty() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         vm.warp(block.timestamp + 1 hours + 1 seconds);
 
@@ -740,15 +785,15 @@ contract MillionairesTest is Test {
         mp.finalizeBuyerSeedCommitAfterDeadline();
 
         assertEq(alice.balance, aliceBalanceBefore);
-        assertEq(mp.vault(alice), 2 ether);
+        assertEq(mp.vault(alice), GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.CommitmentsCore));
     }
 
     function test_AbortPhase2_BobPenalty() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
         _commitDefaultVerifierSeed();
         _revealDefaultVerifierSeed();
 
@@ -759,15 +804,15 @@ contract MillionairesTest is Test {
         mp.abortPhase2();
 
         // Bob should have his 1 ETH back + Alice's 1 ETH penalty
-        assertEq(bob.balance, bobBalanceBefore + 2 ether);
+        assertEq(bob.balance, bobBalanceBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
     function test_Fail_AliceLateCommitment() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
         _commitDefaultVerifierSeed();
         _revealDefaultVerifierSeed();
 
@@ -781,9 +826,9 @@ contract MillionairesTest is Test {
 
     function test_BobChoice() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         LegacyInstanceCommitment[10] memory commits;
         _commitAndRevealForChosenM(5);
@@ -797,9 +842,9 @@ contract MillionairesTest is Test {
 
     function test_Choose_BeforeSubmitCommitments_Reverts() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         vm.prank(bob);
         vm.expectRevert("Wrong stage");
@@ -808,9 +853,9 @@ contract MillionairesTest is Test {
 
     function test_SubmitOtRoots_BeforeSeedReveal_Reverts() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
         _commitDefaultVerifierSeed();
         MillionairesProblem.CoreInstanceCommitment[10] memory core = _validCoreCommitments();
         vm.prank(alice);
@@ -825,9 +870,9 @@ contract MillionairesTest is Test {
 
     function test_Choose_BeforeOtRootsSubmitted_Reverts() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
         _commitDefaultVerifierSeed();
         _revealDefaultVerifierSeed();
 
@@ -860,9 +905,9 @@ contract MillionairesTest is Test {
 
     function test_RevealSubmitChoose_SuccessPath() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         _commitAndRevealForChosenM(3);
 
@@ -987,15 +1032,15 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.abortPhase4();
 
-        assertEq(bob.balance, bobBalanceBefore + 2 ether);
+        assertEq(bob.balance, bobBalanceBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
     function test_RevealGarblerLabels_Success() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         uint256 chosenM = 5;
         bytes32 evalRootGc = keccak256("eval-root-gc");
@@ -1051,9 +1096,9 @@ contract MillionairesTest is Test {
 
     function test_RevealGarblerLabels_RevertsWhenLabelsLengthMismatch() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         uint256 chosenM = 5;
         bytes32 evalRootGc = keccak256("eval-root-gc");
@@ -1108,9 +1153,9 @@ contract MillionairesTest is Test {
 
     function test_Fail_RevealGarblerLabels_WhenBlobMissing() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         uint256 chosenM = 5;
         bytes32 evalRootGc = keccak256("eval-root-gc");
@@ -1158,9 +1203,9 @@ contract MillionairesTest is Test {
 
     function test_Fail_RevealGarblerLabels_WhenBlobHashMismatchesCommitment() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         uint256 chosenM = 5;
         bytes32 evalRootGc = keccak256("eval-root-gc");
@@ -1222,11 +1267,11 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.abortPhase5();
 
-        assertEq(bob.balance, bobBalanceBefore + 2 ether);
+        assertEq(bob.balance, bobBalanceBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
-    function test_FinalSettlement_ValidOutput_RefundsBothDeposits() public {
+    function test_FinalSettlement_ValidOutput_MovesToAssignmentThenFinalizes() public {
         bytes memory output = _encodeOutput(0, 77);
         bytes32 circuitId_ = mp.circuitId();
         uint256 expectedM = uint256(
@@ -1242,17 +1287,27 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.settle(output);
 
-        // --- Assertions ---
-        assertEq(alice.balance, aliceBalanceBefore + 1 ether);
-        assertEq(bob.balance, bobBalanceBefore + 1 ether);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+        assertEq(alice.balance, aliceBalanceBefore);
+        assertEq(bob.balance, bobBalanceBefore);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Assignment));
         assertEq(mp.winnerId(), 0);
         assertEq(mp.winningBid(), 77);
         assertEq(mp.winnerBuyer(), bob);
         assertEq(mp.winnerReceiver(), bob);
+        assertEq(adapter.assignCalls(), 0);
+
+        vm.prank(alice);
+        mp.finalizeAssignment();
+
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+        assertEq(alice.balance, aliceBalanceBefore + GARBLER_DEPOSIT + 77);
+        assertEq(bob.balance, bobBalanceBefore + EVALUATOR_DEPOSIT - 77);
+        assertEq(adapter.assignCalls(), 1);
+        assertEq(adapter.lastNamehash(), ENS_NAMEHASH);
+        assertEq(adapter.lastReceiver(), bob);
     }
 
-    function test_FinalSettlement_AnotherBid_RefundsBothDeposits() public {
+    function test_FinalSettlement_AnotherBid_FinalizeAssignmentPaysOut() public {
         bytes memory output = _encodeOutput(0, 5);
         bytes32 circuitId_ = mp.circuitId();
         uint256 expectedM = uint256(
@@ -1268,12 +1323,42 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.settle(output);
 
-        // --- Assertions ---
-        assertEq(alice.balance, aliceBalanceBefore + 1 ether);
-        assertEq(bob.balance, bobBalanceBefore + 1 ether);
-        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Assignment));
         assertEq(mp.winnerId(), 0);
         assertEq(mp.winningBid(), 5);
+
+        vm.prank(bob);
+        mp.finalizeAssignment();
+
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+        assertEq(alice.balance, aliceBalanceBefore + GARBLER_DEPOSIT + 5);
+        assertEq(bob.balance, bobBalanceBefore + EVALUATOR_DEPOSIT - 5);
+    }
+
+    function test_AbortPhase6_WorksInAssignmentStageAfterDeadline() public {
+        bytes memory output = _encodeOutput(0, 33);
+        bytes32 circuitId_ = mp.circuitId();
+        uint256 expectedM = uint256(
+            keccak256(abi.encodePacked("M", _defaultVerifierSeed(), circuitId_, address(mp)))
+        ) % 10;
+        _toSettleStage(
+            _circuitBoundAnchor(circuitId_, expectedM, output),
+            bytes32(0)
+        );
+
+        vm.prank(bob);
+        mp.settle(output);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Assignment));
+
+        (, , , , , , , uint256 settleDeadline) = mp.deadlines();
+        vm.warp(settleDeadline + 1);
+
+        uint256 aliceBalanceBefore = alice.balance;
+        vm.prank(alice);
+        mp.abortPhase6();
+
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+        assertEq(alice.balance, aliceBalanceBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
     }
 
     function test_FinalSettlement_LowerCircuit_ValidOutput() public {
@@ -1294,8 +1379,39 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.settle(output);
 
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Assignment));
         assertEq(mp.winnerId(), 0);
         assertEq(mp.winningBid(), 9);
+    }
+
+    function test_FinalizeAssignment_RevertsBeforeSettle() public {
+        vm.expectRevert("Wrong stage");
+        mp.finalizeAssignment();
+    }
+
+    function test_FinalizeAssignment_RevertsWhenCalledTwice() public {
+        bytes memory output = _encodeOutput(0, 12);
+        bytes32 circuitId_ = mp.circuitId();
+        uint256 expectedM = uint256(
+            keccak256(abi.encodePacked("M", _defaultVerifierSeed(), circuitId_, address(mp)))
+        ) % 10;
+        _toSettleStage(
+            _circuitBoundAnchor(circuitId_, expectedM, output),
+            bytes32(0)
+        );
+
+        vm.prank(bob);
+        mp.settle(output);
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Assignment));
+
+        vm.prank(bob);
+        mp.finalizeAssignment();
+        assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
+
+        mp.setStageForTest(MillionairesProblem.Stage.Assignment);
+
+        vm.expectRevert("Assignment already finalized");
+        mp.finalizeAssignment();
     }
 
     function test_FinalSettlement_CrossCircuitAnchors_RevertInvalidOutputCommitment() public {
@@ -1355,7 +1471,7 @@ contract MillionairesTest is Test {
         mp.challengeGateLeaf(instanceId, gateIndex, g, leaf, proof, layoutProof);
 
         // Bob loses, Alice receives both deposits
-        assertEq(alice.balance, aliceBefore + 2 ether);
+        assertEq(alice.balance, aliceBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
@@ -1384,7 +1500,7 @@ contract MillionairesTest is Test {
         vm.prank(bob);
         mp.challengeGateLeaf(instanceId, gateIndex, g, fakeLeaf, proof, layoutProof);
 
-        assertEq(bob.balance, bobBefore + 2 ether);
+        assertEq(bob.balance, bobBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
@@ -1465,7 +1581,7 @@ contract MillionairesTest is Test {
         mp.disputeGarbledTable(instanceId, seed, gateIndex, g, leaf, proof, layoutProof);
 
         // Same result as challengeGateLeaf on matching leaf: Bob false-challenged.
-        assertEq(alice.balance, aliceBefore + 2 ether);
+        assertEq(alice.balance, aliceBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
@@ -1495,7 +1611,7 @@ contract MillionairesTest is Test {
         mp.disputeGarbledTable(instanceId, seed, gateIndex, g, fakeLeaf, proof, layoutProof);
 
         // Same result as challengeGateLeaf on mismatch: Alice cheated.
-        assertEq(bob.balance, bobBefore + 2 ether);
+        assertEq(bob.balance, bobBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
@@ -1588,7 +1704,7 @@ contract MillionairesTest is Test {
         uint256 bobBefore = bob.balance;
         vm.prank(bob);
         mp.disputeObliviousTransferRoot(0);
-        assertEq(bob.balance, bobBefore + 2 ether);
+        assertEq(bob.balance, bobBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
@@ -1607,7 +1723,7 @@ contract MillionairesTest is Test {
         uint256 aliceBefore = alice.balance;
         vm.prank(bob);
         mp.disputeObliviousTransferRoot(0);
-        assertEq(alice.balance, aliceBefore + 2 ether);
+        assertEq(alice.balance, aliceBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
         assertEq(uint(mp.currentStage()), uint(MillionairesProblem.Stage.Closed));
     }
 
@@ -1647,9 +1763,9 @@ contract MillionairesTest is Test {
 
     function test_SubmitCommitments_BeforeVerifierSeed_Reverts() public {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         MillionairesProblem.CoreInstanceCommitment[10] memory commits;
         vm.prank(alice);
@@ -1666,12 +1782,20 @@ contract MillionairesTest is Test {
 
         // Deploy fresh contract with Rust vector identifiers.
         vm.prank(alice);
-        mp = new MillionairesProblemHarness(bob, bob, v.circuitId, v.circuitLayoutRoot, BIT_WIDTH);
+        mp = new MillionairesProblemHarness(
+            bob,
+            bob,
+            ENS_NAMEHASH,
+            address(adapter),
+            v.circuitId,
+            v.circuitLayoutRoot,
+            BIT_WIDTH
+        );
 
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         require(v.comSeeds.length == 10, "comSeeds must have 10 values");
         require(v.rootGCs.length == 10, "rootGCs must have 10 values");
@@ -1736,11 +1860,11 @@ contract MillionairesTest is Test {
 
         if (v.expectMatch) {
             // False challenge -> Bob slashed to Alice
-            assertEq(alice.balance, aliceBefore + 2 ether);
+            assertEq(alice.balance, aliceBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
             assertEq(bob.balance, bobBefore);
         } else {
             // Real mismatch -> Alice slashed to Bob
-            assertEq(bob.balance, bobBefore + 2 ether);
+            assertEq(bob.balance, bobBefore + GARBLER_DEPOSIT + EVALUATOR_DEPOSIT);
             assertEq(alice.balance, aliceBefore);
         }
 
@@ -1844,9 +1968,9 @@ contract MillionairesTest is Test {
         uint256 mChoice
     ) internal {
         vm.prank(alice);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: GARBLER_DEPOSIT}();
         vm.prank(bob);
-        mp.deposit{value: 1 ether}();
+        mp.deposit{value: EVALUATOR_DEPOSIT}();
 
         vm.prank(bob);
         mp.commitBuyerSeed(_defaultVerifierCommitment());
