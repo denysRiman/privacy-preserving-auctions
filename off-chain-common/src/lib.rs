@@ -1,6 +1,7 @@
 //! Off-chain garbling toolkit for the privacy-preserving auction.
 //! Modules are split by consensus rules, circuit garbling, Merkle proofs, and scenario wiring.
 
+pub mod auction_outcome;
 pub mod cli;
 pub mod consensus;
 pub mod eip4844;

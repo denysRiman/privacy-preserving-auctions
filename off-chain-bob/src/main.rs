@@ -3,6 +3,7 @@ use off_chain_common::cli::{
     parse_flag_value, parse_leaf71, parse_u8, parse_u16, parse_u64, print_tx_summary, required_env,
     required_flag_value, rpc_url, run_cast,
 };
+use off_chain_common::auction_outcome::evaluate_first_price_outcome;
 use off_chain_common::consensus::{keccak256, layout_leaf_hash};
 use off_chain_common::eval_blob::CanonicalEvalBlobPayload;
 use off_chain_common::evaluation::{
@@ -186,6 +187,26 @@ fn parse_winner_formula(args: &[String]) -> AppResult<u8> {
     }
 
     Ok(winner_formula as u8)
+}
+
+fn parse_u64_csv(value: &str, flag_name: &str) -> AppResult<Vec<u64>> {
+    let normalized = value.trim().trim_start_matches('[').trim_end_matches(']').trim();
+    if normalized.is_empty() {
+        return Err(format!("{flag_name} must include at least one value").into());
+    }
+
+    normalized
+        .split(',')
+        .enumerate()
+        .map(|(idx, item)| {
+            let trimmed = item.trim();
+            if trimmed.is_empty() {
+                return Err(format!("{flag_name} contains an empty item at position {}", idx + 1).into());
+            }
+            let field = format!("{flag_name}[{idx}]");
+            parse_u64(trimmed, &field)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -716,24 +737,44 @@ fn cmd_settle_auction(args: &[String]) -> AppResult<()> {
     let rpc_url = rpc_url();
     let contract_address = required_env("CONTRACT_ADDRESS")?;
     let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
-    let winner_id = parse_u16(&required_flag_value(args, "--winner-id")?, "winner-id")?;
-    let winning_bid = parse_u64(&required_flag_value(args, "--winning-bid")?, "winning-bid")?;
     let chosen_namehash = parse_bytes32(&required_flag_value(args, "--chosen-namehash")?)?;
+    let dry_run = args.iter().any(|arg| arg == "--dry-run");
+    if parse_flag_value(args, "--winner-id").is_some()
+        || parse_flag_value(args, "--winning-bid").is_some()
+    {
+        return Err(
+            "--winner-id/--winning-bid are no longer supported; use --bids + --chosen-namehash"
+                .into(),
+        );
+    }
+
+    let raw_bids = if let Some(raw) = parse_flag_value(args, "--bids") {
+        raw
+    } else {
+        return Err("--bids is required for settle-auction".into());
+    };
+    let bids = parse_u64_csv(&raw_bids, "--bids")?;
+    let outcome =
+        evaluate_first_price_outcome(&bids).map_err(|e| format!("invalid --bids: {e}"))?;
+    let winner_id = outcome.winner_id;
+    let winning_bid = outcome.winning_bid;
 
     let output_bytes = encode_auction_output_bytes(winner_id, winning_bid, chosen_namehash);
     let output_hex = hex_prefixed(&output_bytes);
 
-    let tx_result = run_cast(&[
-        "send".to_string(),
-        contract_address,
-        "settle(bytes)".to_string(),
-        output_hex.clone(),
-        "--private-key".to_string(),
-        bob_private_key,
-        "--rpc-url".to_string(),
-        rpc_url,
-    ])?;
-    print_tx_summary("settle_auction", &tx_result);
+    if !dry_run {
+        let tx_result = run_cast(&[
+            "send".to_string(),
+            contract_address,
+            "settle(bytes)".to_string(),
+            output_hex.clone(),
+            "--private-key".to_string(),
+            bob_private_key,
+            "--rpc-url".to_string(),
+            rpc_url,
+        ])?;
+        print_tx_summary("settle_auction", &tx_result);
+    }
     println!("winner_id={winner_id}");
     println!("winning_bid={winning_bid}");
     println!("chosen_namehash={}", hex32(chosen_namehash));
@@ -1154,7 +1195,7 @@ fn print_help() {
     println!("  choose --m <index>");
     println!("  buyer-ready");
     println!("  close-dispute");
-    println!("  settle-auction --winner-id <u16> --winning-bid <u64> --chosen-namehash <0x..32>");
+    println!("  settle-auction --bids <u64,u64,...> --chosen-namehash <0x..32> [--dry-run]");
     println!("  finalize-assignment");
     println!(
         "  evaluate-m --y <u64> [--payload-file <path>] [--eval-dir <path>] [--alice-labels-file <path>]"
@@ -1221,6 +1262,18 @@ mod tests {
         let raw = "0x1111111111111111111111111111111111111111111111111111111111111111";
         let parsed = parse_bytes32(raw).expect("bytes32 parse");
         assert_eq!(hex32(parsed), raw);
+    }
+
+    #[test]
+    fn parses_u64_bids_csv() {
+        let parsed = parse_u64_csv("5, 9, 7", "--bids").expect("parse bids");
+        assert_eq!(parsed, vec![5, 9, 7]);
+    }
+
+    #[test]
+    fn rejects_u64_bids_csv_with_empty_item() {
+        let err = parse_u64_csv("5,,7", "--bids").expect_err("empty item should fail");
+        assert!(err.to_string().contains("empty item"));
     }
 
     #[test]

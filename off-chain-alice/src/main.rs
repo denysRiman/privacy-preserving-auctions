@@ -3,6 +3,7 @@ use off_chain_common::cli::{
     parse_u64, print_tx_summary, required_env, required_env_any, required_flag_value, rpc_url,
     run_cast,
 };
+use off_chain_common::auction_outcome::evaluate_first_price_outcome;
 use off_chain_common::consensus::{derive_wire_label, keccak256};
 use off_chain_common::eip4844::eval_payload_versioned_blob_hash;
 use off_chain_common::eval_blob::CanonicalEvalBlobPayload;
@@ -106,6 +107,33 @@ fn parse_optional_verifier_seed(args: &[String]) -> AppResult<Option<[u8; 32]>> 
         .as_deref()
         .map(parse_bytes32)
         .transpose()
+}
+
+fn is_truthy_env(value: &str) -> bool {
+    matches!(
+        value,
+        "1" | "true" | "TRUE" | "True" | "yes" | "YES" | "on" | "ON"
+    )
+}
+
+fn parse_u64_csv(value: &str, flag_name: &str) -> AppResult<Vec<u64>> {
+    let normalized = value.trim().trim_start_matches('[').trim_end_matches(']').trim();
+    if normalized.is_empty() {
+        return Err(format!("{flag_name} must include at least one value").into());
+    }
+
+    normalized
+        .split(',')
+        .enumerate()
+        .map(|(idx, item)| {
+            let trimmed = item.trim();
+            if trimmed.is_empty() {
+                return Err(format!("{flag_name} contains an empty item at position {}", idx + 1).into());
+            }
+            let field = format!("{flag_name}[{idx}]");
+            parse_u64(trimmed, &field)
+        })
+        .collect()
 }
 
 fn resolve_target_buyer(args: &[String]) -> AppResult<String> {
@@ -262,6 +290,13 @@ fn derive_h_out_lists(
     config: &SessionConfig,
 ) -> AppResult<Vec<[u8; 32]>> {
     if let Some(raw) = parse_flag_value(args, "--h-out") {
+        if env::var("DEMO_MODE")
+            .ok()
+            .as_deref()
+            .is_some_and(is_truthy_env)
+        {
+            return Err("--h-out disabled in demo mode; use --bids + --chosen-namehash".into());
+        }
         let parsed = parse_bytes32_list_csv(&raw)?;
         if parsed.len() != CUT_AND_CHOOSE_N {
             return Err(format!(
@@ -274,29 +309,27 @@ fn derive_h_out_lists(
         return Ok(parsed);
     }
 
-    // Backward-compatible fallback: treat legacy --h0 as hOut list.
-    if let Some(raw) = parse_flag_value(args, "--h0") {
-        let parsed = parse_bytes32_list_csv(&raw)?;
-        if parsed.len() != CUT_AND_CHOOSE_N {
-            return Err(format!(
-                "--h0 must contain {} values, got {}",
-                CUT_AND_CHOOSE_N,
-                parsed.len()
-            )
-            .into());
-        }
-        return Ok(parsed);
+    if parse_flag_value(args, "--h0").is_some() {
+        return Err(
+            "--h0 is no longer supported; use --h-out or --bids + --chosen-namehash".into(),
+        );
     }
 
-    let winner_id = parse_u64(&required_flag_value(args, "--winner-id")?, "winner-id")?;
-    let winning_bid = parse_u64(&required_flag_value(args, "--winning-bid")?, "winning-bid")?;
     let chosen_namehash = parse_bytes32(&required_flag_value(args, "--chosen-namehash")?)?;
-    if winner_id > u16::MAX as u64 {
-        return Err(format!("winner-id out of range for uint16: {winner_id}").into());
-    }
-    let output_bytes = encode_auction_output_bytes(winner_id as u16, winning_bid, chosen_namehash);
+    let raw_bids = if let Some(raw) = parse_flag_value(args, "--bids") {
+        raw
+    } else {
+        return Err("--bids is required unless --h-out is provided".into());
+    };
+    let bids = parse_u64_csv(&raw_bids, "--bids")?;
+    let outcome =
+        evaluate_first_price_outcome(&bids).map_err(|e| format!("invalid --bids: {e}"))?;
+    let output_bytes =
+        encode_auction_output_bytes(outcome.winner_id, outcome.winning_bid, chosen_namehash);
     Ok((0..CUT_AND_CHOOSE_N)
-        .map(|instance_id| output_commitment_hash(config.circuit_id, instance_id as u64, &output_bytes))
+        .map(|instance_id| {
+            output_commitment_hash(config.circuit_id, instance_id as u64, &output_bytes)
+        })
         .collect())
 }
 
@@ -1155,10 +1188,10 @@ fn print_help() {
         "  derive-anchors [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>]"
     );
     println!(
-        "  submit-commitments [--buyer <addr>] [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h-out <0x..,0x.. x10> | --winner-id <u16> --winning-bid <u64> --chosen-namehash <0x..32>] [--export-dir <path>]"
+        "  submit-commitments [--buyer <addr>] [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h-out <0x..,0x.. x10> | --bids <u64,u64,...> --chosen-namehash <0x..32>] [--export-dir <path>]"
     );
     println!(
-        "  submit-core-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h-out <0x..,0x.. x10> | --winner-id <u16> --winning-bid <u64> --chosen-namehash <0x..32>] [--export-dir <path>]"
+        "  submit-core-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h-out <0x..,0x.. x10> | --bids <u64,u64,...> --chosen-namehash <0x..32>] [--export-dir <path>]"
     );
     println!(
         "  submit-ot-roots [--buyer <addr>] [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>]"
@@ -1242,6 +1275,18 @@ mod tests {
             hex32(parsed[0]),
             "0x1111111111111111111111111111111111111111111111111111111111111111"
         );
+    }
+
+    #[test]
+    fn parses_u64_bids_csv() {
+        let parsed = parse_u64_csv("10, 30, 20", "--bids").expect("parse bids");
+        assert_eq!(parsed, vec![10, 30, 20]);
+    }
+
+    #[test]
+    fn rejects_u64_bids_csv_with_empty_item() {
+        let err = parse_u64_csv("10,,20", "--bids").expect_err("empty item should fail");
+        assert!(err.to_string().contains("empty item"));
     }
 
     #[test]

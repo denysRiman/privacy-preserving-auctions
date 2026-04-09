@@ -316,6 +316,7 @@ format_eth_compact() {
 run_alice() {
   (
     cd "${ALICE_APP_DIR}"
+    DEMO_MODE=1 \
     RPC_URL="${RPC_URL}" \
     CONTRACT_ADDRESS="${CONTRACT_ADDRESS}" \
     ALICE_PRIVATE_KEY="${ALICE_PK}" \
@@ -818,10 +819,9 @@ write_dummy_labels_file() {
 
 reveal_labels_settle_finalize() {
   local out_dir="$1"
-  local winner_id="$2"
-  local winning_bid="$3"
-  local chosen_namehash="$4"
-  local m="$5"
+  local bids_csv="$2"
+  local chosen_namehash="$3"
+  local m="$4"
   local blob_file="${out_dir}/instance-${m}-eval-blob.bin"
   local labels_file="${out_dir}/alice-labels32.txt"
   local before_labels after_labels
@@ -829,9 +829,11 @@ reveal_labels_settle_finalize() {
   local before_finalize after_finalize
   local circuit_id h_out_committed h_out_computed settle_out finalize_out
   local output_bytes out_winner_id out_winning_bid out_chosen_namehash out_winner_alias
+  local dry_run_out dry_run_output_bytes
   local winner_addr winner_receiver winner_onchain_bid
   local settle_tx finalize_tx assigned_before assigned_after
   local alice_before alice_after winner_before winner_after
+  local b1_before b2_before b3_before b1_after b2_after b3_after
   local anchor_match
 
   write_dummy_labels_file "${labels_file}"
@@ -846,10 +848,16 @@ reveal_labels_settle_finalize() {
   before_settle="$(stage_value)"
   circuit_id="$(cast call "${CONTRACT_ADDRESS}" "circuitId()(bytes32)" --rpc-url "${RPC_URL}" | grep -Eo '0x[0-9a-fA-F]{64}' | head -n1)"
   h_out_committed="$(instance_hout "${m}")"
-  winner_addr="$(normalize_address_output "$(cast call "${CONTRACT_ADDRESS}" "buyerAt(uint256)(address)" "${winner_id}" --rpc-url "${RPC_URL}")")"
   alice_before="$(participant_vault "${ALICE_ADDR}")"
-  winner_before="$(participant_vault "${winner_addr}")"
-  settle_out="$(run_bob 0 settle-auction --winner-id "${winner_id}" --winning-bid "${winning_bid}" --chosen-namehash "${chosen_namehash}")"
+  b1_before="$(participant_vault "${B1_ADDR}")"
+  b2_before="$(participant_vault "${B2_ADDR}")"
+  b3_before="$(participant_vault "${B3_ADDR}")"
+  dry_run_out="$(run_bob 0 settle-auction --dry-run --bids "${bids_csv}" --chosen-namehash "${chosen_namehash}")"
+  dry_run_output_bytes="$(extract_kv output_bytes "${dry_run_out}")"
+  h_out_computed="$(compute_output_anchor "${circuit_id}" "${m}" "${dry_run_output_bytes}")"
+  printf 'computed_outputBytes=%s\n' "${dry_run_output_bytes}"
+  printf 'computed_hOut=%s\n' "${h_out_computed}"
+  settle_out="$(run_bob 0 settle-auction --bids "${bids_csv}" --chosen-namehash "${chosen_namehash}")"
   after_settle="$(stage_value)"
   settle_tx="$(extract_kv settle_auction_tx_hash "${settle_out}")"
   output_bytes="$(extract_kv output_bytes "${settle_out}")"
@@ -860,7 +868,30 @@ reveal_labels_settle_finalize() {
   h_out_computed="$(compute_output_anchor "${circuit_id}" "${m}" "${output_bytes}")"
   anchor_match="$([[ "${h_out_committed}" == "${h_out_computed}" ]] && echo "true" || echo "false")"
   alice_after="$(participant_vault "${ALICE_ADDR}")"
-  winner_after="$(participant_vault "${winner_addr}")"
+  b1_after="$(participant_vault "${B1_ADDR}")"
+  b2_after="$(participant_vault "${B2_ADDR}")"
+  b3_after="$(participant_vault "${B3_ADDR}")"
+  case "${out_winner_id}" in
+    0)
+      winner_addr="${B1_ADDR}"
+      winner_before="${b1_before}"
+      winner_after="${b1_after}"
+      ;;
+    1)
+      winner_addr="${B2_ADDR}"
+      winner_before="${b2_before}"
+      winner_after="${b2_after}"
+      ;;
+    2)
+      winner_addr="${B3_ADDR}"
+      winner_before="${b3_before}"
+      winner_after="${b3_after}"
+      ;;
+    *)
+      echo "Unexpected winner_id from settle output: ${out_winner_id}" >&2
+      exit 1
+      ;;
+  esac
   winner_onchain_bid="$(normalize_uint_output "$(cast call "${CONTRACT_ADDRESS}" "winningBid()(uint64)" --rpc-url "${RPC_URL}")")"
   winner_receiver="$(normalize_address_output "$(cast call "${CONTRACT_ADDRESS}" "winnerReceiver()(address)" --rpc-url "${RPC_URL}")")"
   LAST_SETTLE_STAGE_BEFORE="${before_settle}"
@@ -984,12 +1015,11 @@ assert_closed() {
 scenario_success() {
   local out_dir
   out_dir="$(case_dir case1-success)"
-  local winner_id=1
-  local winning_bid=100000000000000000 # 0.1 ETH
-  local chosen_namehash="${OFFERED_NAMEHASH_2}"
   local bid_b1=70000000000000000
   local bid_b2=100000000000000000
   local bid_b3=90000000000000000
+  local chosen_namehash="${OFFERED_NAMEHASH_2}"
+  local bids_csv="${bid_b1},${bid_b2},${bid_b3}"
 
   case_header "CASE 1: SUCCESS (3 buyers, N=10)" "Honest run: commitments, disputes, settle and ENS assignment all consistent"
   print_buyers_table
@@ -1012,8 +1042,7 @@ scenario_success() {
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
     --winner-formula "${WINNER_FORMULA}" \
-    --winner-id "${winner_id}" \
-    --winning-bid "${winning_bid}" \
+    --bids "${bids_csv}" \
     --chosen-namehash "${chosen_namehash}" \
     --export-dir "${out_dir}" >/dev/null
   after_core="$(stage_value)"
@@ -1034,7 +1063,7 @@ scenario_success() {
   close_dispute_ready_buyers
   log_pretty_step "P6 Open+Dispute" "OK" "m=${m}, dispute closed by ready buyers" "Open" "${LAST_STAGE_AFTER}" "Open -> Dispute -> Labels (via closeDispute)"
 
-  reveal_labels_settle_finalize "${out_dir}" "${winner_id}" "${winning_bid}" "${chosen_namehash}" "${m}"
+  reveal_labels_settle_finalize "${out_dir}" "${bids_csv}" "${chosen_namehash}" "${m}"
   log_pretty_step "P7 Labels" "OK" "garbler labels revealed for evaluation instance" "${LAST_LABELS_BEFORE}" "${LAST_LABELS_AFTER}"
   log_pretty_step "P8 Settle" "OK" "winnerIndex=${LAST_SETTLE_WINNER_ID}, winnerAlias=$(buyer_label_for_id "${LAST_SETTLE_WINNER_ID}"), winningBid=${LAST_SETTLE_WINNING_BID} wei ($(format_wei_eth "${LAST_SETTLE_WINNING_BID}") ETH), first-price applied" "${LAST_SETTLE_STAGE_BEFORE}" "${LAST_SETTLE_STAGE_AFTER}"
   log_pretty_step "P9 Assign" "OK" "ENS assigned to receiver(B$((LAST_SETTLE_WINNER_ID + 1))) and payouts completed" "${LAST_FINALIZE_STAGE_BEFORE}" "${LAST_FINALIZE_STAGE_AFTER}"
@@ -1057,6 +1086,7 @@ scenario_success() {
   echo "SETTLE"
   echo "Proof: hOut match=${LAST_SETTLE_HOUT_MATCH} | bid<=deposit ✅"
   echo "Decoded: winnerIndex=${LAST_SETTLE_WINNER_ID}, winnerAlias=${winner_label_by_id}, winningBid=$(format_eth_wei_pair "${LAST_SETTLE_WINNING_BID}"), chosenNamehash=${LAST_SETTLE_CHOSEN_NAMEHASH} (${settle_name_human})"
+  echo "OutputBytes: ${LAST_SETTLE_OUTPUT_BYTES}"
   echo "Winner: ${winner_label_by_addr} buyer=${winner_buyer}, receiver=${winner_receiver}"
   echo "Consistency: GC chosen == Alice chosen input ${consistency_ok}"
   echo "ASSIGN"
@@ -1080,12 +1110,11 @@ scenario_success() {
 scenario_bob_defaulted() {
   local out_dir
   out_dir="$(case_dir case2-buyer-defaulted)"
-  local winner_id=1
-  local winning_bid=90000000000000000 # 0.09 ETH
-  local chosen_namehash="${OFFERED_NAMEHASH_1}"
   local bid_b1=80000000000000000
   local bid_b2=90000000000000000
   local bid_b3=0
+  local chosen_namehash="${OFFERED_NAMEHASH_1}"
+  local bids_csv="${bid_b1},${bid_b2},${bid_b3}"
 
   case_header "CASE 2: ONE BUYER DEFAULTED (3 buyers, N=10)" "Liveness: B3 defaults to 0 and is slashed; auction continues and settles"
   print_buyers_table
@@ -1108,8 +1137,7 @@ scenario_bob_defaulted() {
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
     --winner-formula "${WINNER_FORMULA}" \
-    --winner-id "${winner_id}" \
-    --winning-bid "${winning_bid}" \
+    --bids "${bids_csv}" \
     --chosen-namehash "${chosen_namehash}" \
     --export-dir "${out_dir}" >/dev/null
   after_core="$(stage_value)"
@@ -1131,7 +1159,7 @@ scenario_bob_defaulted() {
   close_dispute_ready_buyers
   log_pretty_step "P6 Open+Dispute" "OK" "m=${m}, dispute closed by ready buyers" "Open" "${LAST_STAGE_AFTER}" "Open -> Dispute -> Labels (via closeDispute)"
 
-  reveal_labels_settle_finalize "${out_dir}" "${winner_id}" "${winning_bid}" "${chosen_namehash}" "${m}"
+  reveal_labels_settle_finalize "${out_dir}" "${bids_csv}" "${chosen_namehash}" "${m}"
   log_pretty_step "P7 Labels" "OK" "garbler labels revealed for evaluation instance" "${LAST_LABELS_BEFORE}" "${LAST_LABELS_AFTER}"
   log_pretty_step "P8 Settle" "OK" "winnerIndex=${LAST_SETTLE_WINNER_ID}, winnerAlias=$(buyer_label_for_id "${LAST_SETTLE_WINNER_ID}"), winningBid=${LAST_SETTLE_WINNING_BID} wei ($(format_wei_eth "${LAST_SETTLE_WINNING_BID}") ETH), first-price applied" "${LAST_SETTLE_STAGE_BEFORE}" "${LAST_SETTLE_STAGE_AFTER}"
   log_pretty_step "P9 Assign" "OK" "ENS assigned to receiver(B$((LAST_SETTLE_WINNER_ID + 1))) and payouts completed" "${LAST_FINALIZE_STAGE_BEFORE}" "${LAST_FINALIZE_STAGE_AFTER}"
@@ -1150,6 +1178,7 @@ scenario_bob_defaulted() {
   echo "SETTLE"
   echo "Proof: hOut match=${LAST_SETTLE_HOUT_MATCH} | bid<=deposit ✅"
   echo "Decoded: winnerIndex=${LAST_SETTLE_WINNER_ID}, winnerAlias=${winner_label_by_id}, winningBid=$(format_eth_wei_pair "${LAST_SETTLE_WINNING_BID}"), chosenNamehash=${LAST_SETTLE_CHOSEN_NAMEHASH} (${settle_name_human})"
+  echo "OutputBytes: ${LAST_SETTLE_OUTPUT_BYTES}"
   echo "Winner: ${winner_label_by_addr} buyer=${winner_buyer}, receiver=${LAST_SETTLE_WINNER_RECEIVER}"
   echo "Consistency: GC chosen == Alice chosen input ${consistency_ok}"
   echo "Default proof: B3 missed BuyerInputOT -> Defaulted ✅ | slashed=$(format_eth_wei_pair "${LAST_DEFAULT_SLASH_WEI}") to Alice ✅ | protocol continued ✅"
@@ -1175,12 +1204,11 @@ scenario_bob_defaulted() {
 scenario_alice_cheats() {
   local out_dir
   out_dir="$(case_dir case3-alice-cheats)"
-  local winner_id=1
-  local winning_bid=95000000000000000 # 0.095 ETH
-  local chosen_namehash="${OFFERED_NAMEHASH_3}"
   local bid_b1=85000000000000000
   local bid_b2=95000000000000000
   local bid_b3=92000000000000000
+  local chosen_namehash="${OFFERED_NAMEHASH_3}"
+  local bids_csv="${bid_b1},${bid_b2},${bid_b3}"
 
   case_header "CASE 3: ALICE CHEATS (3 buyers, N=10)" "Integrity: tampered rootGC on opened instance gets disputed and Alice is slashed equally to buyers"
   print_buyers_table
@@ -1233,8 +1261,7 @@ scenario_alice_cheats() {
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
     --winner-formula "${WINNER_FORMULA}" \
-    --winner-id "${winner_id}" \
-    --winning-bid "${winning_bid}" \
+    --bids "${bids_csv}" \
     --chosen-namehash "${chosen_namehash}" \
     --root-gcs "${root_gcs_csv}" \
     --export-dir "${out_dir}" >/dev/null
@@ -1314,6 +1341,7 @@ scenario_alice_cheats() {
   echo "Proof: gate leaf mismatch ✅ -> Alice slashed ✅ -> equal split: $(format_wei_eth "${DEPOSIT_WEI}") ETH / 3 = $(format_wei_eth "${equal_share}") ETH each ✅"
   echo "Result: disputeTx=${LAST_DISPUTE_TX}, closed_without_assignment=true"
   echo "Settlement: skipped (contract closed by dispute)"
+  echo "Reason: dispute resolved => contract Closed; settle rejected by stage"
   echo "Assignment: skipped (closed after dispute)"
   echo "Chosen ENS: N/A (no settle output accepted due to dispute -> Closed)"
   echo "Assign: skipped (Closed after dispute), assigned=false ✅"
