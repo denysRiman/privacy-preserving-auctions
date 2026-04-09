@@ -27,9 +27,13 @@ contract MillionairesScript is Script {
         );
         uint16 bitWidth = 8;
         bytes32 layoutRoot = _canonicalLayoutRoot(circuitId);
+        bytes32[3] memory offered;
+        offered[0] = ensNamehash;
+        offered[1] = ensNamehash;
+        offered[2] = ensNamehash;
 
         vm.startBroadcast(pk);
-        new MillionairesProblem(bob, receiver, ensNamehash, ensAdapter, circuitId, layoutRoot, bitWidth);
+        new MillionairesProblem(bob, receiver, offered, ensAdapter, circuitId, layoutRoot, bitWidth);
         vm.stopBroadcast();
     }
 }

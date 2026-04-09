@@ -12,7 +12,8 @@ contract MillionairesProblem {
     uint64 public winningBid;
     address public winnerBuyer;
     address public winnerReceiver;
-    bytes32 public ensNamehash;
+    bytes32[3] public offeredNamehashes;
+    bytes32 public chosenNamehash;
     address public ensAdapter;
     bool public assigned;
 
@@ -104,7 +105,9 @@ contract MillionairesProblem {
     uint256 public pendingDisputeBuyerClosures;
     uint16 private constant OUTPUT_WINNER_ID_BYTES = 2;
     uint16 private constant OUTPUT_WINNING_BID_BYTES = 8;
-    uint16 private constant OUTPUT_TOTAL_BYTES = OUTPUT_WINNER_ID_BYTES + OUTPUT_WINNING_BID_BYTES;
+    uint16 private constant OUTPUT_CHOSEN_NAMEHASH_BYTES = 32;
+    uint16 private constant OUTPUT_TOTAL_BYTES =
+        OUTPUT_WINNER_ID_BYTES + OUTPUT_WINNING_BID_BYTES + OUTPUT_CHOSEN_NAMEHASH_BYTES;
 
     event WinnerResolved(uint16 indexed winnerId, address indexed buyer, address indexed receiver, uint64 winningBid);
     event EnsAssigned(bytes32 indexed namehash, address indexed receiver);
@@ -112,7 +115,7 @@ contract MillionairesProblem {
     constructor(
         address _initialBuyer,
         address _initialReceiver,
-        bytes32 _ensNamehash,
+        bytes32[3] memory _offeredNamehashes,
         address _ensAdapter,
         bytes32 _circuitId,
         bytes32 _circuitLayoutRoot,
@@ -122,10 +125,17 @@ contract MillionairesProblem {
         require(_bitWidth <= 60, "bitWidth must be <= 60");
         require(_initialBuyer != address(0), "Zero buyer");
         require(_initialReceiver != address(0), "Zero receiver");
-        require(_ensNamehash != bytes32(0), "Zero ENS namehash");
         require(_ensAdapter != address(0), "Zero ENS adapter");
+        for (uint256 i = 0; i < 3; i++) {
+            require(_offeredNamehashes[i] != bytes32(0), "Zero offered ENS namehash");
+            offeredNamehashes[i] = _offeredNamehashes[i];
+        }
+        for (uint256 i = 0; i < 3; i++) {
+            for (uint256 j = i + 1; j < 3; j++) {
+                require(_offeredNamehashes[i] != _offeredNamehashes[j], "Duplicate offered ENS namehash");
+            }
+        }
         alice = msg.sender;
-        ensNamehash = _ensNamehash;
         ensAdapter = _ensAdapter;
         circuitId = _circuitId;
         circuitLayoutRoot = _circuitLayoutRoot;
@@ -649,20 +659,27 @@ contract MillionairesProblem {
         return keccak256(abi.encodePacked("OUT", circuitId, instanceId, outputBytes));
     }
 
-    function _decodeOutput(bytes calldata outputBytes) internal pure returns (uint16 outWinnerId, uint64 outWinningBid) {
+    function _decodeOutput(bytes calldata outputBytes)
+        internal
+        pure
+        returns (uint16 outWinnerId, uint64 outWinningBid, bytes32 outChosenNamehash)
+    {
         require(outputBytes.length == OUTPUT_TOTAL_BYTES, "Bad output length");
         uint256 word;
+        bytes32 chosen;
         assembly {
             word := calldataload(outputBytes.offset)
+            chosen := calldataload(add(outputBytes.offset, 10))
         }
         outWinnerId = uint16(word >> 240);
         outWinningBid = uint64((word >> 176) & 0xFFFFFFFFFFFFFFFF);
+        outChosenNamehash = chosen;
     }
 
     /**
      * @dev Phase 8: participant submits the final output label.
      * Output bytes encoding is fixed-width packed:
-     * abi.encodePacked(uint16 winnerId, uint64 winningBid).
+     * abi.encodePacked(uint16 winnerId, uint64 winningBid, bytes32 chosenNamehash).
      * Matching is done against circuit-bound output anchor committed in `hOut`.
      */
     function settle(bytes calldata outputBytes) external {
@@ -673,13 +690,22 @@ contract MillionairesProblem {
         InstanceCommitment storage evalInstance = instanceCommitments[m];
         require(_computeOutputAnchor(m, outputBytes) == evalInstance.hOut, "Invalid output commitment");
 
-        (uint16 outWinnerId, uint64 outWinningBid) = _decodeOutput(outputBytes);
+        (uint16 outWinnerId, uint64 outWinningBid, bytes32 outChosenNamehash) = _decodeOutput(outputBytes);
         require(outWinnerId < buyers.length, "winnerId out of bounds");
-        uint256 winningBidLimit = uint256(1) << uint256(bitWidth);
-        require(uint256(outWinningBid) < winningBidLimit, "winningBid out of range");
+        uint256 widthBoundExclusive = uint256(1) << uint256(bitWidth);
+        uint256 widthBoundInclusive = widthBoundExclusive - 1;
+        uint256 effectiveBidCap = widthBoundInclusive < DEPOSIT_EVALUATOR
+            ? widthBoundInclusive
+            : DEPOSIT_EVALUATOR;
+        require(uint256(outWinningBid) <= effectiveBidCap, "winningBid exceeds effective cap");
         address outWinnerBuyer = buyers[outWinnerId];
-        require(uint256(outWinningBid) <= DEPOSIT_EVALUATOR, "winningBid exceeds max deposit");
         require(uint256(outWinningBid) <= vault[outWinnerBuyer], "winningBid exceeds winner vault");
+        require(
+            outChosenNamehash == offeredNamehashes[0] ||
+            outChosenNamehash == offeredNamehashes[1] ||
+            outChosenNamehash == offeredNamehashes[2],
+            "chosenNamehash not offered"
+        );
 
         // First-price auction transfer: winner pays own bid to Alice from winner collateral vault.
         vault[outWinnerBuyer] -= uint256(outWinningBid);
@@ -689,8 +715,11 @@ contract MillionairesProblem {
         winningBid = outWinningBid;
         winnerBuyer = outWinnerBuyer;
         winnerReceiver = buyerReceiver[winnerBuyer];
+        chosenNamehash = outChosenNamehash;
 
         emit WinnerResolved(winnerId, winnerBuyer, winnerReceiver, winningBid);
+        // Reuse settle deadline slot as Assignment timeout window.
+        deadlines.settle = block.timestamp + 1 hours;
         currentStage = Stage.Assignment;
     }
 
@@ -699,10 +728,11 @@ contract MillionairesProblem {
         require(!assigned, "Assignment already finalized");
         require(winnerBuyer != address(0), "Winner buyer not set");
         require(winnerReceiver != address(0), "Winner receiver not set");
+        require(chosenNamehash != bytes32(0), "chosenNamehash not set");
 
         assigned = true;
-        IEnsAuctionAdapter(ensAdapter).assign(ensNamehash, winnerReceiver);
-        emit EnsAssigned(ensNamehash, winnerReceiver);
+        IEnsAuctionAdapter(ensAdapter).assign(chosenNamehash, winnerReceiver);
+        emit EnsAssigned(chosenNamehash, winnerReceiver);
 
         uint256 payoutAlice = vault[alice];
         vault[alice] = 0;

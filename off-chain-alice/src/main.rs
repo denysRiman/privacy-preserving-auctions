@@ -16,7 +16,9 @@ use off_chain_common::ot::{recompute_ot_payload_hashes, recompute_ot_root};
 use off_chain_common::scenario::{
     CUT_AND_CHOOSE_N, build_millionaires_layout, com_seed, derive_instance_seed,
 };
-use off_chain_common::settlement::{default_circuit_id, output_anchor_hash};
+use off_chain_common::settlement::{
+    default_circuit_id, encode_auction_output_bytes, output_anchor_hash, output_commitment_hash,
+};
 use off_chain_common::types::CircuitLayout;
 use std::env;
 use std::error::Error;
@@ -229,19 +231,17 @@ fn build_commitment_tuple_items(
     instances: &[InstanceArtifacts],
     root_gcs: &[[u8; 32]],
     blob_hashes: &[[u8; 32]],
-    h0: &[[u8; 32]],
-    h1: &[[u8; 32]],
+    h_out: &[[u8; 32]],
 ) -> Vec<String> {
     instances
         .iter()
         .map(|inst| {
             format!(
-                "({},{},{},{},{})",
+                "({},{},{},{})",
                 hex32(inst.com_seed),
                 hex32(root_gcs[inst.instance_id]),
                 hex32(blob_hashes[inst.instance_id]),
-                hex32(h0[inst.instance_id]),
-                hex32(h1[inst.instance_id])
+                hex32(h_out[inst.instance_id]),
             )
         })
         .collect::<Vec<_>>()
@@ -251,11 +251,53 @@ fn build_commitments_arg(
     instances: &[InstanceArtifacts],
     root_gcs: &[[u8; 32]],
     blob_hashes: &[[u8; 32]],
-    h0: &[[u8; 32]],
-    h1: &[[u8; 32]],
+    h_out: &[[u8; 32]],
 ) -> String {
-    let tuple_items = build_commitment_tuple_items(instances, root_gcs, blob_hashes, h0, h1);
+    let tuple_items = build_commitment_tuple_items(instances, root_gcs, blob_hashes, h_out);
     format!("[{}]", tuple_items.join(","))
+}
+
+fn derive_h_out_lists(
+    args: &[String],
+    config: &SessionConfig,
+) -> AppResult<Vec<[u8; 32]>> {
+    if let Some(raw) = parse_flag_value(args, "--h-out") {
+        let parsed = parse_bytes32_list_csv(&raw)?;
+        if parsed.len() != CUT_AND_CHOOSE_N {
+            return Err(format!(
+                "--h-out must contain {} values, got {}",
+                CUT_AND_CHOOSE_N,
+                parsed.len()
+            )
+            .into());
+        }
+        return Ok(parsed);
+    }
+
+    // Backward-compatible fallback: treat legacy --h0 as hOut list.
+    if let Some(raw) = parse_flag_value(args, "--h0") {
+        let parsed = parse_bytes32_list_csv(&raw)?;
+        if parsed.len() != CUT_AND_CHOOSE_N {
+            return Err(format!(
+                "--h0 must contain {} values, got {}",
+                CUT_AND_CHOOSE_N,
+                parsed.len()
+            )
+            .into());
+        }
+        return Ok(parsed);
+    }
+
+    let winner_id = parse_u64(&required_flag_value(args, "--winner-id")?, "winner-id")?;
+    let winning_bid = parse_u64(&required_flag_value(args, "--winning-bid")?, "winning-bid")?;
+    let chosen_namehash = parse_bytes32(&required_flag_value(args, "--chosen-namehash")?)?;
+    if winner_id > u16::MAX as u64 {
+        return Err(format!("winner-id out of range for uint16: {winner_id}").into());
+    }
+    let output_bytes = encode_auction_output_bytes(winner_id as u16, winning_bid, chosen_namehash);
+    Ok((0..CUT_AND_CHOOSE_N)
+        .map(|instance_id| output_commitment_hash(config.circuit_id, instance_id as u64, &output_bytes))
+        .collect())
 }
 
 fn opened_indices_and_seeds(
@@ -782,13 +824,7 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     let zero = [0u8; 32];
     let export_dir = parse_flag_value(args, "--export-dir").map(PathBuf::from);
     let verifier_seed = parse_optional_verifier_seed(args)?;
-    let derive_default_anchors =
-        parse_flag_value(args, "--h0").is_none() || parse_flag_value(args, "--h1").is_none();
-    let derived_anchors = if derive_default_anchors {
-        Some(derive_anchor_lists(&config)?)
-    } else {
-        None
-    };
+    let h_out = derive_h_out_lists(args, &config)?;
 
     let root_gcs = if let Some(raw) = parse_flag_value(args, "--root-gcs") {
         let parsed = parse_bytes32_list_csv(&raw)?;
@@ -829,7 +865,6 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     } else {
         vec![zero; CUT_AND_CHOOSE_N]
     };
-
     let root_ots = if let Some(raw) = parse_flag_value(args, "--root-ots") {
         let parsed = parse_bytes32_list_csv(&raw)?;
         if parsed.len() != CUT_AND_CHOOSE_N {
@@ -848,45 +883,7 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
             "Provide --verifier-seed or --root-ots so Alice can commit rootOT values".into(),
         );
     };
-    let h0 = if let Some(raw) = parse_flag_value(args, "--h0") {
-        let parsed = parse_bytes32_list_csv(&raw)?;
-        if parsed.len() != CUT_AND_CHOOSE_N {
-            return Err(format!(
-                "--h0 must contain {} values, got {}",
-                CUT_AND_CHOOSE_N,
-                parsed.len()
-            )
-            .into());
-        }
-        parsed
-    } else {
-        derived_anchors
-            .as_ref()
-            .expect("derived anchors available when h0 override is absent")
-            .0
-            .clone()
-    };
-
-    let h1 = if let Some(raw) = parse_flag_value(args, "--h1") {
-        let parsed = parse_bytes32_list_csv(&raw)?;
-        if parsed.len() != CUT_AND_CHOOSE_N {
-            return Err(format!(
-                "--h1 must contain {} values, got {}",
-                CUT_AND_CHOOSE_N,
-                parsed.len()
-            )
-            .into());
-        }
-        parsed
-    } else {
-        derived_anchors
-            .as_ref()
-            .expect("derived anchors available when h1 override is absent")
-            .1
-            .clone()
-    };
-
-    let core_commitments_arg = build_commitments_arg(&instances, &root_gcs, &blob_hashes, &h0, &h1);
+    let core_commitments_arg = build_commitments_arg(&instances, &root_gcs, &blob_hashes, &h_out);
 
     println!("circuit_id={}", hex32(config.circuit_id));
     println!("master_seed={}", hex32(config.master_seed));
@@ -894,19 +891,20 @@ fn cmd_submit_commitments(args: &[String]) -> AppResult<()> {
     println!("ot_roots_buyer={buyer_address}");
     for inst in &instances {
         println!(
-            "instance={} comSeed={} rootGC={} rootOT={} blobHashGC={}",
+            "instance={} comSeed={} rootGC={} rootOT={} blobHashGC={} hOut={}",
             inst.instance_id,
             hex32(inst.com_seed),
             hex32(root_gcs[inst.instance_id]),
             hex32(root_ots[inst.instance_id]),
-            hex32(blob_hashes[inst.instance_id])
+            hex32(blob_hashes[inst.instance_id]),
+            hex32(h_out[inst.instance_id])
         );
     }
 
     let core_tx_result = run_cast(&[
         "send".to_string(),
         contract_address.clone(),
-        "submitCommitments((bytes32,bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
+        "submitCommitments((bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
         core_commitments_arg,
         "--private-key".to_string(),
         alice_private_key.clone(),
@@ -938,13 +936,7 @@ fn cmd_submit_core_commitments(args: &[String]) -> AppResult<()> {
     let instances = build_instances(&config);
     let zero = [0u8; 32];
     let export_dir = parse_flag_value(args, "--export-dir").map(PathBuf::from);
-    let derive_default_anchors =
-        parse_flag_value(args, "--h0").is_none() || parse_flag_value(args, "--h1").is_none();
-    let derived_anchors = if derive_default_anchors {
-        Some(derive_anchor_lists(&config)?)
-    } else {
-        None
-    };
+    let h_out = derive_h_out_lists(args, &config)?;
 
     let root_gcs = if let Some(raw) = parse_flag_value(args, "--root-gcs") {
         let parsed = parse_bytes32_list_csv(&raw)?;
@@ -986,66 +978,26 @@ fn cmd_submit_core_commitments(args: &[String]) -> AppResult<()> {
     } else {
         vec![zero; CUT_AND_CHOOSE_N]
     };
-
-    let root_ots = vec![zero; CUT_AND_CHOOSE_N];
-    let h0 = if let Some(raw) = parse_flag_value(args, "--h0") {
-        let parsed = parse_bytes32_list_csv(&raw)?;
-        if parsed.len() != CUT_AND_CHOOSE_N {
-            return Err(format!(
-                "--h0 must contain {} values, got {}",
-                CUT_AND_CHOOSE_N,
-                parsed.len()
-            )
-            .into());
-        }
-        parsed
-    } else {
-        derived_anchors
-            .as_ref()
-            .expect("derived anchors available when h0 override is absent")
-            .0
-            .clone()
-    };
-
-    let h1 = if let Some(raw) = parse_flag_value(args, "--h1") {
-        let parsed = parse_bytes32_list_csv(&raw)?;
-        if parsed.len() != CUT_AND_CHOOSE_N {
-            return Err(format!(
-                "--h1 must contain {} values, got {}",
-                CUT_AND_CHOOSE_N,
-                parsed.len()
-            )
-            .into());
-        }
-        parsed
-    } else {
-        derived_anchors
-            .as_ref()
-            .expect("derived anchors available when h1 override is absent")
-            .1
-            .clone()
-    };
-
-    let commitments_arg = build_commitments_arg(&instances, &root_gcs, &blob_hashes, &h0, &h1);
+    let commitments_arg = build_commitments_arg(&instances, &root_gcs, &blob_hashes, &h_out);
 
     println!("circuit_id={}", hex32(config.circuit_id));
     println!("master_seed={}", hex32(config.master_seed));
     println!("bit_width={}", config.bit_width);
     for inst in &instances {
         println!(
-            "instance={} comSeed={} rootGC={} rootOT={} blobHashGC={}",
+            "instance={} comSeed={} rootGC={} blobHashGC={} hOut={}",
             inst.instance_id,
             hex32(inst.com_seed),
             hex32(root_gcs[inst.instance_id]),
-            hex32(root_ots[inst.instance_id]),
-            hex32(blob_hashes[inst.instance_id])
+            hex32(blob_hashes[inst.instance_id]),
+            hex32(h_out[inst.instance_id])
         );
     }
 
     let tx_result = run_cast(&[
         "send".to_string(),
         contract_address,
-        "submitCommitments((bytes32,bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
+        "submitCommitments((bytes32,bytes32,bytes32,bytes32)[10])".to_string(),
         commitments_arg,
         "--private-key".to_string(),
         alice_private_key,
@@ -1203,10 +1155,10 @@ fn print_help() {
         "  derive-anchors [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>]"
     );
     println!(
-        "  submit-commitments [--buyer <addr>] [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
+        "  submit-commitments [--buyer <addr>] [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h-out <0x..,0x.. x10> | --winner-id <u16> --winning-bid <u64> --chosen-namehash <0x..32>] [--export-dir <path>]"
     );
     println!(
-        "  submit-core-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h0 <0x..,0x.. x10>] [--h1 <0x..,0x.. x10>] [--export-dir <path>]"
+        "  submit-core-commitments [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--winner-formula <0|1>] [--root-gcs <0x..,0x.. x10>] [--blob-hashes <0x..,0x.. x10>] [--h-out <0x..,0x.. x10> | --winner-id <u16> --winning-bid <u64> --chosen-namehash <0x..32>] [--export-dir <path>]"
     );
     println!(
         "  submit-ot-roots [--buyer <addr>] [--bit-width <bits>] [--circuit-id <0x..32>] [--master-seed <0x..32>] [--verifier-seed <0x..32> | --root-ots <0x..,0x.. x10>]"
@@ -1363,19 +1315,17 @@ mod tests {
         let instances = build_instances(&config);
         let root_gcs = instances.iter().map(|inst| inst.root_gc).collect::<Vec<_>>();
         let blob_hashes = vec![[0x11u8; 32]; CUT_AND_CHOOSE_N];
-        let h0 = vec![[0x22u8; 32]; CUT_AND_CHOOSE_N];
-        let h1 = vec![[0x33u8; 32]; CUT_AND_CHOOSE_N];
+        let h_out = vec![[0x22u8; 32]; CUT_AND_CHOOSE_N];
 
-        let commitments_arg = build_commitments_arg(&instances, &root_gcs, &blob_hashes, &h0, &h1);
+        let commitments_arg = build_commitments_arg(&instances, &root_gcs, &blob_hashes, &h_out);
 
         for inst in &instances {
             let expected_tuple = format!(
-                "({},{},{},{},{})",
+                "({},{},{},{})",
                 hex32(inst.com_seed),
                 hex32(root_gcs[inst.instance_id]),
                 hex32(blob_hashes[inst.instance_id]),
-                hex32(h0[inst.instance_id]),
-                hex32(h1[inst.instance_id])
+                hex32(h_out[inst.instance_id]),
             );
             assert!(commitments_arg.contains(&expected_tuple));
         }

@@ -15,7 +15,9 @@ use off_chain_common::ot::{
     ot_leaf_index, ot_message_author, ot_root_from_payload_hashes, recompute_ot_payload_hashes,
 };
 use off_chain_common::scenario::build_millionaires_layout;
-use off_chain_common::settlement::{default_circuit_id, output_anchor_hash};
+use off_chain_common::settlement::{
+    default_circuit_id, encode_auction_output_bytes, output_anchor_hash,
+};
 use off_chain_common::types::{CircuitLayout, GateDesc};
 use std::env;
 use std::error::Error;
@@ -674,6 +676,89 @@ fn cmd_choose(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_buyer_ready() -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "submitBuyerReady()".to_string(),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+    print_tx_summary("buyer_ready", &tx_result);
+    Ok(())
+}
+
+fn cmd_close_dispute() -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "closeDispute()".to_string(),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+    print_tx_summary("close_dispute", &tx_result);
+    Ok(())
+}
+
+fn cmd_settle_auction(args: &[String]) -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+    let winner_id = parse_u16(&required_flag_value(args, "--winner-id")?, "winner-id")?;
+    let winning_bid = parse_u64(&required_flag_value(args, "--winning-bid")?, "winning-bid")?;
+    let chosen_namehash = parse_bytes32(&required_flag_value(args, "--chosen-namehash")?)?;
+
+    let output_bytes = encode_auction_output_bytes(winner_id, winning_bid, chosen_namehash);
+    let output_hex = hex_prefixed(&output_bytes);
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "settle(bytes)".to_string(),
+        output_hex.clone(),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+    print_tx_summary("settle_auction", &tx_result);
+    println!("winner_id={winner_id}");
+    println!("winning_bid={winning_bid}");
+    println!("chosen_namehash={}", hex32(chosen_namehash));
+    println!("output_bytes={output_hex}");
+    Ok(())
+}
+
+fn cmd_finalize_assignment() -> AppResult<()> {
+    let rpc_url = rpc_url();
+    let contract_address = required_env("CONTRACT_ADDRESS")?;
+    let bob_private_key = required_env("BOB_PRIVATE_KEY")?;
+
+    let tx_result = run_cast(&[
+        "send".to_string(),
+        contract_address,
+        "finalizeAssignment()".to_string(),
+        "--private-key".to_string(),
+        bob_private_key,
+        "--rpc-url".to_string(),
+        rpc_url,
+    ])?;
+    print_tx_summary("finalize_assignment", &tx_result);
+    Ok(())
+}
+
 fn cmd_evaluate_m(args: &[String]) -> AppResult<()> {
     let y_value = parse_u64(&required_flag_value(args, "--y")?, "y")?;
     let eval_dir = parse_flag_value(args, "--eval-dir").map(|dir| Path::new(&dir).to_path_buf());
@@ -1067,6 +1152,10 @@ fn print_help() {
     println!("  commit-verifier-seed [--seed <0x..32> --salt <0x..32> | --commitment <0x..32>]");
     println!("  reveal-verifier-seed --seed <0x..32> --salt <0x..32>");
     println!("  choose --m <index>");
+    println!("  buyer-ready");
+    println!("  close-dispute");
+    println!("  settle-auction --winner-id <u16> --winning-bid <u64> --chosen-namehash <0x..32>");
+    println!("  finalize-assignment");
     println!(
         "  evaluate-m --y <u64> [--payload-file <path>] [--eval-dir <path>] [--alice-labels-file <path>]"
     );
@@ -1096,6 +1185,10 @@ fn main() -> AppResult<()> {
         "commit-verifier-seed" => cmd_commit_verifier_seed(tail),
         "reveal-verifier-seed" => cmd_reveal_verifier_seed(tail),
         "choose" => cmd_choose(tail),
+        "buyer-ready" => cmd_buyer_ready(),
+        "close-dispute" => cmd_close_dispute(),
+        "settle-auction" => cmd_settle_auction(tail),
+        "finalize-assignment" => cmd_finalize_assignment(),
         "evaluate-m" => cmd_evaluate_m(tail),
         "prepare-dispute" => cmd_prepare_dispute(tail),
         "prepare-ot-dispute" => cmd_prepare_ot_dispute(tail),

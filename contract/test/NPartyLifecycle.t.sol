@@ -9,6 +9,12 @@ contract NPartyMockEnsAuctionAdapter is IEnsAuctionAdapter {
 }
 
 contract NPartyHarness is MillionairesProblem {
+    function _singleOffered(bytes32 namehash) internal pure returns (bytes32[3] memory offered) {
+        offered[0] = namehash;
+        offered[1] = namehash;
+        offered[2] = namehash;
+    }
+
     constructor(
         address _bob,
         address _receiver,
@@ -18,7 +24,15 @@ contract NPartyHarness is MillionairesProblem {
         bytes32 _circuitLayoutRoot,
         uint16 _bitWidth
     )
-        MillionairesProblem(_bob, _receiver, _ensNamehash, _ensAdapter, _circuitId, _circuitLayoutRoot, _bitWidth)
+        MillionairesProblem(
+            _bob,
+            _receiver,
+            _singleOffered(_ensNamehash),
+            _ensAdapter,
+            _circuitId,
+            _circuitLayoutRoot,
+            _bitWidth
+        )
     {}
 
     function computeOtRootForTest(bytes32 garblerSeed, bytes32 verifierSeedValue, address buyerAddr, uint256 instanceId)

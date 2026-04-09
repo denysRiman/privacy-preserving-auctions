@@ -25,6 +25,12 @@ contract MockEnsAuctionAdapter is IEnsAuctionAdapter {
 }
 
 contract MillionairesProblemHarness is MillionairesProblem {
+    function _singleOffered(bytes32 namehash) internal pure returns (bytes32[3] memory offered) {
+        offered[0] = namehash;
+        offered[1] = namehash;
+        offered[2] = namehash;
+    }
+
     constructor(
         address _bob,
         address _receiver,
@@ -34,7 +40,7 @@ contract MillionairesProblemHarness is MillionairesProblem {
         bytes32 _circuitLayoutRoot,
         uint16 _bitWidth
     )
-    MillionairesProblem(_bob, _receiver, _ensNamehash, _ensAdapter, _circuitId, _circuitLayoutRoot, _bitWidth)
+    MillionairesProblem(_bob, _receiver, _singleOffered(_ensNamehash), _ensAdapter, _circuitId, _circuitLayoutRoot, _bitWidth)
     {}
 
     function computeLeaf(bytes32 seed, uint256 instanceId, uint256 gateIndex, GateDesc calldata g)
