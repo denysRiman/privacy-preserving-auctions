@@ -1,0 +1,24 @@
+# LaTeX build artifacts (local to FINAL)
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.loa
+*.idx
+*.ind
+*.ilg
+*.acn
+*.acr
+*.alg
+*.glg
+*.glo
+*.gls
+*.glsdefs
+*.ist
+*.mw
+*.xmpdata
+*.xmpi
+*.synctex.gz
+thesis.pdf

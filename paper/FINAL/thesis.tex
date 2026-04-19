@@ -1,0 +1,88 @@
+\documentclass[final,oneside]{vutinfth}
+
+% Core thesis metadata.
+\newcommand{\authorname}{Denys Nahornyi}
+\newcommand{\thesistitleen}{Economically secure 2PC on Ethereum}
+\newcommand{\thesistitlede}{Economically secure 2PC on Ethereum}
+\newcommand{\curriculumen}{Master's programme Software Engineering \& Internet Computing}
+\newcommand{\curriculumde}{Masterstudium Software Engineering \& Internet Computing}
+
+% UTF-8 input and modern font output.
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+% Required persons.
+\setauthor{}{\authorname}{}{male}
+\setadvisor{Assistant Prof.}{Georgia Avarikioti}{Dr.sc.ETH}{female}
+
+% Participation field on title page (assistant involved).
+\setfirstassistant{}{Ioannis Alexopoulos}{}{male}
+
+% Required thesis data.
+\setregnumber{11742819}
+\setdate{10}{05}{2026}
+\settitle{\thesistitleen}{\thesistitlede}
+\setthesis{master}
+\setmasterdegree{dipl.}
+\setcurriculum{\curriculumen}{\curriculumde}
+
+\begin{document}
+
+\frontmatter
+
+% Front matter order follows paper/EXAMPLE/example.tex.
+\addtitlepage{naustrian}
+\addtitlepage{english}
+\addstatementpage{english}
+
+\begin{acknowledgements*}
+Placeholder: acknowledgements in English.
+\end{acknowledgements*}
+
+\begin{kurzfassung}
+Platzhalter: Kurzfassung (0.5 bis 1 Seite) mit Kontext, Forschungsfrage,
+Methodik und zentralen Ergebnissen.
+\end{kurzfassung}
+
+\begin{abstract}
+Placeholder: abstract (0.5 to 1 page) with context, research question,
+methods, and main results.
+\end{abstract}
+
+\selectlanguage{english}
+\tableofcontents
+
+\mainmatter
+
+\chapter{Introduction}
+Placeholder: motivation, problem statement, contribution summary, and chapter roadmap.
+
+\chapter{Background and Related Work}
+Placeholder: 2PC, garbled circuits, public verifiability, MEV context, and related systems.
+
+\chapter{Model and Requirements}
+Placeholder: threat model, assumptions, security goals, and economic-security requirements.
+
+\chapter{Protocol Design}
+Placeholder: protocol phases, commitments, dispute flow, and settlement logic.
+
+\chapter{Implementation (Proof of Concept)}
+Placeholder: contract architecture, off-chain components, interfaces, and testing setup.
+
+\chapter{Evaluation}
+Placeholder: experiment setup, metrics, results, and performance/cost analysis.
+
+\chapter{Discussion and Conclusion}
+Placeholder: interpretation of results, limitations, and future work.
+
+\backmatter
+
+\begin{aitools}
+Placeholder: list all generative AI tools used, where they were used, and prompt disclosures where required.
+\end{aitools}
+
+\bibliographystyle{alpha}
+\bibliography{references}
+
+\end{document}
