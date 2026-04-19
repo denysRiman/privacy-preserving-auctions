@@ -56,10 +56,95 @@ methods, and main results.
 \mainmatter
 
 \chapter{Introduction}
-Placeholder: motivation, problem statement, contribution summary, and chapter roadmap.
+\section{Context and Motivation}
+Public blockchains provide strong auditability, but this property comes with a direct tradeoff: transaction data and transaction ordering are visible before final settlement~\cite{Wood2025Ethereum}. On Ethereum, this transparency enables adversarial strategies such as reordering, insertion, and censorship, often discussed under maximal extractable value (MEV)~\cite{Daian2019FlashBoys}. For protocols that involve private inputs, this visibility is not a side issue; it directly affects fairness and correctness of outcomes.
+
+This thesis studies that tension for a concrete and practically relevant setting: sealed-bid auctions. In this setting, bids should remain private during execution, while the final winner and settlement must be publicly enforceable. If private information leaks too early, strategic behavior can distort the outcome and reduce trust in the mechanism. If enforcement is weak, parties can deviate or abort at points where deviation is economically beneficial.
+
+Recent work by Alexopoulos et al. (BitPriv) demonstrates that privacy-preserving and economically enforceable computation can be achieved in a Bitcoin-native environment through off-chain two-party computation (2PC), collateral-backed incentives, and on-chain dispute resolution~\cite{BitPriv2025}. This thesis takes that line of ideas as the conceptual baseline and investigates how an analogous design can be structured and evaluated for Ethereum, with explicit attention to Ethereum-specific cost and execution constraints.
+
+\section{Problem Statement}
+The central problem is to design a protocol for sealed-bid auctions on Ethereum that satisfies four properties at the same time:
+\begin{enumerate}
+\item \textbf{Input privacy}: bids are not revealed before the protocol reaches a valid settlement point.
+\item \textbf{Public enforceability}: the on-chain contract can enforce the agreed output and financial transfers.
+\item \textbf{Robustness to strategic behavior}: the protocol remains operational when parties stall, abort, or provide inconsistent artifacts.
+\item \textbf{Practical deployability}: on-chain overhead remains manageable and implementation complexity stays within realistic engineering bounds.
+\end{enumerate}
+
+In public-blockchain deployments these goals interact in non-trivial ways. Stronger cryptographic guarantees may increase operational cost, while cheaper constructions can weaken deterrence against rational deviations. The protocol therefore has to be reasoned about not only cryptographically, but also economically: the expected payoff of honest behavior should dominate profitable deviation under explicit assumptions~\cite{Zhu2019PV2PC}.
+
+\section{Research Objectives}
+Based on the approved thesis proposal, the objective of this work is to design and prototype an economically secure 2PC protocol for Ethereum-based sealed-bid auctions, with first-price auctions as the baseline use case.
+
+Concretely, the thesis targets:
+\begin{enumerate}
+\item a protocol architecture that combines off-chain 2PC execution with on-chain commitments, deadlines, and disputes;
+\item a threat and assumptions model suitable for adversarial transaction environments;
+\item a Solidity + Rust proof-of-concept demonstrating end-to-end execution;
+\item an evaluation of feasibility, including cost/performance characteristics and dispute-path practicality;
+\item an economic-security analysis that explains how deposits, collateral, and penalties deter rational cheating.
+\end{enumerate}
+
+\section{Contributions of This Thesis}
+The expected contributions of this thesis are the following:
+\begin{enumerate}
+\item \textbf{Ethereum-oriented protocol design:} a protocol that preserves bid privacy while keeping settlement publicly enforceable in a hostile execution environment.
+\item \textbf{Economic-security framing:} a practical incentive model for rational participants, including explicit assumptions and deterrence conditions.
+\item \textbf{Prototype implementation:} an integrated proof-of-concept with on-chain contract logic and off-chain 2PC components.
+\item \textbf{Empirical evidence:} implementation-driven measurements and scenario-based analysis of optimistic and dispute executions.
+\item \textbf{Design transfer from prior work:} a structured adaptation of ideas from Bitcoin-focused economically secure private computation to an Ethereum deployment context.
+\end{enumerate}
+
+\section{Thesis Structure}
+The remainder of this thesis is organized as follows.
+Chapter~2 reviews foundations and related work on 2PC, garbled circuits, publicly verifiable enforcement, and MEV-relevant blockchain settings. Chapter~3 defines the model, assumptions, adversaries, and formalized requirements.
+Chapter~4 presents the protocol design and phase-by-phase logic.
+Chapter~5 describes the implementation architecture and engineering choices.
+Chapter~6 evaluates the prototype with respect to cost, performance, and protocol behavior under key scenarios.
+Chapter~7 discusses limitations, summarizes the main findings, and outlines future work.
 
 \chapter{Background and Related Work}
-Placeholder: 2PC, garbled circuits, public verifiability, MEV context, and related systems.
+\section{Secure Two-Party Computation Basics}
+Secure two-party computation (2PC) studies how two mutually distrustful parties can jointly compute a function over private inputs while revealing only the prescribed output. In this thesis, the technical baseline follows the garbled-circuit line of work, where one party garbles a circuit and the other evaluates it using input labels obtained via oblivious transfer (OT). Foundational properties and formal treatment of garbled circuits are well documented in the literature~\cite{Bellare2012FoundationsGC}. Practical maliciously secure 2PC constructions and efficiency tradeoffs were further developed in classical protocols such as Lindell--Pinkas~\cite{LindellPinkas2008}.
+
+For blockchain applications, 2PC is attractive because most heavy cryptographic computation can remain off-chain, while on-chain logic is used primarily for commitments, deadlines, and settlement enforcement. This architecture matches the need to reduce gas cost while still preserving privacy and accountability.
+
+\section{From Semi-Honest to Malicious Security}
+In a semi-honest model, parties follow the protocol but try to learn extra information from transcripts. This assumption is often insufficient for financial applications, where strategic deviation is economically motivated. Upgrading to malicious security introduces additional mechanisms, for example cut-and-choose checks for garbling correctness, commitment consistency checks, and explicit abort handling~\cite{LindellPinkas2008}.
+
+The key engineering tension is that stronger malicious-security guarantees usually increase communication and verification overhead. In public-blockchain settings, this overhead directly translates into on-chain cost and operational complexity. Therefore, protocol design must balance cryptographic rigor with deployability constraints.
+
+\section{Public Verifiability and Economic Enforcement}
+Publicly verifiable 2PC aims to make protocol violations externally checkable, so that a third party or smart contract can arbitrate disputes without re-executing the full protocol off-chain. Zhu et al. present an influential direction where dispute resolution is integrated with blockchain-based enforcement for financially secure computation settings~\cite{Zhu2019PV2PC}.
+
+BitPriv extends this line by combining off-chain 2PC with collateral-backed on-chain punishment and publicly verifiable dispute flow in a Bitcoin-compatible framework~\cite{BitPriv2025}. A central idea for this thesis is to transfer the \emph{economic-security} viewpoint: participants are assumed rational and may deviate if profitable, so protocol parameters (deposits, slashing rules, deadlines) must make honest execution the dominant economic strategy.
+
+\section{Adversarial Execution on Public Blockchains}
+Ethereum's execution environment is transparent by design. Mempool visibility and transaction ordering freedom create room for adversarial behavior, commonly framed as MEV-related strategies~\cite{Daian2019FlashBoys}. This environment is particularly problematic for auction-like protocols, where partial information leaks can influence bidding behavior and settlement outcomes.
+
+At the same time, Ethereum's public verifiability and programmable contracts provide the enforcement substrate needed for commitment checks, dispute escalation, and deterministic settlement rules~\cite{Wood2025Ethereum}. The challenge is therefore not only to hide sensitive inputs, but to do so while preserving enforceable and cost-bounded execution under adversarial ordering.
+
+\section{Privacy-Preserving Auctions on Blockchains}
+Private auction design on public ledgers has been explored from multiple angles. FAST targets fair auctions using secret transaction techniques~\cite{David2021FAST}. In parallel, systems research explores general private computation layers for blockchain applications. gcVM proposes publicly auditable MPC-compatible execution ideas for EVM-like environments~\cite{Yanai2026gcVM}, while COTI V2 explores a confidentiality-oriented layer-2 approach with additional system assumptions~\cite{Haloani2024COTIv2}.
+
+These approaches collectively show that confidentiality and public enforceability can be combined, but with different trust, complexity, and cost profiles. This thesis focuses on an L1-oriented Ethereum path with explicit economic incentives and dispute handling, aiming to minimize additional trust assumptions beyond the base chain.
+
+\section{Deployment Considerations for Ethereum}
+A practical protocol for Ethereum must account for execution costs and data availability paths. In particular, if large off-chain artifacts (for example, evaluation payloads derived from garbled-circuit flow) are referenced by on-chain commitments, the protocol must specify how these artifacts are made available and bound to settlement logic. EIP-4844 introduces blob transactions as a relevant mechanism for high-volume data publication with different cost characteristics than calldata~\cite{Buterin2022EIP4844}.
+
+Accordingly, protocol design choices in this thesis are evaluated not only for security semantics, but also for concrete deployment feasibility under Ethereum's transaction and fee model.
+
+\section{Positioning of This Thesis}
+Relative to prior work, this thesis is positioned at the intersection of:
+\begin{enumerate}
+\item garbled-circuit-based 2PC foundations~\cite{Bellare2012FoundationsGC,LindellPinkas2008},
+\item publicly verifiable and financially motivated enforcement models~\cite{Zhu2019PV2PC,BitPriv2025},
+\item adversarial blockchain execution analysis with MEV-aware reasoning~\cite{Daian2019FlashBoys,Wood2025Ethereum},
+\item and private auction protocol design for practical deployment~\cite{David2021FAST,Yanai2026gcVM,Haloani2024COTIv2,Buterin2022EIP4844}.
+\end{enumerate}
+
+The main difference from existing systems is the target setting: economically secure 2PC for sealed-bid auctions on Ethereum, with an explicit implementation and evaluation path that aligns protocol assumptions with engineering reality.
 
 \chapter{Model and Requirements}
 Placeholder: threat model, assumptions, security goals, and economic-security requirements.
@@ -82,7 +167,7 @@ Placeholder: interpretation of results, limitations, and future work.
 Placeholder: list all generative AI tools used, where they were used, and prompt disclosures where required.
 \end{aitools}
 
-\bibliographystyle{alpha}
+\bibliographystyle{unsrt}
 \bibliography{references}
 
 \end{document}
