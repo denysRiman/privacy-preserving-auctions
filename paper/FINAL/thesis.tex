@@ -133,6 +133,14 @@ The central problem is to design a protocol for sealed-bid auctions on Ethereum 
 
 In public-blockchain deployments these goals interact in non-trivial ways. Stronger cryptographic guarantees may increase operational cost, while cheaper constructions can weaken deterrence against rational deviations. The protocol therefore has to be reasoned about not only cryptographically, but also economically: the expected payoff of honest behavior should dominate profitable deviation under explicit assumptions~\cite{Zhu2019PV2PC}.
 
+This thesis follows an \emph{optimistic, dispute-driven enforcement} model.
+On-chain logic enforces deadlines, deposits, slashing, settlement-anchor checks,
+and bounded dispute predicates. Off-chain logic performs the full GC/OT
+evaluation and derives \texttt{outputBytes}. Therefore, the contract proves
+enforceability and binding, while computational correctness is established via
+off-chain execution plus dispute evidence rather than full on-chain
+re-execution.
+
 \section{Research Objectives}
 Based on the approved thesis proposal, the objective of this work is to design and prototype an economically secure 2PC protocol for Ethereum-based sealed-bid auctions, with first-price auctions as the baseline use case.
 
@@ -220,6 +228,13 @@ z=f(x,y_1,\dots,y_n),
 \]
 implemented off-chain via garbled-circuit-based 2PC~\cite{Bellare2012FoundationsGC,LindellPinkas2008}. The contract does not re-execute the full computation. Instead, it enforces a protocol state machine with commitments, deadlines, dispute entry points, and settlement rules, consistent with publicly verifiable financially secure 2PC literature~\cite{Zhu2019PV2PC,BitPriv2025}.
 
+Privacy is role-scoped in this model: Alice should not learn buyers' private bids
+from protocol execution, and buyer $B_j$ should not learn other buyers' bids
+beyond what is implied by the agreed output. This claim is protocol-level and
+assumes correct off-chain channel and artifact handling; operational leak vectors
+such as debug logs, local storage exposure, or external telemetry are outside
+the cryptographic guarantee boundary.
+
 The output $z$ is mapped to monetary outcomes through a settlement rule
 \[
 g(z)\rightarrow p,
@@ -278,6 +293,13 @@ Data needed for a valid challenge is available to challengers in time, either by
 \textbf{A5. Bounded on-chain verification.}
 Only bounded checks are expected on-chain (for example, leaf-level consistency checks), not full cryptographic re-execution of entire circuits.
 
+\textbf{A6. ENS adapter correctness and authority.}
+For the ENS application mapping, the adapter called by the contract is assumed
+to be authorized to perform assignment for the offered names and to implement
+\texttt{assign(namehash,to)} correctly (without hidden side paths). Detailed ENS
+ownership/registration mechanics are treated as application-integration context,
+not as a protocol-core security claim of this thesis.
+
 \section{Security Requirements}
 Under the above model, the protocol should satisfy:
 
@@ -286,6 +308,14 @@ No party learns the counterparty's private input beyond what is implied by the p
 
 \textbf{R2. Output correctness and binding.}
 An accepted settlement must correspond to a valid protocol-consistent output. Invalid output labels or inconsistent evidence must be rejectable by the contract.
+In this PoC, settlement-time on-chain checks establish anchor binding and tuple
+validity, but do not provide full on-chain re-execution proof of the underlying
+garbled-circuit computation.
+At the MVP level, output correctness relies on deterministic off-chain
+evaluation by protocol participants (implemented via shared evaluator logic),
+while on-chain settlement enforces binding: if a party submits
+\texttt{outputBytes} that do not match committed $\mathrm{hOut}_m$, settlement
+fails by construction.
 
 \textbf{R3. Publicly verifiable accountability.}
 When a party deviates in a way covered by dispute predicates, a challenger can provide evidence that is verifiable by the contract (directly or through bounded verification hooks), leading to deterministic blame assignment~\cite{Zhu2019PV2PC}.
@@ -312,6 +342,37 @@ U_{\delta}\leq U_{\mathrm{honest}},
 \]
 and preferably $U_{\delta}<0$ for high-impact deviations.
 
+For deterrence-oriented calibration, two practical inequalities are useful:
+\begin{enumerate}
+\item \textbf{Cheating-deterrence bound (Alice side):}
+\[
+p_{\mathrm{det},A}\cdot D_A + C_A > G_A,
+\]
+equivalently
+\[
+D_A > \frac{G_A-C_A}{p_{\mathrm{det},A}} \quad (p_{\mathrm{det},A}>0),
+\]
+where $D_A$ is slashable Alice collateral, $G_A$ is expected gain from a
+covered cheating strategy (for example, manipulating one gate/root/output), and
+$C_A$ is attacker-side operational cost.
+\item \textbf{False-dispute deterrence (buyer side):}
+\[
+P_{\mathrm{false},j}+C_{\mathrm{disp},j}>B_{\mathrm{grief},j},
+\]
+where $P_{\mathrm{false},j}$ is the false-dispute penalty for buyer $B_j$,
+$C_{\mathrm{disp},j}$ is buyer dispute transaction cost, and
+$B_{\mathrm{grief},j}$ is expected benefit from griefing delay.
+\end{enumerate}
+
+These inequalities are not final numeric calibration claims; they define the
+parameter constraints that deposit/penalty choices should satisfy in
+implementation and evaluation.
+For cut-and-choose strategies, $p_{\mathrm{det},A}$ is directly tied to opening
+coverage: with one evaluation instance and the remaining instances opened, the
+detection probability for inconsistencies on opened instances grows with $N$.
+In the implemented PoC, $N=10$ provides this deterrence lever qualitatively,
+even though no closed-form numeric calibration is claimed in this manuscript.
+
 Practically, this yields four design requirements:
 \begin{enumerate}
 \item \textbf{False-dispute deterrence:} unsuccessful challengers must incur loss.
@@ -332,6 +393,13 @@ This chapter formalizes the baseline target used in the remainder of the thesis:
 \end{enumerate}
 
 In particular, the protocol is specified at the commitment/dispute/state-machine layer, while ENS-auction rules are treated as an application-layer instantiation. Generalized $n$-party extensions, production-scale market design, and full formal game-theoretic equilibrium proofs are treated as future-work directions rather than claims proven in this manuscript.
+
+The cryptographic core remains 2PC: each execution is between Alice and one
+buyer (one evaluator). The $n$-buyer auction is an application-layer
+composition: one on-chain state machine coordinates multiple pairwise
+Alice$\leftrightarrow B_j$ interactions and aggregates them into one auction
+outcome. In this thesis, ``$n$-buyer'' describes workflow and participant set,
+not a change in the underlying 2PC security model.
 
 \chapter{Protocol Design}
 \section{Design Objectives and Strategy}
@@ -421,7 +489,14 @@ During the dispute window, ready buyers may open one of two explicit challenge t
 The protocol advances from dispute to label reveal when all active buyers close their dispute state, or when the dispute deadline expires.
 
 \subsection{Phase 7: Label Reveal and Evaluation Payload Binding}
-Alice reveals garbler labels for the evaluation instance $m$. In the same transition, the contract checks that the transaction blob hash equals committed $\mathrm{blobHashGC}_m$. The contract binds to hash availability, not full payload execution, which is consistent with bounded on-chain verification and EIP-4844 data publication semantics~\cite{Buterin2022EIP4844}.
+Alice reveals garbler labels for the evaluation instance $m$. In the same
+transition, the contract checks that \texttt{blobhash(0)} equals committed
+$\mathrm{blobHashGC}_m$. This binds settlement to one concrete EIP-4844 payload
+reference in that transaction (specific blob index and versioned hash), but it
+is not a proof of payload correctness or full computation correctness: the EVM
+cannot read blob contents and therefore cannot re-execute garbling on-chain.
+Because blob data is ephemeral, this PoC assumes payload retrievability at
+least throughout the dispute horizon (Assumption~A4)~\cite{Buterin2022EIP4844}.
 
 \subsection{Phase 8: Settlement and Assignment}
 Any participant can submit \texttt{outputBytes}. The contract accepts only if:
@@ -435,6 +510,7 @@ In the current proof-of-concept encoding:
 \mathrm{outputBytes}=\mathrm{encodePacked}(\mathrm{winnerId},\mathrm{winningBid},\mathrm{chosenNamehash}).
 \]
 After acceptance, the contract applies first-price transfer logic (winner pays own bid from collateral vault), records winner metadata, and transitions to final ENS assignment and payout settlement.
+Therefore, accepted settlement in this implementation means anchor-consistent and well-formed output bytes, not on-chain re-verification of complete off-chain GC evaluation.
 
 \section{n-Buyer Generalization}
 Relative to a single-evaluator baseline, the protocol generalizes by:
@@ -688,12 +764,17 @@ The executed scenarios provide direct evidence for key requirements defined in C
 \item \textbf{R5 (Settlement integrity):} successful scenarios complete deterministic first-price transfer and assignment in a protocol-consistent terminal state.
 \end{enumerate}
 
+Importantly, the settlement check scope in these runs is anchor equality plus
+decoding constraints. It does not, by itself, prove on-chain that
+\texttt{outputBytes} were produced by full GC evaluation; that assurance depends
+on the off-chain evaluator/evidence model and the bounded dispute predicates.
+
 Overall, the evaluation confirms that the Solidity/Rust prototype enforces the intended security-economics control points in executable runs, not only at specification level.
 
 \section{Cost and Performance Discussion}
 This chapter focuses on behavioral correctness and enforceability first.
 The implementation follows bounded on-chain verification: contract logic validates commitments, anchors, and dispute predicates, while heavy garbled-circuit computation remains off-chain.
-Evaluation-payload publication is hash-bound through EIP-4844 blob commitment checks, which keeps settlement binding explicit without full payload re-execution on-chain~\cite{Buterin2022EIP4844}.
+Evaluation-payload publication is hash-bound through EIP-4844 blob commitment checks, which keeps settlement binding explicit without full payload re-execution on-chain~\cite{Buterin2022EIP4844}. The \texttt{blobhash(0)} check binds to one concrete blob in the settlement transaction and supports availability/binding in the EIP-4844 window; it is not equivalent to permanent calldata storage and does not by itself certify computational correctness.
 
 At the same time, full quantitative gas profiling (per-function gas table for optimistic and dispute paths) is intentionally separated as follow-up measurement work.
 The current reported runs were executed on a local deterministic test chain, which is suitable for protocol validation and reproducibility, but not sufficient for final fee-economics conclusions under production network conditions.
@@ -703,7 +784,8 @@ The presented evidence is strong for implementation-level protocol behavior, but
 \begin{enumerate}
 \item environment is local test-chain execution rather than live Ethereum conditions with volatile fees and ordering pressure,
 \item scenario coverage is targeted (honest, buyer-default, Alice-cheat) and does not exhaust all strategic combinations,
-\item quantitative parameter calibration (for example, deposit-size inequalities for deterrence under varying fee regimes) remains future analytical work.
+\item quantitative parameter calibration (for example, deposit-size inequalities for deterrence under varying fee regimes) remains future analytical work,
+\item evaluation scripts expose selected runtime values (including bids) for experiment transparency; privacy guarantees discussed in this thesis refer to protocol-level execution without such debug disclosure.
 \end{enumerate}
 
 These limits do not invalidate the demonstrated protocol properties; they delimit what is claimed in this chapter.
@@ -731,7 +813,7 @@ It indicates that the same enforcement structure can support other private-input
 \section{Limitations}
 The presented contribution is intentionally bounded and has several limits:
 \begin{enumerate}
-\item \textbf{Bounded on-chain verification:} the contract verifies commitments and challenge predicates, but does not re-execute full garbled-circuit computation on-chain.
+\item \textbf{Bounded on-chain verification:} this PoC provides economically enforceable execution with bounded dispute predicates; it does not provide on-chain verifiable computation of the full auction output.
 \item \textbf{Evaluation environment:} reported runs use deterministic local-chain execution, which is suitable for correctness and reproducibility but not a final basis for production fee-economics claims.
 \item \textbf{Economic calibration depth:} the thesis formalizes deterrence requirements, but does not yet provide full parameter-optimization inequalities across volatile fee regimes.
 \item \textbf{Application simplification:} the ENS mapping uses a fixed offered-name shortlist and deterministic decoding interface, prioritizing protocol validation over full auction-market design coverage.
