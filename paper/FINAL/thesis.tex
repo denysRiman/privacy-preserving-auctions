@@ -319,7 +319,8 @@ Data needed for a valid challenge is available to challengers in time, either by
 For blob-linked publication paths, this is a time-bounded availability
 assumption over the dispute window, not a permanent archival guarantee.
 In particular, blob references are treated as timely-retrieval hints for
-challengers, not as archival channels equivalent to calldata.
+challengers, not as archival channels equivalent to calldata (implementation
+reference: Appendix~\ref{app:a4}).
 
 \textbf{A5. Bounded on-chain verification.}
 Only bounded checks are expected on-chain (for example, leaf-level consistency checks), not full cryptographic re-execution of entire circuits.
@@ -351,9 +352,14 @@ evaluation by protocol participants (implemented via shared evaluator logic),
 while on-chain settlement enforces binding: if a party submits
 \texttt{outputBytes} that do not match committed $\mathrm{hOut}_m$, settlement
 fails by construction.
+Implementation excerpts for this requirement are collected in
+Appendix~\ref{app:a2} and Appendix~\ref{app:d1}.
 
 \textbf{R3. Publicly verifiable accountability.}
 When a party deviates in a way covered by dispute predicates, a challenger can provide evidence that is verifiable by the contract (directly or through bounded verification hooks), leading to deterministic blame assignment~\cite{Zhu2019PV2PC}.
+Implementation excerpts for dispute and slashing are collected in
+Appendix~\ref{app:a3}, Appendix~\ref{app:b3}, and
+Appendix~\ref{app:c1}--\ref{app:c2}.
 
 \textbf{R4. Liveness with penalties.}
 A single uncooperative party should not be able to block progress indefinitely. If progress is blocked, timeout paths must release funds and/or apply penalties according to predefined rules.
@@ -492,7 +498,9 @@ For each evaluator $E_j$ and instance $i$, the garbler additionally commits eval
 \[
 \mathrm{rootOT}_{j,i}.
 \]
-These roots are later challengeable on opened instances via deterministic recomputation from revealed seed material.
+These roots are later challengeable on opened instances via deterministic
+recomputation from revealed seed material (implementation excerpts:
+Appendix~\ref{app:c1}--\ref{app:c2}).
 
 The verifier-side seed is produced from evaluator commit-reveal inputs. Let
 $s_j$ be the revealed seed of evaluator $E_j$ (or $0$ when defaulted by liveness
@@ -563,6 +571,9 @@ challenge tracks:
 \end{enumerate}
 \item \textbf{Evaluator-scoped OT root dispute:} for evaluator $E_j$ and opened instance $i$, recompute expected $\mathrm{rootOT}_{j,i}$ from revealed seeds and domain-separated identifiers; mismatch slashes garbler, false challenge slashes evaluator.
 \end{enumerate}
+Implementation excerpts for both dispute tracks are provided in
+Appendix~\ref{app:a3}, Appendix~\ref{app:b2}, Appendix~\ref{app:b3}, and
+Appendix~\ref{app:c1}--\ref{app:c2}.
 
 The protocol advances from dispute to label reveal when all active evaluators
 close their dispute state, or when the dispute deadline expires.
@@ -576,6 +587,7 @@ is not a proof of payload correctness or full computation correctness: the EVM
 cannot read blob contents and therefore cannot re-execute garbling on-chain.
 Because blob data is ephemeral, this PoC assumes payload retrievability at
 least throughout the dispute horizon (Assumption~A4)~\cite{Buterin2022EIP4844}.
+The concrete on-chain binding check is shown in Appendix~\ref{app:a4}.
 
 \subsection{Phase 8: Settlement and Assignment}
 Any participant can submit \texttt{outputBytes}. The contract accepts only if:
@@ -590,6 +602,7 @@ In the current proof-of-concept encoding:
 \]
 After acceptance, the contract applies first-price transfer logic (winner pays own bid from collateral vault), records winner metadata, and transitions to final ENS assignment and payout settlement.
 Therefore, accepted settlement in this implementation means anchor-consistent and well-formed output bytes, not on-chain re-verification of complete off-chain GC evaluation.
+Implementation excerpts are collected in Appendix~\ref{app:a2}.
 
 \section{n-Evaluator Generalization (Auction Instantiation: n Buyers)}
 Relative to a single-evaluator baseline, the protocol generalizes by:
@@ -696,18 +709,9 @@ The accepted output is decoded into winner id, winning bid, and chosen name hash
 The contract then applies first-price vault transfer logic and executes assignment in a separate finalization step.
 This separation keeps settlement correctness checks explicit and makes final payout/assignment transitions observable on-chain.
 
-\subsection{Smart-Contract Code Excerpts (Security-Critical Paths)}
-Excerpts illustrate enforcement; the security argument is in Chapter~3/4.
-
-To make implementation-level security properties explicit, this subsection shows
-selected Solidity excerpts from \texttt{MillionairesProblem.sol}. The selected
-fragments represent four complementary protection layers:
-\begin{enumerate}
-\item stage and role gating with timeout-driven liveness/slashing,
-\item EIP-4844 blob binding for data-availability integrity,
-\item bounded dispute verification with deterministic blame assignment,
-\item output-anchor settlement binding plus domain bounds checks.
-\end{enumerate}
+\subsection{Core Security Snippets}
+The four core aspects below are kept in the main implementation chapter as
+compact anchors; extended code context is provided in the appendices.
 
 \begin{lstlisting}[style=soliditysnippet,caption={Stage/role gating and timeout-enforced liveness in seed commit phase.},label={lst:seed-commit-liveness}]
 function commitBuyerSeed(bytes32 commitment) public {
@@ -727,11 +731,6 @@ function finalizeBuyerSeedCommitAfterDeadline() public {
 }
 \end{lstlisting}
 
-This path demonstrates explicit anti-stall logic: protocol progression is not
-blocked by a non-responsive evaluator because timeout finalization can be
-triggered permissionlessly by participants, with deterministic penalties for
-non-cooperation.
-
 \begin{lstlisting}[style=soliditysnippet,caption={Blob-hash commitment check before label reveal for instance $m$.},label={lst:blob-binding}]
 function revealGarblerLabels(bytes32[] calldata _labels) external {
     require(currentStage == Stage.Labels, "Wrong stage");
@@ -746,9 +745,6 @@ function revealGarblerLabels(bytes32[] calldata _labels) external {
     garblerLabels = _labels;
 }
 \end{lstlisting}
-
-This check binds on-chain progression to the exact evaluation payload hash and
-prevents substitution of a different garbled-table blob after commitments.
 
 \begin{lstlisting}[style=soliditysnippet,caption={Bounded GC-leaf dispute check with slashing outcome.},label={lst:gc-dispute}]
 function challengeGateLeaf(
@@ -776,10 +772,6 @@ function challengeGateLeaf(
 }
 \end{lstlisting}
 
-The dispute path is intentionally leaf-bounded: the contract verifies one
-challenge unit with compact proofs, then applies immediate economic resolution.
-This keeps verification gas-bounded while preserving public accountability.
-
 \begin{lstlisting}[style=soliditysnippet,caption={Settlement anchor binding and output-domain checks.},label={lst:settlement-binding}]
 function settle(bytes calldata outputBytes) external {
     require(currentStage == Stage.Settle, "Wrong stage");
@@ -799,9 +791,25 @@ function settle(bytes calldata outputBytes) external {
 }
 \end{lstlisting}
 
-This final gate enforces that only an output consistent with the committed
-instance-$m$ anchor and auction-domain constraints can trigger value transfer
-and assignment state transitions.
+\subsection{Code Excerpt Roadmap}
+Excerpts illustrate enforcement; the security argument is in Chapter~3/4.
+To keep the main narrative focused, full code excerpts are grouped in appendices
+and referenced from the mechanism discussion:
+\begin{enumerate}
+\item state machine, deadlines, and timeout progression:
+Appendix~\ref{app:a1},
+\item settlement anchor binding and output decoding:
+Appendix~\ref{app:a2},
+\item dispute predicates and slashing resolution:
+Appendix~\ref{app:a3}, Appendix~\ref{app:b2}, Appendix~\ref{app:b3},
+Appendix~\ref{app:c1}, and Appendix~\ref{app:c2},
+\item blob-hash data-binding reference:
+Appendix~\ref{app:a4},
+\item shared off-chain auction-outcome encoding path:
+Appendix~\ref{app:d1},
+\item end-to-end scenario mapping:
+Appendix~\ref{app:d2}.
+\end{enumerate}
 
 \subsection{Application Layer: ENS Auction}
 In this proof-of-concept, the protocol is instantiated as an ENS auction application.
@@ -1044,6 +1052,189 @@ The main result is not only conceptual: the Solidity/Rust prototype demonstrates
 
 In short, the work shows that economically secure 2PC on Ethereum is practically realizable with strict phase discipline, bounded verification, and explicit incentive-aligned fallback paths.
 This forms a concrete foundation for subsequent production-hardening and broader private-market applications.
+
+\appendix
+
+\chapter{On-Chain Enforcement Excerpts}
+\label{app:onchain}
+Excerpts illustrate enforcement; the security argument is in Chapter~3/4.
+This appendix provides implementation evidence for the enforcement mechanisms.
+
+\section{State Machine and Deadlines}
+\label{app:a1}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Stage and deadline data structures.},
+  firstline=31,
+  lastline=69
+]{../../contract/src/MillionairesProblem.sol}
+
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Representative transition with stage/deadline gating: deposit phase.},
+  firstline=193,
+  lastline=208
+]{../../contract/src/MillionairesProblem.sol}
+
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Representative timeout/escape-hatch progression in dispute closure.},
+  firstline=842,
+  lastline=870
+]{../../contract/src/MillionairesProblem.sol}
+
+\section{Settlement Binding and Output Decoding}
+\label{app:a2}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Output anchor hash and output tuple decoding helpers.},
+  firstline=658,
+  lastline=677
+]{../../contract/src/MillionairesProblem.sol}
+
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Settlement checks: hOut binding, tuple bounds, and offered-name validation.},
+  firstline=685,
+  lastline=708
+]{../../contract/src/MillionairesProblem.sol}
+
+\section{Dispute and Slashing Logic}
+\label{app:a3}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={GC-leaf dispute path with deterministic slashing branch.},
+  firstline=1071,
+  lastline=1102
+]{../../contract/src/MillionairesProblem.sol}
+
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Economic-resolution payout handlers used by dispute outcomes.},
+  firstline=804,
+  lastline=840
+]{../../contract/src/MillionairesProblem.sol}
+
+\section{Blob Binding Reference (EIP-4844)}
+\label{app:a4}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Blob-hash commitment check before entering settlement.},
+  firstline=599,
+  lastline=613
+]{../../contract/src/MillionairesProblem.sol}
+This check is the concrete code hook for the time-bounded availability
+assumption in Chapter~3 (Assumption A4).
+
+\chapter{Garbled-Circuit Mechanics Excerpts}
+\label{app:gc}
+\section{Wire Label Derivation and Point-and-Permute}
+\label{app:b1}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Wire flip bit and deterministic label derivation with permutation-bit embedding.},
+  firstline=878,
+  lastline=912
+]{../../contract/src/MillionairesProblem.sol}
+
+\section{Gate Leaf Recompute and Encoding Layout}
+\label{app:b2}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Per-gate leaf recomputation for AND/XOR/NOT and canonical packed leaf bytes.},
+  firstline=941,
+  lastline=1005
+]{../../contract/src/MillionairesProblem.sol}
+
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Canonical leaf byte length constant used by dispute validation.},
+  firstline=1010,
+  lastline=1019
+]{../../contract/src/MillionairesProblem.sol}
+
+\section{Incremental-Hash and Layout-Merkle Verification}
+\label{app:b3}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Layout membership check against committed circuit layout root.},
+  firstline=1035,
+  lastline=1044
+]{../../contract/src/MillionairesProblem.sol}
+
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Incremental-hash proof processing for index-bound GC leaf inclusion.},
+  firstline=1140,
+  lastline=1154
+]{../../contract/src/MillionairesProblem.sol}
+
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Layout leaf hash construction used by the layout Merkle proof.},
+  firstline=1132,
+  lastline=1134
+]{../../contract/src/MillionairesProblem.sol}
+
+\chapter{OT Transcript Commitment and Recompute}
+\label{app:ot}
+\section{OT Transcript Leaf Hashing and Root Tree}
+\label{app:c1}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Transcript leaf hashing and commutative node hashing primitives.},
+  firstline=1155,
+  lastline=1172
+]{../../contract/src/MillionairesProblem.sol}
+
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Deterministic OT-root recomputation from transcript components.},
+  firstline=1249,
+  lastline=1292
+]{../../contract/src/MillionairesProblem.sol}
+
+\section{OT Payload Hash Derivation}
+\label{app:c2}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Per-round OT payload hash derivation bound to buyer, instance, wire id, and seeds.},
+  firstline=1179,
+  lastline=1247
+]{../../contract/src/MillionairesProblem.sol}
+
+\chapter{Off-Chain Orchestration Evidence}
+\label{app:orchestration}
+\section{Shared Auction Outcome and Output Encoding}
+\label{app:d1}
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Shared first-price outcome function used by off-chain services.},
+  firstline=3,
+  lastline=46
+]{../../off-chain-common/src/auction_outcome.rs}
+
+\lstinputlisting[
+  style=soliditysnippet,
+  caption={Canonical packed output bytes encoding used for settlement commitment input.},
+  firstline=28,
+  lastline=51
+]{../../off-chain-common/src/settlement.rs}
+
+\section{Demo Scenario Mapping}
+\label{app:d2}
+\begin{table}[htbp]
+\centering
+\begin{tabular}{|p{0.20\textwidth}|p{0.30\textwidth}|p{0.40\textwidth}|}
+\hline
+\textbf{Case} & \textbf{Deviation} & \textbf{Expected closure} \\ \hline
+Case 1: honest run & no deviation & accepted settlement, assignment finalized, stage \texttt{Closed} \\ \hline
+Case 2: defaulted buyer & evaluator misses readiness deadline & default and slashing applied; run still reaches settlement and assignment \\ \hline
+Case 3: garbler cheats & tampered opened-instance GC commitment/dispute mismatch & dispute succeeds; garbler slashed; contract closes without assignment \\ \hline
+\end{tabular}
+\caption{Scenario-to-outcome mapping used by the end-to-end demo harness.}
+\label{tab:appendix-demo-cases}
+\end{table}
 
 \backmatter
 
