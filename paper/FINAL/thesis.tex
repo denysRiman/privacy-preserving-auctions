@@ -1075,21 +1075,21 @@ This appendix provides implementation evidence for the enforcement mechanisms.
   caption={Stage and deadline data structures.},
   firstline=31,
   lastline=69
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \lstinputlisting[
   style=soliditysnippet,
   caption={Representative transition with stage/deadline gating: deposit phase.},
   firstline=193,
   lastline=208
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \lstinputlisting[
   style=soliditysnippet,
   caption={Representative timeout/escape-hatch progression in dispute closure.},
   firstline=842,
   lastline=870
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \section{Settlement Binding and Output Decoding}
 \label{app:a2}
@@ -1098,14 +1098,14 @@ This appendix provides implementation evidence for the enforcement mechanisms.
   caption={Output anchor hash and output tuple decoding helpers.},
   firstline=658,
   lastline=677
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \lstinputlisting[
   style=soliditysnippet,
   caption={Settlement checks: hOut binding, tuple bounds, and offered-name validation.},
   firstline=685,
   lastline=708
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \section{Dispute and Slashing Logic}
 \label{app:a3}
@@ -1114,14 +1114,14 @@ This appendix provides implementation evidence for the enforcement mechanisms.
   caption={GC-leaf dispute path with deterministic slashing branch.},
   firstline=1071,
   lastline=1102
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \lstinputlisting[
   style=soliditysnippet,
   caption={Economic-resolution payout handlers used by dispute outcomes.},
   firstline=804,
   lastline=840
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \section{Blob Binding Reference (EIP-4844)}
 \label{app:a4}
@@ -1130,7 +1130,7 @@ This appendix provides implementation evidence for the enforcement mechanisms.
   caption={Blob-hash commitment check before entering settlement.},
   firstline=599,
   lastline=613
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 This check is the concrete code hook for the dispute-window availability
 assumption in Chapter~3 (Assumption A4).
 
@@ -1143,7 +1143,7 @@ assumption in Chapter~3 (Assumption A4).
   caption={Wire flip bit and deterministic label derivation with permutation-bit embedding.},
   firstline=878,
   lastline=912
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \section{Gate Leaf Recompute and Encoding Layout}
 \label{app:b2}
@@ -1152,14 +1152,14 @@ assumption in Chapter~3 (Assumption A4).
   caption={Per-gate leaf recomputation for AND/XOR/NOT and canonical packed leaf bytes.},
   firstline=941,
   lastline=1005
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \lstinputlisting[
   style=soliditysnippet,
   caption={Canonical leaf byte length constant used by dispute validation.},
   firstline=1010,
   lastline=1019
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \section{Incremental-Hash and Layout-Merkle Verification}
 \label{app:b3}
@@ -1168,21 +1168,21 @@ assumption in Chapter~3 (Assumption A4).
   caption={Layout membership check against committed circuit layout root.},
   firstline=1035,
   lastline=1044
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \lstinputlisting[
   style=soliditysnippet,
   caption={Incremental-hash proof processing for index-bound GC leaf inclusion.},
   firstline=1140,
   lastline=1154
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \lstinputlisting[
   style=soliditysnippet,
   caption={Layout leaf hash construction used by the layout Merkle proof.},
   firstline=1132,
   lastline=1134
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \chapter{OT Transcript Commitment and Recompute}
 \label{app:ot}
@@ -1193,14 +1193,14 @@ assumption in Chapter~3 (Assumption A4).
   caption={Transcript leaf hashing and commutative node hashing primitives.},
   firstline=1155,
   lastline=1172
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \lstinputlisting[
   style=soliditysnippet,
   caption={Deterministic OT-root recomputation from transcript components.},
   firstline=1249,
   lastline=1292
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \section{OT Payload Hash Derivation}
 \label{app:c2}
@@ -1209,7 +1209,7 @@ assumption in Chapter~3 (Assumption A4).
   caption={Per-round OT payload hash derivation bound to buyer, instance, wire id, and seeds.},
   firstline=1179,
   lastline=1247
-]{../../contract/src/MillionairesProblem.sol}
+]{contract/src/MillionairesProblem.sol}
 
 \chapter{Off-Chain Orchestration Evidence}
 \label{app:orchestration}
@@ -1220,14 +1220,14 @@ assumption in Chapter~3 (Assumption A4).
   caption={Shared first-price outcome function used by off-chain services.},
   firstline=3,
   lastline=46
-]{../../off-chain-common/src/auction_outcome.rs}
+]{off-chain-common/src/auction_outcome.rs}
 
 \lstinputlisting[
   style=soliditysnippet,
   caption={Canonical packed output bytes encoding used for settlement commitment input.},
   firstline=28,
   lastline=51
-]{../../off-chain-common/src/settlement.rs}
+]{off-chain-common/src/settlement.rs}
 
 \section{Demo Scenario Mapping}
 \label{app:d2}
