@@ -12,7 +12,16 @@
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage{tikz}
+\usepackage{listings}
 \usetikzlibrary{arrows.meta,positioning}
+\lstdefinestyle{soliditysnippet}{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  breaklines=true,
+  keepspaces=true,
+  showstringspaces=false,
+  frame=single
+}
 
 % Required persons.
 \setauthor{}{\authorname}{}{male}
@@ -686,6 +695,113 @@ Settlement accepts an output only if the computed anchor equals committed $\math
 The accepted output is decoded into winner id, winning bid, and chosen name hash.
 The contract then applies first-price vault transfer logic and executes assignment in a separate finalization step.
 This separation keeps settlement correctness checks explicit and makes final payout/assignment transitions observable on-chain.
+
+\subsection{Smart-Contract Code Excerpts (Security-Critical Paths)}
+Excerpts illustrate enforcement; the security argument is in Chapter~3/4.
+
+To make implementation-level security properties explicit, this subsection shows
+selected Solidity excerpts from \texttt{MillionairesProblem.sol}. The selected
+fragments represent four complementary protection layers:
+\begin{enumerate}
+\item stage and role gating with timeout-driven liveness/slashing,
+\item EIP-4844 blob binding for data-availability integrity,
+\item bounded dispute verification with deterministic blame assignment,
+\item output-anchor settlement binding plus domain bounds checks.
+\end{enumerate}
+
+\begin{lstlisting}[style=soliditysnippet,caption={Stage/role gating and timeout-enforced liveness in seed commit phase.},label={lst:seed-commit-liveness}]
+function commitBuyerSeed(bytes32 commitment) public {
+    require(currentStage == Stage.BuyerSeedCommit, "Wrong stage");
+    require(block.timestamp <= deadlines.verifierSeed, "Seed-commit deadline missed");
+    require(isBuyer[msg.sender], "Only buyer");
+    require(commitment != bytes32(0), "Empty buyer seed commitment");
+    require(buyerSeedCommitment[msg.sender] == bytes32(0), "Buyer seed already committed");
+    buyerSeedCommitment[msg.sender] = commitment;
+}
+
+function finalizeBuyerSeedCommitAfterDeadline() public {
+    require(currentStage == Stage.BuyerSeedCommit, "Wrong stage");
+    require(block.timestamp > deadlines.verifierSeed, "Seed-commit phase still active");
+    require(_isParticipant(msg.sender), "Only participant");
+    // Non-committed buyers are defaulted to seed=0 and slashed.
+}
+\end{lstlisting}
+
+This path demonstrates explicit anti-stall logic: protocol progression is not
+blocked by a non-responsive evaluator because timeout finalization can be
+triggered permissionlessly by participants, with deterministic penalties for
+non-cooperation.
+
+\begin{lstlisting}[style=soliditysnippet,caption={Blob-hash commitment check before label reveal for instance $m$.},label={lst:blob-binding}]
+function revealGarblerLabels(bytes32[] calldata _labels) external {
+    require(currentStage == Stage.Labels, "Wrong stage");
+    require(msg.sender == alice, "Only Garbler");
+    require(block.timestamp <= deadlines.labels, "Label reveal deadline missed");
+    require(_labels.length == bitWidth, "Bad labels length");
+
+    bytes32 bHash = blobhash(0);
+    require(bHash != bytes32(0), "Garbled Table Blob missing");
+    require(bHash == instanceCommitments[m].blobHashGC, "Blob does not match Phase 2 commitment");
+
+    garblerLabels = _labels;
+}
+\end{lstlisting}
+
+This check binds on-chain progression to the exact evaluation payload hash and
+prevents substitution of a different garbled-table blob after commitments.
+
+\begin{lstlisting}[style=soliditysnippet,caption={Bounded GC-leaf dispute check with slashing outcome.},label={lst:gc-dispute}]
+function challengeGateLeaf(
+    uint256 instanceId,
+    uint256 gateIndex,
+    GateDesc calldata g,
+    bytes calldata leafBytes,
+    bytes32[] calldata ihProof,
+    bytes32[] calldata layoutProof
+) public {
+    require(currentStage == Stage.Dispute, "Wrong stage");
+    require(block.timestamp <= deadlines.dispute, "Dispute deadline missed");
+    require(isBuyer[msg.sender], "Only buyer for dispute");
+    require(buyerStatus[msg.sender] == BuyerStatus.Ready, "Buyer not active in dispute");
+
+    _assertValidLayoutProof(gateIndex, g, layoutProof);
+    bytes32 seed = _requireRevealedSeedForOpenedInstance(instanceId);
+    bytes32 leafHash = _gateLeafHash(gateIndex, leafBytes);
+    require(_processIncrementalProof(leafHash, ihProof) == instanceCommitments[instanceId].rootGC, "Bad IH proof");
+
+    bytes memory expected = recomputeGateLeafBytes(seed, instanceId, gateIndex, g);
+    bool matchLeaf = (_gateLeafHash(gateIndex, expected) == leafHash);
+    if (!matchLeaf) _slashAliceToAllBuyers();
+    else _slashBuyerToAlice(msg.sender);
+}
+\end{lstlisting}
+
+The dispute path is intentionally leaf-bounded: the contract verifies one
+challenge unit with compact proofs, then applies immediate economic resolution.
+This keeps verification gas-bounded while preserving public accountability.
+
+\begin{lstlisting}[style=soliditysnippet,caption={Settlement anchor binding and output-domain checks.},label={lst:settlement-binding}]
+function settle(bytes calldata outputBytes) external {
+    require(currentStage == Stage.Settle, "Wrong stage");
+    require(_isParticipant(msg.sender), "Only participant");
+    require(block.timestamp <= deadlines.settle, "Settlement deadline missed");
+    require(_computeOutputAnchor(m, outputBytes) == instanceCommitments[m].hOut, "Invalid output commitment");
+
+    (uint16 outWinnerId, uint64 outWinningBid, bytes32 outChosenNamehash) = _decodeOutput(outputBytes);
+    require(outWinnerId < buyers.length, "winnerId out of bounds");
+    require(uint256(outWinningBid) <= vault[buyers[outWinnerId]], "winningBid exceeds winner vault");
+    require(
+        outChosenNamehash == offeredNamehashes[0] ||
+        outChosenNamehash == offeredNamehashes[1] ||
+        outChosenNamehash == offeredNamehashes[2],
+        "chosenNamehash not offered"
+    );
+}
+\end{lstlisting}
+
+This final gate enforces that only an output consistent with the committed
+instance-$m$ anchor and auction-domain constraints can trigger value transfer
+and assignment state transitions.
 
 \subsection{Application Layer: ENS Auction}
 In this proof-of-concept, the protocol is instantiated as an ENS auction application.
