@@ -201,6 +201,106 @@ Ethereum's execution environment is transparent by design. Mempool visibility an
 
 Ethereum's public verifiability and programmable contracts provide the enforcement substrate needed for commitment checks, dispute escalation, and deterministic settlement rules. The challenge is therefore not only to hide sensitive inputs, but to do so while preserving enforceable and cost-limited execution under adversarial ordering~\cite{Wood2025Ethereum}.
 
+\section{Ethereum and the EVM}
+\subsection{Ethereum as Settlement Layer}
+A blockchain can be modeled as a replicated append-only state machine
+maintained under decentralized consensus.
+Ethereum extends this model with programmable smart contracts, enabling
+stateful protocol logic without a trusted intermediary~\cite{Wood2025Ethereum}.
+For this thesis, a suitable settlement layer must satisfy four practical
+conditions: executable enforcement logic, native asset custody, publicly
+verifiable state transitions, and interoperability with existing on-chain
+applications.
+Ethereum is relevant because it meets these conditions in a mature deployment
+environment.
+
+First, ecosystem maturity matters.
+Protocol execution is not isolated from surrounding infrastructure: account
+abstractions, wallets, token standards, indexing tools, and operational
+monitoring all affect real deployability.
+Second, composability matters.
+Smart contracts can interact with existing assets and application modules
+through shared state and deterministic calls, allowing enforcement logic to be
+integrated with broader market workflows rather than implemented in a closed
+system.
+Third, economic security matters.
+Settlement semantics depend on economically secured consensus and transaction
+inclusion, not only on local protocol logic.
+Fourth, public accountability matters.
+Transparent contract state and execution traces make commitment checks, timeout
+transitions, dispute outcomes, and payouts externally auditable.
+
+These properties are precisely the features needed by an economically secure
+private protocol: private computation off-chain, but objectively auditable
+enforcement on-chain.
+The same environment also imposes strict cost and transparency constraints that
+shape protocol architecture.
+
+\subsection{EVM Constraints and Architectural Implications}
+Ethereum contract logic is executed in the Ethereum Virtual Machine (EVM), a
+deterministic bytecode runtime replicated across validators.
+Deterministic replicated execution is essential for public enforceability:
+every validator must reach the same post-state from the same input
+transaction.
+This makes the EVM a strong substrate for escrow, collateral locking, hash
+checks, deadline enforcement, and settlement transitions.
+
+At the same time, EVM execution is explicitly resource-priced through gas.
+Storage writes are expensive relative to transient computation, and
+data-heavy or loop-heavy verification scales poorly in gas cost.
+Large cryptographic artifacts and full transcript re-execution are therefore
+impractical as default on-chain behavior.
+In addition, the EVM has no private memory model for contract logic:
+calldata, storage, and state transitions are publicly visible, which rules out
+confidential in-contract evaluation as a baseline design.
+
+These constraints motivate the core architectural decision adopted in this
+thesis:
+\begin{enumerate}
+\item execute heavy private computation off-chain,
+\item keep on-chain logic focused on commitments, deadlines, and bounded
+predicate checks,
+\item use selective dispute predicates for public accountability rather than
+universal on-chain recomputation.
+\end{enumerate}
+This is a deployment-oriented adaptation to EVM economics, not a reduction in
+security intent.
+
+\section{ENS Auctions}
+The Ethereum Name Service (ENS) maps human-readable names (for example,
+\texttt{alice.eth}) to Ethereum addresses and related records~\cite{EIP137ENS,ENSDocs}.
+ENS names can carry direct utility as routing identifiers, but also identity and
+branding premiums.
+Memorable or category-defining names may therefore accumulate resale value,
+which turns them into economically contested scarce assets.
+This scarcity makes market-based allocation mechanisms, including auctions,
+a natural design choice.
+
+In a transparent blockchain environment, fully public bidding leaks
+willingness-to-pay and strategy information, which can distort competition and
+create strategic disadvantages under adversarial ordering conditions~\cite{Daian2019FlashBoys}.
+Bid privacy is therefore economically meaningful, not merely a cosmetic feature.
+In particular, transparent auction flows are exposed to:
+\begin{enumerate}
+\item \textbf{valuation leakage:} visible bids reveal reservation-price signals
+and strategy profiles,
+\item \textbf{reactive bidding:} participants can condition behavior on observed
+partial information rather than sealed valuations,
+\item \textbf{coordination and collusion channels:} transparency can simplify
+monitoring and enforcement of cartel-like strategies,
+\item \textbf{ordering manipulation/front-running:} observable transactions can
+be strategically reordered or preempted in adversarial execution
+environments~\cite{Daian2019FlashBoys}.
+\end{enumerate}
+
+At the same time, name assignment and payment settlement must remain publicly
+enforceable.
+ENS auctions therefore capture both the privacy requirement (for bid formation)
+and the enforceability requirement (for final allocation and payment).
+For this reason, they provide a suitable benchmark for economically secure 2PC
+on Ethereum and a concrete application context for the protocol developed in
+the following chapters.
+
 \section{Privacy-Preserving Auctions on Blockchains}
 Private auction design on public ledgers has been explored from multiple angles. FAST targets fair auctions using secret transaction techniques~\cite{David2021FAST}. In parallel, systems research explores general private computation layers for blockchain applications. gcVM proposes publicly auditable MPC-compatible execution ideas for EVM-like environments~\cite{Yanai2026gcVM}, while COTI V2 explores a confidentiality-oriented layer-2 approach with additional system assumptions~\cite{Haloani2024COTIv2}.
 
