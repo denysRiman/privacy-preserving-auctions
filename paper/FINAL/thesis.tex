@@ -888,30 +888,35 @@ These three validation layers are the reproducibility baseline for the implement
 
 \chapter{Evaluation}
 \section{Evaluation Objectives}
-The evaluation is implementation-driven and targets protocol properties that are critical for economically secure execution:
+This evaluation measures protocol-core enforcement costs using the ENS auction
+as the concrete application instantiation.
+The objective is implementation-backed evidence across four layers:
 \begin{enumerate}
-\item \textbf{Correct settlement binding:} accepted outputs must match the committed evaluation-instance anchor and pass output decoding checks.
-\item \textbf{Public accountability under deviation:} detectable deviations should trigger deterministic blame assignment and slashing.
-\item \textbf{Liveness with non-cooperative participants:} one stalled evaluator should not block completion.
-\item \textbf{Application-level closure:} in the non-disputed path, protocol settlement must complete the ENS assignment mapping.
+\item scenario validation under honest and adversarial flows,
+\item on-chain enforcement cost profile (per-call gas and per-scenario totals),
+\item off-chain/runtime and artifact-size measurements,
+\item moderate scaling indicators over evaluator count \(n\) and cut-and-choose parameter \(N\).
 \end{enumerate}
 
-This chapter therefore evaluates the implemented protocol behavior under representative end-to-end scenarios rather than only presenting abstract argumentation~\cite{Zhu2019PV2PC,BitPriv2025}.
-
 \section{Methodology and Experimental Setup}
-\subsection{Evaluation Method}
-The methodology combines contract-level enforcement and off-chain execution in one reproducible scenario harness.
-Each run executes the full phase sequence (deposits, seed commit/reveal, commitments, opening/dispute, labels, settlement, assignment) and checks final state invariants from on-chain state and script-level assertions.
+\subsection{Measured Quantities}
+The instrumentation records:
+\begin{enumerate}
+\item per-transaction gas usage for protocol-relevant calls,
+\item per-scenario total gas, transaction count, terminal stage, and settlement/assignment/slashing outcomes,
+\item off-chain wall-clock timings for selected CLI/runtime operations,
+\item serialized artifact sizes and structural counts,
+\item scaling indicator tables for \(n\)- and \(N\)-sensitivity.
+\end{enumerate}
 
 \subsection{Execution Environment}
-Evaluation runs were executed on a local Anvil chain with the repository scenario script:
-\begin{verbatim}
-./scripts/start_anvil.sh
-env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY -u NO_PROXY \
-  PAUSE_SECONDS=0 ./scripts/demo_protocol_cases.sh all
-\end{verbatim}
+Evaluation runs were executed on a local deterministic Anvil chain using an
+automated scenario harness (honest/default/cheat) and a dedicated moderate
+scaling sweep harness (\(n\)- and \(N\)-sensitivity points).
+Measurements were recorded in machine-readable artifacts and then rendered into
+the Chapter 6 tables.
 
-For the runs reported here, the protocol parameters were:
+For the measured baseline, the protocol parameters were:
 \begin{enumerate}
 \item number of cut-and-choose instances: $N=10$,
 \item number of evaluators (buyers in the ENS application): $n=3$,
@@ -919,6 +924,14 @@ For the runs reported here, the protocol parameters were:
 \item collateral per participant: $1.2$ ETH,
 \item auction rule: first-price settlement with deterministic winner decoding.
 \end{enumerate}
+
+The parameter roles are separated intentionally:
+\(N\) controls cut-and-choose verification coverage, while \(n\) controls the
+size of the auction instantiation.
+
+Local deterministic execution provides reproducible cost and behavior
+measurements; production fee calibration requires deployment-specific
+gas-price and blob-fee assumptions.
 
 \subsection{Scenario Matrix}
 \begin{table}[htbp]
@@ -939,32 +952,14 @@ Garbler-cheat flow & Garbler commits tampered \texttt{rootGC} for an opened inst
 \end{table}
 
 \section{Scenario Results}
-\subsection{Scenario 1: Honest Success Flow}
-The protocol completed all phases and reached \texttt{Closed} with successful assignment.
-The accepted settlement decoded winner index $1$ (buyer $B_2$), winning bid $0.1$ ETH, and a valid offered ENS name hash (\texttt{tuvienna.eth} in this run).
-The script checks confirmed:
+\input{evaluation/tables/scenario_summary.tex}
+
+Observed invariants confirmed:
 \begin{enumerate}
-\item anchor validity (\texttt{hOut} match),
-\item winning-bid bound (\texttt{winningBid <= deposit}),
-\item assignment success (\texttt{assigned=true}),
-\item no unresolved evaluators at closure.
+\item honest execution reached \texttt{Closed} with accepted settlement and completed assignment,
+\item evaluator default triggered deterministic default/slashing while preserving liveness,
+\item garbler cheating was attributed via GC-leaf dispute, with deterministic slashing and closure without settlement.
 \end{enumerate}
-
-\subsection{Scenario 2: Evaluator Defaulted Flow}
-One evaluator ($E_3$, buyer $B_3$ in the application mapping) was forced into
-default in the evaluator-input phase.
-The contract applied the intended liveness rule: the defaulted evaluator was
-semantically mapped to zero input and slashed (collateral transfer to the
-garbler), while remaining evaluators continued the run.
-The protocol still completed settlement and assignment, finishing in \texttt{Closed} with \texttt{assigned=true}.
-This run demonstrates that single-evaluator non-cooperation does not create
-indefinite blocking under the implemented timeout/default path.
-
-\subsection{Scenario 3: Garbler Cheat Flow}
-The garbler was configured to publish a tampered \texttt{rootGC} for one opened
-instance. An evaluator submitted a GC-leaf dispute, the mismatch was validated
-by contract checks, and the garbler was slashed according to protocol rules.
-The contract transitioned directly to \texttt{Closed} without accepting settlement output and without assignment (\texttt{assigned=false}), which is the intended safety behavior for a proven integrity violation.
 
 \section{Requirement Coverage from the Results}
 The executed scenarios provide direct evidence for key requirements defined in Chapter~3:
@@ -975,36 +970,100 @@ The executed scenarios provide direct evidence for key requirements defined in C
 \item \textbf{R5 (Settlement integrity):} successful scenarios complete deterministic first-price transfer and assignment in a protocol-consistent terminal state.
 \end{enumerate}
 
-The settlement check scope in these runs is anchor equality plus
-decoding constraints. Computational integrity in this setting is delivered by
-deterministic off-chain evaluation and dispute predicates.
-
-Overall, the evaluation confirms that the Solidity/Rust prototype enforces the
-intended security-economics control points in executable runs.
-
 \section{Cost and Performance Discussion}
-This chapter focuses on behavioral correctness and enforceability first.
-The implementation follows constrained on-chain verification: contract logic validates commitments, anchors, and dispute predicates, while heavy garbled-circuit computation remains off-chain.
-Evaluation-payload publication is hash-bound through EIP-4844 blob commitment
-checks, which keeps settlement binding explicit within the EIP-4844
-availability horizon~\cite{Buterin2022EIP4844}. The \texttt{blobhash(0)} check
-binds settlement to one concrete blob reference in the transaction.
+\subsection{Per-call Gas Profile}
+\input{evaluation/tables/gas_by_call.tex}
+The per-call profile shows that commitment publication dominates the optimistic
+path: \texttt{submitCommitments} and buyer-scoped
+\texttt{submitOtRootsForBuyer} are the largest recurring costs.
+Opening and dispute-phase closure calls are moderate in comparison, while
+\texttt{disputeGarbledTable} is the dominant selective-verification cost in the
+cheating path.
 
-Full quantitative gas profiling (per-function gas table for optimistic and dispute paths) is intentionally separated as follow-up measurement work.
-The current reported runs were executed on a local deterministic test chain,
-providing reproducible protocol validation. Comprehensive production-grade
-fee-economics benchmarking is left to future work.
+\subsection{Total Scenario Cost}
+\input{evaluation/tables/scenario_cost_totals.tex}
+Scenario totals confirm the expected behavior-level trade-off.
+The default scenario remains close to honest execution because the same main
+phases execute, with timeout/default replacing one evaluator readiness path.
+The cheating scenario skips settlement/assignment but includes a heavy dispute
+transaction, yielding a comparable total range.
+
+\subsection{Artifact Sizes}
+\input{evaluation/tables/artifact_sizes.tex}
+Artifact measurements reflect the intended design split.
+Settlement-critical payloads such as \texttt{outputBytes} stay compact and
+fixed-size, while the evaluation blob dominates raw bytes and remains off-chain
+except for hash-bound enforcement hooks.
+This supports constrained on-chain verification with heavier data handling kept
+outside contract state.
+
+\subsection{Off-chain Runtime}
+\input{evaluation/tables/runtime_observed.tex}
+Observed local runtimes are in the millisecond range for the profiled CLI
+operations and remain stable across the baseline scenarios.
+Commitment preparation and label-reveal-related steps are the largest measured
+off-chain contributors, while output encoding/anchor derivation is
+comparatively small.
+These values are implementation timings, intended for reproducibility and
+relative comparison rather than hardware-independent benchmarking.
+
+\subsection{Scaling Indicators}
+\input{evaluation/tables/scaling_buyers.tex}
+\input{evaluation/tables/scaling_instances.tex}
+The scaling tables show the expected trend behavior for the implemented model.
+At fixed \(N=10\), total gas grows with \(n\) due to buyer-scoped publication
+and closure tracking work.
+At fixed \(n=3\), increasing \(N\) increases commitment/opening-related costs
+through larger cut-and-choose evidence surfaces.
+
+At fixed \(N=10\), increasing \(n\) primarily scales buyer-scoped OT roots
+(\(O(nN)\)) and evaluator closure state (\(O(n)\)).
+At fixed \(n=3\), increasing \(N\) scales core commitments (\(O(N)\)),
+buyer-scoped OT roots (\(O(nN)\)), and opening payload size (\(O(N)\)).
+The dedicated scaling sweep executes full honest-success runs for all planned
+points (\(n \in \{1,3,5,10\}\), \(N=10\) and \(n=3\), \(N \in \{5,10,20\}\)),
+and records measured totals for each point. These totals are reported as
+trend indicators from deterministic local execution and are not presented as
+production throughput limits.
+
+Scenario totals and scaling totals are intentionally reported from two
+measurement harnesses with different purposes.
+The scenario harness replays protocol-generated artifacts for
+honest/default/cheat behavior and reports scenario outcomes (deployment
+excluded, buyer registration included).
+The scaling harness re-deploys per point and runs only the honest-success path
+with deterministic synthetic commitment vectors to normalize
+\(n,N\)-sensitivity.
+Therefore, shared coordinates (for example \(n=3, N=10\)) are interpreted
+within harness context rather than as strict cross-harness equality checks:
+scenario tables support behavioral validation, while sweep tables support
+growth-trend validation.
+
+Accordingly, the sweep supports structural cost analysis for the implemented
+enforcement model, while deployment-calibrated economics remain future work.
+
+\section{Qualitative Positioning}
+\input{evaluation/tables/approach_comparison.tex}
+
+The comparison is positioning-oriented: it highlights trust/cost trade-offs and
+scope boundaries, not universal superiority claims.
+\clearpage
 
 \section{Threats to Validity}
-The presented evidence is strong for implementation-level protocol behavior, but has known limits:
+The presented evidence is strong for implementation-level protocol behavior,
+with bounded external validity:
 \begin{enumerate}
-\item environment is local test-chain execution rather than live Ethereum conditions with volatile fees and ordering pressure,
-\item scenario coverage is centered on the main representative strategic failure modes (honest, evaluator-default, garbler-cheat) for the evaluated protocol model,
-\item evaluation scripts expose selected runtime values (including bids) for experiment transparency; privacy guarantees discussed in this thesis refer to protocol-level execution without such debug disclosure.
+\item local execution does not model live mempool competition or adversarial
+transaction ordering,
+\item gas values here are execution-cost measurements, not final fee
+predictions under volatile base-fee/blob-fee conditions,
+\item the \(n,N\) sweep is moderate and trend-oriented; broad throughput limits
+are out of scope,
+\item off-chain timing values depend on local hardware and implementation
+maturity,
+\item debugging output in the experimental execution harness is not part of the
+privacy-preserving protocol interface.
 \end{enumerate}
-
-These limits delimit the empirical scope of this chapter and inform the
-future-work agenda.
 
 \chapter{Discussion and Conclusion}
 \section{Discussion of the Main Findings}
@@ -1044,7 +1103,7 @@ research steps.
 \section{Future Work}
 The next steps are clear and technically grounded:
 \begin{enumerate}
-\item \textbf{Quantitative gas/cost profiling:} complete per-function cost tables for optimistic and dispute paths on realistic fee settings, including blob-related publishing costs~\cite{Buterin2022EIP4844}.
+\item \textbf{Production fee calibration and deployment-level benchmarking:} map measured execution gas to deployment fee assumptions (base fee, priority fee, blob fee) and evaluate cost robustness across realistic network conditions~\cite{Buterin2022EIP4844}.
 \item \textbf{Stronger economic analysis:} derive explicit collateral/deadline conditions for deviation deterrence under different attacker models and network conditions.
 \item \textbf{Protocol scaling and robustness:} extend systematic testing for larger evaluator sets (buyers in concrete applications) and richer adversarial combinations while preserving deterministic dispute closure.
 \item \textbf{Application expansion:} generalize from the current ENS PoC mapping toward richer auction policies while keeping protocol-core invariants unchanged.

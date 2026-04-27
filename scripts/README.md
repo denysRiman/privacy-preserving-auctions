@@ -61,3 +61,16 @@ You can override defaults by exporting env vars before running:
 - `WINNER_FORMULA` (default: `0`; `0` = higher bid wins (`x>y`), `1` = lower bid wins (`x<=y`))
 - `VERIFIER_SEED` or `VERIFIER_SEED_OVERRIDE` to force a specific Bob verifier seed in the demo
 - `BASE_FEE_WEI`/`GAS_PRICE_WEI` for `start_anvil.sh` (both default `0`)
+
+## Contract Variant Generation (Evaluation Sweeps)
+
+Use `generate_mp_variants.sh` to create `N`-specific contract variants under `contract/src/generated/`.
+
+```bash
+./generate_mp_variants.sh 8
+./generate_mp_variants.sh 8 12 16
+```
+
+This helper rewrites only:
+- `contract MillionairesProblem` -> `contract MillionairesProblemN<value>`
+- `uint256 public constant N = 10;` -> target `N`

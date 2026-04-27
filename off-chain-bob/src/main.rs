@@ -17,7 +17,7 @@ use off_chain_common::ot::{
 };
 use off_chain_common::scenario::build_millionaires_layout;
 use off_chain_common::settlement::{
-    default_circuit_id, encode_auction_output_bytes, output_anchor_hash,
+    default_circuit_id, encode_auction_output_bytes, output_anchor_hash, output_commitment_hash,
 };
 use off_chain_common::types::{CircuitLayout, GateDesc};
 use std::env;
@@ -207,6 +207,28 @@ fn parse_u64_csv(value: &str, flag_name: &str) -> AppResult<Vec<u64>> {
             parse_u64(trimmed, &field)
         })
         .collect()
+}
+
+fn settle_auction_summary_lines(
+    bids: &[u64],
+    chosen_namehash: [u8; 32],
+    circuit_id: [u8; 32],
+    instance_id: u64,
+) -> AppResult<Vec<String>> {
+    let outcome = evaluate_first_price_outcome(bids).map_err(|e| format!("invalid --bids: {e}"))?;
+    let output_bytes =
+        encode_auction_output_bytes(outcome.winner_id, outcome.winning_bid, chosen_namehash);
+    let output_hex = hex_prefixed(&output_bytes);
+    let computed_h_out = output_commitment_hash(circuit_id, instance_id, &output_bytes);
+
+    Ok(vec![
+        format!("winner_id={}", outcome.winner_id),
+        format!("winning_bid={}", outcome.winning_bid),
+        format!("chosen_namehash={}", hex32(chosen_namehash)),
+        format!("output_bytes={output_hex}"),
+        format!("instance_id={instance_id}"),
+        format!("computed_hOut={}", hex32(computed_h_out)),
+    ])
 }
 
 #[derive(Debug, Clone)]
@@ -754,13 +776,29 @@ fn cmd_settle_auction(args: &[String]) -> AppResult<()> {
         return Err("--bids is required for settle-auction".into());
     };
     let bids = parse_u64_csv(&raw_bids, "--bids")?;
-    let outcome =
-        evaluate_first_price_outcome(&bids).map_err(|e| format!("invalid --bids: {e}"))?;
-    let winner_id = outcome.winner_id;
-    let winning_bid = outcome.winning_bid;
-
-    let output_bytes = encode_auction_output_bytes(winner_id, winning_bid, chosen_namehash);
-    let output_hex = hex_prefixed(&output_bytes);
+    let circuit_id_raw = run_cast(&[
+        "call".to_string(),
+        contract_address.clone(),
+        "circuitId()(bytes32)".to_string(),
+        "--rpc-url".to_string(),
+        rpc_url.clone(),
+    ])?;
+    let circuit_id = parse_bytes32(circuit_id_raw.trim())?;
+    let m_raw = run_cast(&[
+        "call".to_string(),
+        contract_address.clone(),
+        "m()(uint256)".to_string(),
+        "--rpc-url".to_string(),
+        rpc_url.clone(),
+    ])?;
+    let instance_id = parse_u64(m_raw.trim(), "m")?;
+    let output_lines =
+        settle_auction_summary_lines(&bids, chosen_namehash, circuit_id, instance_id)?;
+    let output_hex = output_lines
+        .iter()
+        .find_map(|line| line.strip_prefix("output_bytes="))
+        .ok_or("missing output_bytes in settle summary")?
+        .to_string();
 
     if !dry_run {
         let tx_result = run_cast(&[
@@ -775,10 +813,9 @@ fn cmd_settle_auction(args: &[String]) -> AppResult<()> {
         ])?;
         print_tx_summary("settle_auction", &tx_result);
     }
-    println!("winner_id={winner_id}");
-    println!("winning_bid={winning_bid}");
-    println!("chosen_namehash={}", hex32(chosen_namehash));
-    println!("output_bytes={output_hex}");
+    for line in output_lines {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -1274,6 +1311,34 @@ mod tests {
     fn rejects_u64_bids_csv_with_empty_item() {
         let err = parse_u64_csv("5,,7", "--bids").expect_err("empty item should fail");
         assert!(err.to_string().contains("empty item"));
+    }
+
+    #[test]
+    fn settle_auction_summary_lines_pin_parseable_output_contract() {
+        let chosen_namehash = [0xabu8; 32];
+        let circuit_id = keccak256(&[b"auction-circuit"]);
+        let instance_id = 9u64;
+        let lines = settle_auction_summary_lines(
+            &[41, 17, 99, 5],
+            chosen_namehash,
+            circuit_id,
+            instance_id,
+        )
+        .expect("settle summary");
+        let output_bytes = encode_auction_output_bytes(2, 99, chosen_namehash);
+        let computed_h_out = output_commitment_hash(circuit_id, instance_id, &output_bytes);
+
+        assert_eq!(
+            lines,
+            vec![
+                "winner_id=2".to_string(),
+                "winning_bid=99".to_string(),
+                format!("chosen_namehash={}", hex32(chosen_namehash)),
+                format!("output_bytes={}", hex_prefixed(&output_bytes)),
+                "instance_id=9".to_string(),
+                format!("computed_hOut={}", hex32(computed_h_out)),
+            ]
+        );
     }
 
     #[test]

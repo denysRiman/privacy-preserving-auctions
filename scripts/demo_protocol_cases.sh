@@ -13,6 +13,8 @@ TX_GAS_PRICE_WEI="${TX_GAS_PRICE_WEI:-0}"
 PAUSE_SECONDS="${PAUSE_SECONDS:-0}"
 WORK_ROOT="${WORK_ROOT:-/tmp/auction-demo-nparty}"
 VERBOSE="${VERBOSE:-0}"
+EVALUATION_WRITE_RESULTS="${EVALUATION_WRITE_RESULTS:-1}"
+EVALUATION_RESULTS_DIR="${EVALUATION_RESULTS_DIR:-${ROOT_DIR}/paper/FINAL/evaluation/results}"
 
 ALICE_PK="${ALICE_PK:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 B1_PK="${B1_PK:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}"
@@ -82,6 +84,14 @@ LAST_DISPUTE_STAGE_BEFORE=""
 LAST_DISPUTE_STAGE_AFTER=""
 LAST_ASSIGN_EVENT_OK=""
 
+EVAL_N_BUYERS=3
+EVAL_N_INSTANCES=10
+EVAL_SCENARIO=""
+EVAL_SCENARIO_TX_COUNT=0
+EVAL_SCENARIO_TOTAL_GAS=0
+EVAL_RUNTIME_RUN_ID=1
+EVAL_DYNAMIC_ARTIFACTS_RECORDED=0
+
 is_truthy() {
   case "$1" in
     1|true|TRUE|True|yes|YES|on|ON) return 0 ;;
@@ -92,6 +102,256 @@ is_truthy() {
 v_log() {
   if is_truthy "${VERBOSE}"; then
     echo "$@"
+  fi
+}
+
+csv_quote() {
+  local value="${1:-}"
+  value="${value//$'\r'/ }"
+  value="${value//$'\n'/ }"
+  value="${value//\"/\"\"}"
+  printf '"%s"' "${value}"
+}
+
+append_csv_row() {
+  local file="$1"
+  shift
+  local first=1
+  local field
+  for field in "$@"; do
+    if [[ "${first}" -eq 1 ]]; then
+      first=0
+    else
+      printf ',' >> "${file}"
+    fi
+    csv_quote "${field}" >> "${file}"
+  done
+  printf '\n' >> "${file}"
+}
+
+init_evaluation_results() {
+  if ! is_truthy "${EVALUATION_WRITE_RESULTS}"; then
+    return
+  fi
+
+  mkdir -p "${EVALUATION_RESULTS_DIR}"
+  printf 'scenario,n_buyers,N_instances,phase,function_name,caller_role,gas_used,tx_hash_or_local_identifier\n' > "${EVALUATION_RESULTS_DIR}/evaluation_gas_by_call.csv"
+  printf 'scenario,n_buyers,N_instances,tx_count,total_gas,terminal_stage,settlement_accepted,assignment_completed,slashing_happened,slashed_party,notes\n' > "${EVALUATION_RESULTS_DIR}/evaluation_scenarios.csv"
+  printf 'scenario,n_buyers,N_instances,operation,run_id,elapsed_ms\n' > "${EVALUATION_RESULTS_DIR}/evaluation_runtime.csv"
+  printf 'n_buyers,N_instances,artifact,count,bytes_per_item,total_bytes,derivation\n' > "${EVALUATION_RESULTS_DIR}/evaluation_artifacts.csv"
+  printf 'n_buyers,N_instances,scenario,total_tx,total_gas,core_commitments_count,ot_roots_count,opened_instances,terminal_stage,measurement_status,notes\n' > "${EVALUATION_RESULTS_DIR}/evaluation_scaling_buyers.csv"
+  printf 'n_buyers,N_instances,scenario,total_tx,total_gas,core_commitments_count,ot_roots_count,opened_instances,terminal_stage,measurement_status,notes\n' > "${EVALUATION_RESULTS_DIR}/evaluation_scaling_instances.csv"
+
+  record_static_artifacts
+  record_structural_scaling_placeholders
+}
+
+record_static_artifacts() {
+  if ! is_truthy "${EVALUATION_WRITE_RESULTS}"; then
+    return
+  fi
+
+  append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_artifacts.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "outputBytes" "1" "42" "42" "abi.encodePacked(uint16 winnerId,uint64 winningBid,bytes32 chosenNamehash)"
+  append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_artifacts.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "gate leaf" "1" "71" "71" "LEAF_BYTES_LEN in Solidity dispute verifier"
+  append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_artifacts.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "core commitments" "$((EVAL_N_INSTANCES * 4))" "32" "$((EVAL_N_INSTANCES * 4 * 32))" "N x 4 x bytes32: comSeed, rootGC, blobHashGC, hOut"
+  append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_artifacts.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "OT roots" "$((EVAL_N_BUYERS * EVAL_N_INSTANCES))" "32" "$((EVAL_N_BUYERS * EVAL_N_INSTANCES * 32))" "n x N x bytes32 buyer-scoped OT roots"
+  append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_artifacts.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "opened seeds" "$((EVAL_N_INSTANCES - 1))" "32" "$(((EVAL_N_INSTANCES - 1) * 32))" "all cut-and-choose instances except selected m"
+}
+
+record_structural_scaling_placeholders() {
+  local n core ot opened
+  for n in 1 5 10; do
+    core="${EVAL_N_INSTANCES}"
+    ot="$((n * EVAL_N_INSTANCES))"
+    opened="$((EVAL_N_INSTANCES - 1))"
+    append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_scaling_buyers.csv" "${n}" "${EVAL_N_INSTANCES}" "honest-success" "" "" "${core}" "${ot}" "${opened}" "" "structural-pending" "buyer-sweep execution requires generalized demo account loops"
+  done
+
+  local inst
+  for inst in 5 20; do
+    core="${inst}"
+    ot="$((EVAL_N_BUYERS * inst))"
+    opened="$((inst - 1))"
+    append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_scaling_instances.csv" "${EVAL_N_BUYERS}" "${inst}" "honest-success" "" "" "${core}" "${ot}" "${opened}" "" "structural-pending" "current Solidity/Rust ABI uses fixed N=10 arrays"
+  done
+}
+
+start_eval_scenario() {
+  EVAL_SCENARIO="$1"
+  EVAL_SCENARIO_TX_COUNT=0
+  EVAL_SCENARIO_TOTAL_GAS=0
+  EVAL_RUNTIME_RUN_ID=1
+}
+
+now_ms() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
+  else
+    echo "$(($(date +%s) * 1000))"
+  fi
+}
+
+normalize_quantity_output() {
+  local raw
+  raw="$(printf '%s\n' "$1" | tr -d '[:space:]')"
+  if [[ "${raw}" =~ ^0x[0-9a-fA-F]+$ ]]; then
+    printf '%d\n' "$((raw))"
+    return
+  fi
+  printf '%s\n' "$1" | sed -nE 's/^[[:space:]]*([0-9]+).*/\1/p' | head -n1
+}
+
+extract_tx_hash_from_text() {
+  local text="$1"
+  local tx
+  tx="$(printf '%s\n' "${text}" | sed -nE 's/^[A-Za-z0-9_]+_tx_hash=(0x[0-9a-fA-F]{64})$/\1/p' | tail -n1)"
+  if [[ -n "${tx}" ]]; then
+    echo "${tx}"
+    return
+  fi
+  tx="$(printf '%s\n' "${text}" | sed -nE 's/^transactionHash[[:space:]]+(0x[0-9a-fA-F]{64})$/\1/p' | tail -n1)"
+  if [[ -n "${tx}" ]]; then
+    echo "${tx}"
+    return
+  fi
+  printf '%s\n' "${text}" | sed -nE 's/.*"transactionHash"[[:space:]]*:[[:space:]]*"(0x[0-9a-fA-F]{64})".*/\1/p' | tail -n1
+}
+
+record_tx_gas() {
+  local phase="$1"
+  local function_name="$2"
+  local caller_role="$3"
+  local tx_hash="$4"
+  local include_in_total="${5:-1}"
+  local gas_raw gas
+
+  if ! is_truthy "${EVALUATION_WRITE_RESULTS}" || [[ -z "${tx_hash}" ]]; then
+    return
+  fi
+
+  set +e
+  gas_raw="$(cast receipt "${tx_hash}" gasUsed --rpc-url "${RPC_URL}" 2>/dev/null)"
+  local receipt_rc=$?
+  set -e
+  if [[ "${receipt_rc}" -eq 0 ]]; then
+    gas="$(normalize_quantity_output "${gas_raw}")"
+  else
+    gas=""
+  fi
+
+  append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_gas_by_call.csv" "${EVAL_SCENARIO}" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "${phase}" "${function_name}" "${caller_role}" "${gas}" "${tx_hash}"
+  if is_truthy "${include_in_total}" && [[ -n "${gas}" ]]; then
+    EVAL_SCENARIO_TX_COUNT=$((EVAL_SCENARIO_TX_COUNT + 1))
+    EVAL_SCENARIO_TOTAL_GAS=$((EVAL_SCENARIO_TOTAL_GAS + gas))
+  fi
+}
+
+record_tx_from_output() {
+  local phase="$1"
+  local function_name="$2"
+  local caller_role="$3"
+  local include_in_total="$4"
+  local text="$5"
+  local tx_hash
+
+  tx_hash="$(extract_tx_hash_from_text "${text}")"
+  record_tx_gas "${phase}" "${function_name}" "${caller_role}" "${tx_hash}" "${include_in_total}"
+}
+
+run_alice_record() {
+  local phase="$1"
+  local function_name="$2"
+  local caller_role="$3"
+  local include_in_total="$4"
+  shift 4
+  local out
+  out="$(run_alice "$@")"
+  record_tx_from_output "${phase}" "${function_name}" "${caller_role}" "${include_in_total}" "${out}"
+  printf '%s\n' "${out}"
+}
+
+run_bob_record() {
+  local idx="$1"
+  local phase="$2"
+  local function_name="$3"
+  local caller_role="$4"
+  local include_in_total="$5"
+  shift 5
+  local out
+  out="$(run_bob "${idx}" "$@")"
+  record_tx_from_output "${phase}" "${function_name}" "${caller_role}" "${include_in_total}" "${out}"
+  printf '%s\n' "${out}"
+}
+
+record_runtime_ms() {
+  local operation="$1"
+  local elapsed_ms="$2"
+  if ! is_truthy "${EVALUATION_WRITE_RESULTS}"; then
+    return
+  fi
+  append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_runtime.csv" "${EVAL_SCENARIO}" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "${operation}" "${EVAL_RUNTIME_RUN_ID}" "${elapsed_ms}"
+  EVAL_RUNTIME_RUN_ID=$((EVAL_RUNTIME_RUN_ID + 1))
+}
+
+file_size_bytes() {
+  local path="$1"
+  wc -c < "${path}" | tr -d '[:space:]'
+}
+
+record_dynamic_artifacts_once() {
+  local out_dir="$1"
+  local m="$2"
+  local blob_file="${out_dir}/instance-${m}-eval-blob.bin"
+  local leaves_file="${out_dir}/instance-${m}-leaves.txt"
+  local blob_size leaves_count
+
+  if ! is_truthy "${EVALUATION_WRITE_RESULTS}" || [[ "${EVAL_DYNAMIC_ARTIFACTS_RECORDED}" -eq 1 ]]; then
+    return
+  fi
+  if [[ -f "${blob_file}" ]]; then
+    blob_size="$(file_size_bytes "${blob_file}")"
+    append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_artifacts.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "GC evaluation blob payload" "1" "${blob_size}" "${blob_size}" "serialized canonical eval blob for selected instance m"
+  fi
+  if [[ -f "${leaves_file}" ]]; then
+    leaves_count="$(wc -l < "${leaves_file}" | tr -d '[:space:]')"
+    append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_artifacts.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "GC leaves file" "${leaves_count}" "71" "$((leaves_count * 71))" "hex-encoded leaf list; logical leaf size is LEAF_BYTES_LEN"
+  fi
+  EVAL_DYNAMIC_ARTIFACTS_RECORDED=1
+}
+
+record_dispute_packet_artifact() {
+  local leaf_hex="$1"
+  local ih_proof="$2"
+  local layout_proof="$3"
+  local ih_count layout_count total_bytes
+
+  if ! is_truthy "${EVALUATION_WRITE_RESULTS}"; then
+    return
+  fi
+
+  ih_count="$(csv_len "${ih_proof}")"
+  layout_count="$(csv_len "${layout_proof}")"
+  total_bytes="$((71 + (ih_count * 32) + (layout_count * 32) + 32 + 2 + 1 + 2 + 2 + 2))"
+  append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_artifacts.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "GC leaf dispute packet" "1" "${total_bytes}" "${total_bytes}" "leaf ${#leaf_hex} hex chars, seed, gate descriptor, IH proof ${ih_count}x32, layout proof ${layout_count}x32"
+}
+
+record_scenario_summary() {
+  local terminal_stage="$1"
+  local settlement_accepted="$2"
+  local assignment_completed="$3"
+  local slashing_happened="$4"
+  local slashed_party="$5"
+  local notes="$6"
+
+  if ! is_truthy "${EVALUATION_WRITE_RESULTS}"; then
+    return
+  fi
+
+  append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_scenarios.csv" "${EVAL_SCENARIO}" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "${EVAL_SCENARIO_TX_COUNT}" "${EVAL_SCENARIO_TOTAL_GAS}" "${terminal_stage}" "${settlement_accepted}" "${assignment_completed}" "${slashing_happened}" "${slashed_party}" "${notes}"
+
+  if [[ "${EVAL_SCENARIO}" == "honest-success" ]]; then
+    append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_scaling_buyers.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "${EVAL_SCENARIO}" "${EVAL_SCENARIO_TX_COUNT}" "${EVAL_SCENARIO_TOTAL_GAS}" "${EVAL_N_INSTANCES}" "$((EVAL_N_BUYERS * EVAL_N_INSTANCES))" "$((EVAL_N_INSTANCES - 1))" "${terminal_stage}" "measured" "baseline buyer count"
+    append_csv_row "${EVALUATION_RESULTS_DIR}/evaluation_scaling_instances.csv" "${EVAL_N_BUYERS}" "${EVAL_N_INSTANCES}" "${EVAL_SCENARIO}" "${EVAL_SCENARIO_TX_COUNT}" "${EVAL_SCENARIO_TOTAL_GAS}" "${EVAL_N_INSTANCES}" "$((EVAL_N_BUYERS * EVAL_N_INSTANCES))" "$((EVAL_N_INSTANCES - 1))" "${terminal_stage}" "measured" "baseline cut-and-choose parameter"
   fi
 }
 
@@ -593,6 +853,7 @@ deploy_contract() {
       --broadcast \
       --json
   )"
+  record_tx_from_output "setup" "deploy_EnsAuctionAdapterMock" "garbler" "0" "${adapter_out}"
   ENS_ADAPTER="$(echo "${adapter_out}" | sed -nE 's/.*"deployedTo"[[:space:]]*:[[:space:]]*"(0x[0-9a-fA-F]{40})".*/\1/p' | tail -n1)"
   if [[ -z "${ENS_ADAPTER}" ]]; then
     echo "Failed to parse adapter deploy output" >&2
@@ -617,6 +878,7 @@ deploy_contract() {
         "${LAYOUT_ROOT}" \
         "${BIT_WIDTH}"
   )"
+  record_tx_from_output "setup" "deploy_MillionairesProblem" "garbler" "0" "${deploy_out}"
 
   CONTRACT_ADDRESS="$(echo "${deploy_out}" | sed -nE 's/.*"deployedTo"[[:space:]]*:[[:space:]]*"(0x[0-9a-fA-F]{40})".*/\1/p' | tail -n1)"
   if [[ -z "${CONTRACT_ADDRESS}" ]]; then
@@ -632,13 +894,14 @@ deploy_contract() {
 }
 
 register_buyers() {
-  local before after
+  local before after tx_out
   before="$(stage_value)"
-  cast send "${CONTRACT_ADDRESS}" "registerBuyers(address[],address[])" \
+  tx_out="$(cast send "${CONTRACT_ADDRESS}" "registerBuyers(address[],address[])" \
     "[${B2_ADDR},${B3_ADDR}]" "[${B2_ADDR},${B3_ADDR}]" \
     --legacy --gas-price "${TX_GAS_PRICE_WEI}" \
     --private-key "${ALICE_PK}" \
-    --rpc-url "${RPC_URL}" >/dev/null
+    --rpc-url "${RPC_URL}")"
+  record_tx_from_output "setup" "registerBuyers" "garbler" "1" "${tx_out}"
   after="$(stage_value)"
   v_log "buyers_registered: B1=${B1_ADDR}->${B1_ADDR}, B2=${B2_ADDR}->${B2_ADDR}, B3=${B3_ADDR}->${B3_ADDR} [OK]"
   v_log "buyers_registered: buyerCount=$(normalize_uint_output "$(cast call "${CONTRACT_ADDRESS}" "buyerCount()(uint256)" --rpc-url "${RPC_URL}")")"
@@ -649,10 +912,10 @@ register_buyers() {
 deposit_all() {
   local before after
   before="$(stage_value)"
-  run_alice deposit >/dev/null
-  run_bob 0 deposit >/dev/null
-  run_bob 1 deposit >/dev/null
-  run_bob 2 deposit >/dev/null
+  run_alice_record "deposit" "deposit" "garbler" "1" deposit >/dev/null
+  run_bob_record 0 "deposit" "deposit" "evaluator_B1" "1" deposit >/dev/null
+  run_bob_record 1 "deposit" "deposit" "evaluator_B2" "1" deposit >/dev/null
+  run_bob_record 2 "deposit" "deposit" "evaluator_B3" "1" deposit >/dev/null
   after="$(stage_value)"
   v_log "deposits: Alice + B1 + B2 + B3 [OK]"
   set_last_stage_transition "${before}" "${after}"
@@ -668,12 +931,12 @@ commit_reveal_all_seeds() {
   for idx in 0 1 2; do
     seed="$(cast keccak "${tag}-seed-${idx}")"
     salt="$(cast keccak "${tag}-salt-${idx}")"
-    run_bob "${idx}" commit-verifier-seed --seed "${seed}" --salt "${salt}" >/dev/null
+    run_bob_record "${idx}" "seed_commit" "commitBuyerSeed" "evaluator_B$((idx + 1))" "1" commit-verifier-seed --seed "${seed}" --salt "${salt}" >/dev/null
   done
   for idx in 0 1 2; do
     seed="$(cast keccak "${tag}-seed-${idx}")"
     salt="$(cast keccak "${tag}-salt-${idx}")"
-    run_bob "${idx}" reveal-verifier-seed --seed "${seed}" --salt "${salt}" >/dev/null
+    run_bob_record "${idx}" "seed_reveal" "revealBuyerSeed" "evaluator_B$((idx + 1))" "1" reveal-verifier-seed --seed "${seed}" --salt "${salt}" >/dev/null
   done
   after="$(stage_value)"
   v_log "seed_commit_reveal: B1,B2,B3 [OK]"
@@ -704,7 +967,7 @@ submit_ot_roots_all() {
   before="$(stage_value)"
   for idx in 0 1 2; do
     csv="$(roots_csv_for_buyer "${tag}" "${idx}")"
-    run_alice submit-ot-roots \
+    run_alice_record "commitment_publication" "submitOtRootsForBuyer" "garbler_for_B$((idx + 1))" "1" submit-ot-roots \
       --buyer "${BUYER_ADDRS[$idx]}" \
       --bit-width "${BIT_WIDTH}" \
       --circuit-id "${CIRCUIT_ID}" \
@@ -719,9 +982,9 @@ submit_ot_roots_all() {
 buyer_ready_all() {
   local before after
   before="$(stage_value)"
-  run_bob 0 buyer-ready >/dev/null
-  run_bob 1 buyer-ready >/dev/null
-  run_bob 2 buyer-ready >/dev/null
+  run_bob_record 0 "buyer_input" "submitBuyerReady" "evaluator_B1" "1" buyer-ready >/dev/null
+  run_bob_record 1 "buyer_input" "submitBuyerReady" "evaluator_B2" "1" buyer-ready >/dev/null
+  run_bob_record 2 "buyer_input" "submitBuyerReady" "evaluator_B3" "1" buyer-ready >/dev/null
   after="$(stage_value)"
   v_log "buyer_input_ot: all buyers ready [OK]"
   set_last_stage_transition "${before}" "${after}"
@@ -731,18 +994,20 @@ buyer_ready_all() {
 buyer_ready_partial_and_default_b3() {
   local before_default after_default b3_before_vault b3_after_vault b3_before_status b3_after_status
   local unresolved_before unresolved_after
-  run_bob 0 buyer-ready >/dev/null
-  run_bob 1 buyer-ready >/dev/null
+  local tx_out
+  run_bob_record 0 "buyer_input" "submitBuyerReady" "evaluator_B1" "1" buyer-ready >/dev/null
+  run_bob_record 1 "buyer_input" "submitBuyerReady" "evaluator_B2" "1" buyer-ready >/dev/null
   cast rpc evm_increaseTime 3700 --rpc-url "${RPC_URL}" >/dev/null
   cast rpc evm_mine --rpc-url "${RPC_URL}" >/dev/null
   before_default="$(stage_value)"
   unresolved_before="$(normalize_uint_output "$(cast call "${CONTRACT_ADDRESS}" "unresolvedBuyers()(uint256)" --rpc-url "${RPC_URL}")")"
   b3_before_status="$(normalize_uint_output "$(cast call "${CONTRACT_ADDRESS}" "buyerStatus(address)(uint8)" "${B3_ADDR}" --rpc-url "${RPC_URL}")")"
   b3_before_vault="$(participant_vault "${B3_ADDR}")"
-  cast send "${CONTRACT_ADDRESS}" "defaultBuyerInput(address)" "${B3_ADDR}" \
+  tx_out="$(cast send "${CONTRACT_ADDRESS}" "defaultBuyerInput(address)" "${B3_ADDR}" \
     --legacy --gas-price "${TX_GAS_PRICE_WEI}" \
     --private-key "${ALICE_PK}" \
-    --rpc-url "${RPC_URL}" >/dev/null
+    --rpc-url "${RPC_URL}")"
+  record_tx_from_output "timeout_abort" "defaultBuyerInput" "garbler" "1" "${tx_out}"
   after_default="$(stage_value)"
   unresolved_after="$(normalize_uint_output "$(cast call "${CONTRACT_ADDRESS}" "unresolvedBuyers()(uint256)" --rpc-url "${RPC_URL}")")"
   b3_after_status="$(normalize_uint_output "$(cast call "${CONTRACT_ADDRESS}" "buyerStatus(address)(uint8)" "${B3_ADDR}" --rpc-url "${RPC_URL}")")"
@@ -766,8 +1031,13 @@ current_m() {
 reveal_openings() {
   local m="$1"
   local before after
+  local start_ms end_ms out
   before="$(stage_value)"
-  run_alice reveal-openings --m "${m}" --bit-width "${BIT_WIDTH}" --circuit-id "${CIRCUIT_ID}" >/dev/null
+  start_ms="$(now_ms)"
+  out="$(run_alice reveal-openings --m "${m}" --bit-width "${BIT_WIDTH}" --circuit-id "${CIRCUIT_ID}")"
+  end_ms="$(now_ms)"
+  record_runtime_ms "opening_payload_preparation_and_submission_cli" "$((end_ms - start_ms))"
+  record_tx_from_output "opening" "revealOpenings" "garbler" "1" "${out}"
   after="$(stage_value)"
   v_log "openings_revealed: m=${m} [OK]"
   set_last_stage_transition "${before}" "${after}"
@@ -776,6 +1046,7 @@ reveal_openings() {
 
 close_dispute_ready_buyers() {
   local idx status before after pending_before pending_after
+  local out rc
   before="$(stage_value)"
   pending_before="$(normalize_uint_output "$(cast call "${CONTRACT_ADDRESS}" "pendingDisputeBuyerClosures()(uint256)" --rpc-url "${RPC_URL}")")"
   for idx in 0 1 2; do
@@ -783,7 +1054,13 @@ close_dispute_ready_buyers() {
     if [[ "${status}" != "1" ]]; then
       continue
     fi
-    run_bob "${idx}" close-dispute >/dev/null 2>&1 || true
+    set +e
+    out="$(run_bob "${idx}" close-dispute 2>&1)"
+    rc=$?
+    set -e
+    if [[ "${rc}" -eq 0 ]]; then
+      record_tx_from_output "dispute_closure" "closeDispute" "evaluator_B$((idx + 1))" "1" "${out}"
+    fi
   done
   after="$(stage_value)"
   pending_after="$(normalize_uint_output "$(cast call "${CONTRACT_ADDRESS}" "pendingDisputeBuyerClosures()(uint256)" --rpc-url "${RPC_URL}")")"
@@ -835,10 +1112,16 @@ reveal_labels_settle_finalize() {
   local alice_before alice_after winner_before winner_after
   local b1_before b2_before b3_before b1_after b2_after b3_after
   local anchor_match
+  local start_ms end_ms reveal_out
 
+  record_dynamic_artifacts_once "${out_dir}" "${m}"
   write_dummy_labels_file "${labels_file}"
   before_labels="$(stage_value)"
-  run_alice reveal-labels --labels-file "${labels_file}" --blob --path "${blob_file}" >/dev/null
+  start_ms="$(now_ms)"
+  reveal_out="$(run_alice reveal-labels --labels-file "${labels_file}" --blob --path "${blob_file}")"
+  end_ms="$(now_ms)"
+  record_runtime_ms "label_file_loading_and_blob_reveal_cli" "$((end_ms - start_ms))"
+  record_tx_from_output "label_reveal" "revealGarblerLabels" "garbler" "1" "${reveal_out}"
   after_labels="$(stage_value)"
   LAST_LABELS_BEFORE="${before_labels}"
   LAST_LABELS_AFTER="${after_labels}"
@@ -852,12 +1135,19 @@ reveal_labels_settle_finalize() {
   b1_before="$(participant_vault "${B1_ADDR}")"
   b2_before="$(participant_vault "${B2_ADDR}")"
   b3_before="$(participant_vault "${B3_ADDR}")"
+  start_ms="$(now_ms)"
   dry_run_out="$(run_bob 0 settle-auction --dry-run --bids "${bids_csv}" --chosen-namehash "${chosen_namehash}")"
+  end_ms="$(now_ms)"
+  record_runtime_ms "outputBytes_encoding_and_output_anchor_derivation" "$((end_ms - start_ms))"
   dry_run_output_bytes="$(extract_kv output_bytes "${dry_run_out}")"
   h_out_computed="$(compute_output_anchor "${circuit_id}" "${m}" "${dry_run_output_bytes}")"
   printf 'computed_outputBytes=%s\n' "${dry_run_output_bytes}"
   printf 'computed_hOut=%s\n' "${h_out_computed}"
+  start_ms="$(now_ms)"
   settle_out="$(run_bob 0 settle-auction --bids "${bids_csv}" --chosen-namehash "${chosen_namehash}")"
+  end_ms="$(now_ms)"
+  record_runtime_ms "settlement_payload_construction_and_submission_cli" "$((end_ms - start_ms))"
+  record_tx_from_output "settlement" "settle" "evaluator_B1" "1" "${settle_out}"
   after_settle="$(stage_value)"
   settle_tx="$(extract_kv settle_auction_tx_hash "${settle_out}")"
   output_bytes="$(extract_kv output_bytes "${settle_out}")"
@@ -927,6 +1217,7 @@ reveal_labels_settle_finalize() {
   before_finalize="$(stage_value)"
   assigned_before="$(cast call "${CONTRACT_ADDRESS}" "assigned()(bool)" --rpc-url "${RPC_URL}" | grep -Eo '(true|false)' | head -n1)"
   finalize_out="$(run_bob 0 finalize-assignment)"
+  record_tx_from_output "assignment" "finalizeAssignment" "evaluator_B1" "1" "${finalize_out}"
   after_finalize="$(stage_value)"
   LAST_FINALIZE_STAGE_BEFORE="${before_finalize}"
   LAST_FINALIZE_STAGE_AFTER="${after_finalize}"
@@ -1014,6 +1305,7 @@ assert_closed() {
 
 scenario_success() {
   local out_dir
+  start_eval_scenario "honest-success"
   out_dir="$(case_dir case1-success)"
   local bid_b1=70000000000000000
   local bid_b2=100000000000000000
@@ -1036,15 +1328,19 @@ scenario_success() {
   commit_reveal_all_seeds "case1"
   log_pretty_step "P2 Seeds" "OK" "commits=3, reveals=3, verifierSeed finalized" "${LAST_STAGE_BEFORE}" "${LAST_STAGE_AFTER}"
 
-  local before_core after_core
+  local before_core after_core start_ms end_ms core_out
   before_core="$(stage_value)"
-  run_alice submit-core-commitments \
+  start_ms="$(now_ms)"
+  core_out="$(run_alice submit-core-commitments \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
     --winner-formula "${WINNER_FORMULA}" \
     --bids "${bids_csv}" \
     --chosen-namehash "${chosen_namehash}" \
-    --export-dir "${out_dir}" >/dev/null
+    --export-dir "${out_dir}")"
+  end_ms="$(now_ms)"
+  record_runtime_ms "commitment_construction_gc_payload_and_core_submission_cli" "$((end_ms - start_ms))"
+  record_tx_from_output "commitment_publication" "submitCommitments" "garbler" "1" "${core_out}"
   after_core="$(stage_value)"
   set_last_stage_transition "${before_core}" "${after_core}"
   v_log "core_commitments_submitted [OK]"
@@ -1059,6 +1355,7 @@ scenario_success() {
 
   local m
   m="$(current_m)"
+  record_dynamic_artifacts_once "${out_dir}" "${m}"
   reveal_openings "${m}"
   close_dispute_ready_buyers
   log_pretty_step "P6 Open+Dispute" "OK" "m=${m}, dispute closed by ready buyers" "Open" "${LAST_STAGE_AFTER}" "Open -> Dispute -> Labels (via closeDispute)"
@@ -1099,6 +1396,7 @@ scenario_success() {
   echo "winner vault delta: $(format_signed_eth_wei_pair "${LAST_SETTLE_WINNER_DELTA_WEI}")"
   echo "Final: stage=$(stage_name "$(stage_value)"), assigned=${assigned_now}, unresolvedBuyers=${unresolved_now}"
   echo "STATUS: ✅ Goal satisfied | ✅ Stage=Closed | ✅ Assigned=true | ✅ No pending buyers"
+  record_scenario_summary "$(stage_name "$(stage_value)")" "true" "${assigned_now}" "false" "none" "baseline honest success; total gas excludes deployment transactions"
 
   if is_truthy "${VERBOSE}"; then
     print_balances "final_balances"
@@ -1109,6 +1407,7 @@ scenario_success() {
 
 scenario_bob_defaulted() {
   local out_dir
+  start_eval_scenario "evaluator-default"
   out_dir="$(case_dir case2-buyer-defaulted)"
   local bid_b1=80000000000000000
   local bid_b2=90000000000000000
@@ -1131,15 +1430,19 @@ scenario_bob_defaulted() {
   commit_reveal_all_seeds "case2"
   log_pretty_step "P2 Seeds" "OK" "commits=3, reveals=3, verifierSeed finalized" "${LAST_STAGE_BEFORE}" "${LAST_STAGE_AFTER}"
 
-  local before_core after_core
+  local before_core after_core start_ms end_ms core_out
   before_core="$(stage_value)"
-  run_alice submit-core-commitments \
+  start_ms="$(now_ms)"
+  core_out="$(run_alice submit-core-commitments \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
     --winner-formula "${WINNER_FORMULA}" \
     --bids "${bids_csv}" \
     --chosen-namehash "${chosen_namehash}" \
-    --export-dir "${out_dir}" >/dev/null
+    --export-dir "${out_dir}")"
+  end_ms="$(now_ms)"
+  record_runtime_ms "commitment_construction_gc_payload_and_core_submission_cli" "$((end_ms - start_ms))"
+  record_tx_from_output "commitment_publication" "submitCommitments" "garbler" "1" "${core_out}"
   after_core="$(stage_value)"
   set_last_stage_transition "${before_core}" "${after_core}"
   v_log "core_commitments_submitted [OK]"
@@ -1193,6 +1496,7 @@ scenario_bob_defaulted() {
   echo "winner vault delta: $(format_signed_eth_wei_pair "${LAST_SETTLE_WINNER_DELTA_WEI}")"
   echo "Final: stage=$(stage_name "$(stage_value)"), assigned=${assigned_now}, unresolvedBuyers=${unresolved_now}"
   echo "STATUS: ✅ Goal satisfied | ✅ Stage=Closed | ✅ Assigned=true | ✅ No pending buyers"
+  record_scenario_summary "$(stage_name "$(stage_value)")" "true" "${assigned_now}" "true" "evaluator_B3" "B3 defaulted in BuyerInputOT; total gas excludes deployment transactions"
 
   if is_truthy "${VERBOSE}"; then
     print_balances "final_balances"
@@ -1203,6 +1507,7 @@ scenario_bob_defaulted() {
 
 scenario_alice_cheats() {
   local out_dir
+  start_eval_scenario "garbler-cheat"
   out_dir="$(case_dir case3-alice-cheats)"
   local bid_b1=85000000000000000
   local bid_b2=95000000000000000
@@ -1225,9 +1530,12 @@ scenario_alice_cheats() {
   commit_reveal_all_seeds "case3"
   log_pretty_step "P2 Seeds" "OK" "commits=3, reveals=3, verifierSeed finalized" "${LAST_STAGE_BEFORE}" "${LAST_STAGE_AFTER}"
 
-  local before_export after_export
+  local before_export after_export start_ms end_ms export_out
   before_export="$(stage_value)"
-  run_alice export-artifacts --out-dir "${out_dir}" --bit-width "${BIT_WIDTH}" --circuit-id "${CIRCUIT_ID}" >/dev/null
+  start_ms="$(now_ms)"
+  export_out="$(run_alice export-artifacts --out-dir "${out_dir}" --bit-width "${BIT_WIDTH}" --circuit-id "${CIRCUIT_ID}")"
+  end_ms="$(now_ms)"
+  record_runtime_ms "commitment_construction_and_gc_payload_export" "$((end_ms - start_ms))"
   after_export="$(stage_value)"
   set_last_stage_transition "${before_export}" "${after_export}"
   log_action_stage "export_artifacts" "${before_export}" "${after_export}"
@@ -1235,6 +1543,7 @@ scenario_alice_cheats() {
 
   local m target_instance seed_file seed_hex leaves_file tampered_file prepare_out tampered_root root_gcs_csv
   m="$(current_m)"
+  record_dynamic_artifacts_once "${out_dir}" "${m}"
   if [[ "${m}" == "0" ]]; then
     target_instance=1
   else
@@ -1246,25 +1555,29 @@ scenario_alice_cheats() {
   tampered_file="${out_dir}/instance-${target_instance}-leaves-tampered.txt"
   tamper_first_leaf "${leaves_file}" "${tampered_file}"
 
+  start_ms="$(now_ms)"
   prepare_out="$(run_bob 0 prepare-dispute \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
     --instance-id "${target_instance}" \
     --seed "${seed_hex}" \
     --claimed-leaves-file "${tampered_file}")"
+  end_ms="$(now_ms)"
+  record_runtime_ms "gc_leaf_dispute_packet_generation" "$((end_ms - start_ms))"
   tampered_root="$(extract_kv root_gc "${prepare_out}")"
   root_gcs_csv="$(build_root_gcs_csv_with_override "${out_dir}" "${target_instance}" "${tampered_root}")"
 
-  local before_tampered_core after_tampered_core
+  local before_tampered_core after_tampered_core tampered_core_out
   before_tampered_core="$(stage_value)"
-  run_alice submit-core-commitments \
+  tampered_core_out="$(run_alice submit-core-commitments \
     --bit-width "${BIT_WIDTH}" \
     --circuit-id "${CIRCUIT_ID}" \
     --winner-formula "${WINNER_FORMULA}" \
     --bids "${bids_csv}" \
     --chosen-namehash "${chosen_namehash}" \
     --root-gcs "${root_gcs_csv}" \
-    --export-dir "${out_dir}" >/dev/null
+    --export-dir "${out_dir}")"
+  record_tx_from_output "commitment_publication" "submitCommitments" "garbler" "1" "${tampered_core_out}"
   after_tampered_core="$(stage_value)"
   v_log "tampered_core_commitments_submitted: instance=${target_instance} [OK]"
   set_last_stage_transition "${before_tampered_core}" "${after_tampered_core}"
@@ -1294,6 +1607,7 @@ scenario_alice_cheats() {
   dispute_leaf="$(extract_kv claimed_leaf "${prepare_out}")"
   dispute_ih="$(extract_kv ih_proof "${prepare_out}")"
   dispute_layout="$(extract_kv layout_proof "${prepare_out}")"
+  record_dispute_packet_artifact "${dispute_leaf}" "${dispute_ih}" "${dispute_layout}"
   dispute_leaf_hash="$(cast keccak "${dispute_leaf}" | tr -d '[:space:]')"
   ih_len="$(csv_len "${dispute_ih}")"
   layout_len="$(csv_len "${dispute_layout}")"
@@ -1312,6 +1626,7 @@ scenario_alice_cheats() {
     --leaf-bytes "${dispute_leaf}" \
     --ih-proof "${dispute_ih}" \
     --layout-proof "${dispute_layout}")"
+  record_tx_from_output "dispute" "disputeGarbledTable" "evaluator_B1" "1" "${dispute_out}"
   dispute_tx="$(extract_kv dispute_tx_hash "${dispute_out}")"
   LAST_DISPUTE_TX="${dispute_tx}"
   after_dispute="$(stage_value)"
@@ -1343,6 +1658,7 @@ scenario_alice_cheats() {
   echo "Settlement: skipped (contract closed by dispute)"
   echo "Reason: dispute resolved => contract Closed; settle rejected by stage"
   echo "Assignment: skipped (closed after dispute)"
+  record_scenario_summary "$(stage_name "$(stage_value)")" "false" "${assigned_now}" "true" "garbler" "tampered opened-instance rootGC disputed by GC leaf challenge; total gas excludes deployment transactions"
   echo "Chosen ENS: N/A (no settle output accepted due to dispute -> Closed)"
   echo "Assign: skipped (Closed after dispute), assigned=false ✅"
   echo "Money: per-buyer expected payout = returned deposit ($(format_wei_eth "${DEPOSIT_WEI}") ETH) + share ($(format_wei_eth "${equal_share}") ETH); wallet balances are post-gas"
@@ -1358,6 +1674,7 @@ scenario_alice_cheats() {
 main() {
   preflight
   mkdir -p "${WORK_ROOT}"
+  init_evaluation_results
   local scenario
   case "${1:-}" in
     --verbose)

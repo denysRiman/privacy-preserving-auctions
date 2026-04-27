@@ -82,20 +82,44 @@ pub fn cast_output_field(output: &str, key: &str) -> Option<String> {
     None
 }
 
-pub fn print_tx_summary(label: &str, output: &str) {
+pub fn tx_summary_lines(label: &str, output: &str) -> Vec<String> {
+    let mut emitted = false;
+    let mut lines = Vec::new();
     if let Some(tx_hash) = cast_output_field(output, "transactionHash") {
-        println!("{label}_tx_hash={tx_hash}");
-        return;
+        lines.push(format!("{label}_tx_hash={tx_hash}"));
+        emitted = true;
     }
     if let Some(status) = cast_output_field(output, "status") {
-        println!("{label}_status={status}");
-        return;
+        lines.push(format!("{label}_status={status}"));
+        emitted = true;
+    }
+    if let Some(gas_used) = cast_output_field(output, "gasUsed") {
+        lines.push(format!("{label}_gas_used={gas_used}"));
+        emitted = true;
+    }
+    if let Some(cumulative_gas_used) = cast_output_field(output, "cumulativeGasUsed") {
+        lines.push(format!("{label}_cumulative_gas_used={cumulative_gas_used}"));
+        emitted = true;
+    }
+    if let Some(effective_gas_price) = cast_output_field(output, "effectiveGasPrice") {
+        lines.push(format!("{label}_effective_gas_price={effective_gas_price}"));
+        emitted = true;
+    }
+    if emitted {
+        return lines;
     }
 
     if let Some(first_line) = output.lines().next() {
-        println!("{label}_tx={first_line}");
+        lines.push(format!("{label}_tx={first_line}"));
     } else {
-        println!("{label}_tx=submitted");
+        lines.push(format!("{label}_tx=submitted"));
+    }
+    lines
+}
+
+pub fn print_tx_summary(label: &str, output: &str) {
+    for line in tx_summary_lines(label, output) {
+        println!("{line}");
     }
 }
 
@@ -235,4 +259,40 @@ pub fn bytes32_vec_literal(values: &[[u8; 32]]) -> String {
     }
     let parts = values.iter().map(|v| hex32(*v)).collect::<Vec<_>>();
     format!("[{}]", parts.join(","))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tx_summary_lines_emit_all_receipt_fields_in_stable_order() {
+        let receipt = concat!(
+            "transactionHash 0xabc123\n",
+            "status 1\n",
+            "gasUsed 21000\n",
+            "cumulativeGasUsed 42000\n",
+            "effectiveGasPrice 1000000000\n",
+        );
+
+        assert_eq!(
+            tx_summary_lines("settle_auction", receipt),
+            vec![
+                "settle_auction_tx_hash=0xabc123",
+                "settle_auction_status=1",
+                "settle_auction_gas_used=21000",
+                "settle_auction_cumulative_gas_used=42000",
+                "settle_auction_effective_gas_price=1000000000",
+            ]
+        );
+    }
+
+    #[test]
+    fn tx_summary_lines_preserve_legacy_fallbacks() {
+        assert_eq!(
+            tx_summary_lines("commit", "0xdeadbeef\nignored"),
+            vec!["commit_tx=0xdeadbeef"]
+        );
+        assert_eq!(tx_summary_lines("commit", ""), vec!["commit_tx=submitted"]);
+    }
 }
