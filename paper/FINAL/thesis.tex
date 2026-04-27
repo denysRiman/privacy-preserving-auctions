@@ -365,6 +365,54 @@ Final payout execution must be unambiguous and consistent with the agreed settle
 \textbf{R6. Minimal information leakage in enforcement.}
 Dispute and settlement data published on-chain should be limited to what is necessary for enforceability.
 
+\subsection{Proof Sketches for R1--R3}
+Under Assumptions A1--A5, this thesis does not reproduce a full formal proof;
+instead, it uses standard GC/OT security properties and a BitPriv-style
+publicly verifiable covert-security structure as the proof basis
+for the implemented enforcement model~\cite{BitPriv2025,Bellare2012FoundationsGC,LindellPinkas2008,Zhu2019PV2PC}.
+Security failures requiring violation of Assumptions A1--A5 are outside the
+claim scope.
+
+\textbf{R1 (Input privacy).}
+Input privacy inherits from the GC/OT construction.
+The garbler observes commitments and OT-level transcript information, but does
+not learn evaluator input bits; the evaluator receives only input labels
+selected by its private OT choices and cannot recover garbler input beyond
+output-implied leakage.
+In the implemented workflow, additional visibility is restricted to mandatory
+on-chain disclosures required for enforcement.
+Therefore, under standard GC privacy and OT security assumptions (A1),
+evaluator and garbler inputs remain hidden except for prescribed output leakage
+and explicit enforcement disclosures.
+
+\textbf{R2 (Output correctness and binding).}
+GC correctness implies that honestly generated and evaluated circuits return
+$f(x,y)$.
+In this implementation, settlement is anchor-bound to the selected instance
+$m$: the contract accepts only \texttt{outputBytes} consistent with committed
+$\mathrm{hOut}_m$ and output-domain validity checks.
+If a party submits \texttt{outputBytes} inconsistent with the committed anchor,
+settlement is rejected; if opened-instance data are inconsistent, deterministic
+seed-based reconstruction (A2) and dispute predicates expose the inconsistency.
+Hence, under GC correctness, commitment binding, hash collision resistance, and
+correct EVM execution (A1, A5), accepted settlement corresponds to an
+anchor-bound protocol output.
+
+\textbf{R3 (Publicly verifiable accountability).}
+Accountability follows from deterministic reconstruction plus publicly
+checkable predicates for covered deviations.
+For opened instances, challengers provide seed-derived artifacts, gate-leaf
+evidence, and inclusion/transcript-root proofs; the contract recomputes the
+relevant predicate and assigns blame deterministically.
+If a dishonest deviation covered by the implemented predicates were not
+attributable, then either commitment/hash binding fails, deterministic
+reconstruction fails, or contract execution is incorrect---all excluded by
+Assumptions A1--A5.
+This yields selective public accountability for deviations covered by the
+implemented dispute hooks.
+These sketches justify that the implemented protocol inherits standard 2PC
+security properties while adapting enforcement to Ethereum constraints.
+
 \section{Economic-Security Requirements}
 Security claim (2PC core): deviations that can be evidenced via verifiable
 transcript checks should be economically dominated by honest execution.
