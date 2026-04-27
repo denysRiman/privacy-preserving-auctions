@@ -1067,58 +1067,129 @@ privacy-preserving protocol interface.
 
 \chapter{Discussion and Conclusion}
 \section{Discussion of the Main Findings}
-This thesis set out to design and validate an economically secure 2PC protocol for Ethereum with sealed-bid auctions as the application context.
-The implementation and evaluation show that this objective is feasible when protocol enforcement is expressed as a strict on-chain state machine and expensive cryptographic work remains off-chain.
+This thesis set out to design and validate an economically secure 2PC protocol
+for Ethereum, with sealed-bid auctions as the concrete application context.
+The implementation and evaluation demonstrate that this objective is feasible
+when enforcement is encoded as a strict on-chain state machine while the heavy
+private computation remains off-chain.
 
-Three findings are central.
-First, \textbf{output binding and settlement integrity} are enforceable through structured anchor checks (\texttt{hOut}) and deterministic decoding constraints.
-Second, \textbf{accountability under deviation} can be operationalized with
-scoped dispute predicates (GC-leaf and evaluator-scoped OT-root tracks) and
+Three implemented findings are central.
+First, \textbf{output binding and settlement integrity} are enforceable through
+anchor checks (\texttt{hOut}) and deterministic output decoding constraints.
+Second, \textbf{accountability under deviation} is achieved through scoped
+dispute predicates (GC-leaf and evaluator-scoped OT-root tracks) with
 deterministic slashing outcomes.
-Third, \textbf{liveness with strategic participants} can be preserved by deadline-driven default and penalty paths.
+Third, \textbf{liveness under strategic behavior} is preserved through
+deadline-driven default and penalty transitions.
 
-These findings align with the publicly verifiable financially secure 2PC direction in prior literature while making the enforcement model concrete for Ethereum execution constraints~\cite{Zhu2019PV2PC,BitPriv2025}.
+Taken together, these findings indicate that privacy-preserving computation can
+be embedded into practical Ethereum settlement workflows through commitments,
+deadlines, and selective challenge predicates, without requiring universal
+on-chain re-execution.
+
+The implementation process also exposed three design lessons:
+deployability constraints are first-order protocol parameters, cost-aware
+verification design is necessary for L1 feasibility, and protocol simplicity
+materially improves end-to-end implementability and auditability.
+
+These conclusions remain consistent with publicly verifiable financially secure
+2PC directions in prior work, while grounding them in a concrete
+deployment-oriented enforcement model for Ethereum~\cite{Zhu2019PV2PC,BitPriv2025}.
 
 \section{Protocol-Core vs Application Layer}
-A key design choice in this work is to keep the protocol core independent from business logic.
-Commitments, openings, disputes, and settlement anchors are protocol-layer mechanisms; the ENS auction is an application-layer instantiation over that backbone.
-In the current implementation, this instantiation is realized by first-price
-settlement and deterministic assignment of the selected ENS name hash to the
-winner receiver.
+A key architectural choice is the separation between a reusable protocol core
+and application-specific market logic.
+Commitment lifecycle, deadlines, dispute predicates, and settlement binding are
+protocol-core mechanisms; the ENS auction is one application-layer
+instantiation over that backbone, realized here by first-price settlement and
+deterministic assignment of the selected namehash.
 
-This separation matters for generality.
-It indicates that the same enforcement structure can support other private-input applications with different output semantics, provided they can be encoded into anchor-bound settlement bytes and deterministic payout rules.
+This separation increases architectural transferability while limiting
+application-specific assumptions inside the protocol-core security and
+enforcement model.
+The same core can be instantiated for sealed tenders, private matching,
+confidential allocation, or selective procurement, provided outcomes can be
+encoded into anchor-bound settlement bytes with deterministic execution rules.
+It also enables auction-mechanism upgrades at the application layer without
+redesigning the enforcement core.
 
 \section{Limitations}
-The presented contribution adopts explicit scope boundaries:
+The contribution is established within explicit technical boundaries:
 \begin{enumerate}
-\item \textbf{Constrained on-chain verification:} the architecture is enforceability-focused, with selective dispute predicates and settlement binding.
-\item \textbf{Evaluation environment:} reported runs use deterministic local-chain execution for reproducibility; comprehensive production fee-economics benchmarking is deferred to future evaluation.
-\item \textbf{Application simplification:} the ENS mapping uses a fixed offered-name shortlist and deterministic decoding interface, prioritizing protocol validation over full auction-market design coverage.
+\item \textbf{Incentive model scope:} the protocol enforces deposits, deadlines,
+and challenge costs, and demonstrates deterministic slash/default outcomes in
+representative adversarial flows; it does not provide a full formal equilibrium
+proof (e.g., Nash or subgame-perfect) over all strategic actor behaviors.
+\item \textbf{Deployment economics scope:} gas values are measured under
+deterministic local execution and support reproducible execution-cost
+comparison; they are not direct production fee predictions under dynamic
+base-fee, priority-fee, and blob-fee conditions.
+\item \textbf{Verification scope:} the enforcement model is based on
+bounded/selective dispute predicates and settlement-time binding checks, rather
+than universal on-chain re-execution of the complete private computation.
+\item \textbf{Multi-party scope:} multi-buyer auction behavior is implemented as
+application-layer composition of pairwise 2PC executions, not as a native
+\(n\)-party MPC protocol.
+\item \textbf{Benchmark scope:} the evaluation validates scenario correctness and
+moderate scaling trends in \(n\) and \(N\), but does not claim production
+throughput ceilings or adversarial network-stress limits.
+\item \textbf{Application-mechanism scope:} the ENS instantiation demonstrates
+architectural transferability, but does not establish welfare-optimality or
+incentive properties across broader private auction mechanisms.
 \end{enumerate}
 
-These boundaries define the claims established in this thesis and the next
-research steps.
+These boundaries sharpen what is demonstrated and measured in this thesis and
+define the precise extension surface for subsequent work.
 
 \section{Future Work}
-The next steps are clear and technically grounded:
+Near-term engineering work concerns deployment calibration and broader empirical
+validation:
 \begin{enumerate}
 \item \textbf{Production fee calibration and deployment-level benchmarking:} map measured execution gas to deployment fee assumptions (base fee, priority fee, blob fee) and evaluate cost robustness across realistic network conditions~\cite{Buterin2022EIP4844}.
-\item \textbf{Stronger economic analysis:} derive explicit collateral/deadline conditions for deviation deterrence under different attacker models and network conditions.
-\item \textbf{Protocol scaling and robustness:} extend systematic testing for larger evaluator sets (buyers in concrete applications) and richer adversarial combinations while preserving deterministic dispute closure.
-\item \textbf{Application expansion:} generalize from the current ENS PoC mapping toward richer auction policies while keeping protocol-core invariants unchanged.
-\item \textbf{Alternative architecture comparison:} evaluate trust and verification tradeoffs of cross-layer/coprocessor approaches as secondary baselines, while preserving the L1-enforcement-first contribution of this thesis~\cite{Haloani2024COTIv2}.
+\item \textbf{Robustness and stress validation:} extend scenario campaigns to
+larger evaluator sets and richer adversarial combinations, including
+adversarial timing and execution ordering conditions.
+\item \textbf{Tooling and automation:} strengthen reproducibility through tighter
+measurement pipelines, scenario orchestration, and regression automation for
+cost, dispute, and settlement invariants.
+\item \textbf{Broader empirical scaling:} expand \(n,N\)-sweep coverage while
+preserving deterministic harness semantics and comparable reporting criteria.
+\end{enumerate}
+
+Longer-term research directions concern formal strategic guarantees and protocol
+generalization:
+\begin{enumerate}
+\item \textbf{Formal strategic analysis:} derive explicit equilibrium-level
+conditions for collateral, deadlines, and challenge pricing under richer
+attacker models.
+\item \textbf{Native multi-party variants:} evaluate protocol families that
+directly realize \(n\)-party private computation while preserving public
+enforceability semantics.
+\item \textbf{Richer private market mechanisms:} generalize beyond the current
+first-price ENS mapping toward alternative allocation and pricing rules.
+\item \textbf{Stronger privacy/composability models:} refine compositional
+security arguments for combined off-chain computation, selective dispute
+exposure, and repeated-market operation.
+\item \textbf{Alternative settlement layers:} compare trust/performance tradeoffs
+of additional blockchain settlement environments and cross-layer architectures
+while preserving the enforcement-first contribution of this work~\cite{Haloani2024COTIv2}.
 \end{enumerate}
 
 \section{Conclusion}
-This thesis contributes an implementation-backed protocol design for economically secure private computation on Ethereum.
-The main result is not only conceptual: the Solidity/Rust prototype demonstrates that privacy-preserving off-chain computation, publicly verifiable on-chain enforcement, and deterministic settlement/assignment can be integrated into one coherent workflow.
+The central result of this thesis is that privacy-preserving market execution
+on Ethereum can be achieved through economically enforceable off-chain
+computation, without requiring full on-chain private computation.
 
-In short, the thesis demonstrates a credible L1-native path toward enforceable
-private market mechanisms on Ethereum, grounded in strict phase discipline,
-deployable verification, and explicit incentive-aligned fallback paths.
-This provides a concrete foundation for production-hardening and broader
-private-market applications.
+The implemented Solidity/Rust prototype demonstrates that commitments,
+deadlines, selective disputes, and deterministic settlement can be composed
+into a coherent L1 enforcement workflow under a concrete auction
+instantiation.
+This establishes a deployment-oriented design pattern for private market
+mechanisms on public blockchains.
+
+Overall, this work provides a credible L1-native path toward enforceable
+private market execution through disciplined protocol engineering and economic
+alignment.
 
 \appendix
 
