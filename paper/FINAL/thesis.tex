@@ -184,6 +184,7 @@ Chapter~7 discusses limitations, summarizes the main findings, and outlines futu
 \chapter{Background and Related Work}
 \section{Secure Two-Party Computation Basics}
 Secure two-party computation (2PC) addresses a basic but demanding question: how can two mutually distrustful parties evaluate a function over private inputs while revealing only the prescribed output? In this thesis, the technical baseline follows the garbled-circuit line of work: one party garbles the circuit, and the other evaluates it using input labels obtained via oblivious transfer (OT). Foundational properties, formal treatment, and malicious-security efficiency tradeoffs are established in the classical and modern literature~\cite{Bellare2012FoundationsGC,LindellPinkas2008}.
+Modern optimizations such as Half-Gates reduce garbled-circuit communication while preserving standard security guarantees, which is directly relevant for deployment-oriented 2PC engineering~\cite{Zahur2015HalfGates}.
 
 For blockchain applications, this model is attractive because the cryptographic heavy lifting can stay off-chain, while on-chain logic focuses on commitments, deadlines, and settlement enforcement. The split directly supports the practical objective of lowering gas costs without giving up privacy or accountability.
 
@@ -199,6 +200,7 @@ BitPriv develops this line further by combining off-chain 2PC with collateral-ba
 
 \section{Adversarial Execution on Public Blockchains}
 Ethereum is transparent by construction. Mempool visibility and transaction-ordering freedom create systematic room for adversarial behavior, commonly analyzed through MEV-related strategies~\cite{Daian2019FlashBoys}. Auction-like protocols are especially exposed, since even partial leaks can influence bidding behavior and final settlement outcomes.
+Recent empirical quantification shows that extractable-value opportunities remain broad in practice, reinforcing the need to model adversarial ordering explicitly~\cite{Qin2022MEV}.
 
 At the same time, Ethereum offers the enforcement substrate needed for commitment checks, dispute escalation, and deterministic settlement rules through publicly verifiable state and programmable contracts. The design problem is therefore twofold: hide sensitive inputs while retaining enforceable and cost-bounded execution under adversarial ordering~\cite{Wood2025Ethereum}.
 
@@ -272,6 +274,7 @@ Memorable or category-defining names may therefore accumulate resale value,
 which turns them into economically contested scarce assets.
 This scarcity makes market-based allocation mechanisms, including auctions,
 a natural design choice.
+Classical auction theory formally shows that equilibrium bidding and allocation outcomes depend on bidder-information structure, which further motivates privacy-aware execution in this setting~\cite{MilgromWeber1982}.
 
 In a transparent blockchain environment, fully public bidding leaks
 willingness-to-pay and strategy information, which can distort competition and
@@ -313,6 +316,7 @@ enforceability can coexist, but only under specific trust, complexity, and
 cost tradeoffs. This thesis concentrates on an L1-oriented Ethereum path with
 explicit economic incentives and dispute handling, and aims to minimize
 additional trust assumptions beyond the base chain.
+Recent survey work systematically maps cryptocurrency design trade-offs and shows that security analysis should be coupled with incentive and deployment constraints~\cite{Bonneau2015SoK}.
 
 \section{Deployment Considerations for Ethereum}
 A practical Ethereum protocol must account for both execution costs and data
@@ -574,6 +578,7 @@ deposits, slashing, and deadline rules in the contract layer. Beyond
 cryptographic correctness, the thesis therefore requires \emph{economic
 deterrence}: honest behavior should dominate profitable deviation in
 expectation~\cite{BitPriv2025,Zhu2019PV2PC}.
+This incentive-centric framing is aligned with mechanism-design analyses of Ethereum fee markets, where protocol rules directly shape strategic behavior and equilibrium outcomes~\cite{Roughgarden2021EIP1559}.
 For a deviation strategy $\delta$, define
 \[
 U_{\delta}=G_{\delta}-p_{\mathrm{det}}\cdot L_{\delta}-C_{\delta},
@@ -1276,6 +1281,7 @@ enforcement model, while deployment-calibrated economics remain future work.
 
 The comparison is positioning-oriented: it highlights trust/cost trade-offs and
 scope boundaries, not universal superiority claims.
+For timing-sensitive blockchain baselines such as commit-reveal, this perspective is consistent with consensus models that explicitly account for partial participation over time~\cite{PassShi2017Sleepy}.
 \clearpage
 
 \section{Threats to Validity}
