@@ -91,31 +91,31 @@ vollständige Gas-Kalibrierung unter Produktionsbedingungen und weitergehende
 \end{kurzfassung}
 
 \begin{abstract}
-This thesis studies how economically secure two-party computation (2PC) can be
-realized on Ethereum for private bidding protocols. The core challenge is a
-structural tension of public blockchains: transparency enables auditability but
-also exposes transaction data and ordering opportunities, which can undermine
-fairness and correctness in sealed-bid settings.
+In this thesis, we examine how economically secure two-party computation (2PC)
+can be realized on Ethereum for private bidding protocols. The motivating
+tension is structural: public-chain transparency supports auditability, yet the
+same visibility exposes transaction data and ordering opportunities that can
+distort fairness and correctness in sealed-bid execution.
 
-The research question is how to design a protocol that simultaneously provides
-(i) bid privacy before valid settlement, (ii) publicly enforceable execution,
-(iii) robustness against delay and abort behavior, and (iv) practical
-deployability under Ethereum constraints. The proposed approach combines
-off-chain garbled-circuit/OT execution with an on-chain enforcement state
-machine. The contract governs phase transitions, commitments, deadlines,
-dispute entry points, and deterministic settlement rules.
+Our central question is whether one protocol can preserve bid privacy until
+valid settlement, remain publicly enforceable, tolerate strategic delay or
+abort behavior, and still be practically deployable under Ethereum constraints.
+To address this, we combine off-chain garbled-circuit/OT execution with an
+on-chain enforcement state machine. The contract governs phase transitions,
+commitments, deadlines, dispute entry points, and deterministic settlement
+rules.
 
-The work delivers a Solidity+Rust proof of concept and evaluates it through
-end-to-end scenarios (honest run, evaluator-defaulted liveness path, and
-garbler-cheat dispute path). Results show that structured output-anchor binding
+Our implementation delivers a Solidity+Rust proof of concept, evaluated in
+end-to-end scenarios: an honest run, an evaluator-defaulted liveness path, and
+a garbler-cheat dispute path. We observe that structured output-anchor binding
 (\texttt{hOut}), selective publicly verifiable dispute predicates, and
-deadline-based default/slashing logic can be integrated into one coherent
-protocol flow. This demonstrates practical feasibility of economically secure
-2PC on Ethereum at the protocol-core layer. An ENS auction mapping is
-implemented as an application layer over the same enforcement backbone.
+deadline-based default/slashing logic can be integrated into a single coherent
+protocol flow. This supports the practical feasibility of economically secure
+2PC on Ethereum at the protocol-core layer. We further implement an ENS auction
+mapping as an application layer over the same enforcement backbone.
 
-The thesis also states clear boundaries: full production-grade gas calibration
-and deeper economic parameter optimization remain future work.
+We also state clear boundaries: full production-grade gas calibration and
+deeper economic parameter optimization remain future work.
 \end{abstract}
 
 \selectlanguage{english}
@@ -125,14 +125,14 @@ and deeper economic parameter optimization remain future work.
 
 \chapter{Introduction}
 \section{Context and Motivation}
-Public blockchains provide strong auditability, but this property comes with a direct tradeoff: transaction data and transaction ordering are visible before final settlement. On Ethereum, this transparency enables adversarial strategies such as reordering, insertion, and censorship, often discussed under maximal extractable value (MEV)~\cite{Wood2025Ethereum,Daian2019FlashBoys}. For protocols that involve private inputs, this visibility is not a side issue; it directly affects fairness and correctness of outcomes.
+Public blockchains provide strong auditability, but that property comes with a direct tradeoff: transaction data and transaction ordering are visible before final settlement. On Ethereum, this transparency enables adversarial strategies such as reordering, insertion, and censorship, often discussed under maximal extractable value (MEV)~\cite{Wood2025Ethereum,Daian2019FlashBoys}. For protocols with private inputs, this visibility is not a side issue; it directly affects fairness and correctness.
 
-This thesis studies that tension for a concrete and practically relevant setting: sealed-bid auctions. In this setting, bids should remain private during execution, while the final winner and settlement must be publicly enforceable. If private information leaks too early, strategic behavior can distort the outcome and reduce trust in the mechanism. If enforcement is weak, parties can deviate or abort at points where deviation is economically beneficial.
+Sealed-bid auctions make this tension concrete. Bids should remain private during execution, while the final winner and settlement must still be publicly enforceable. If private information leaks too early, strategic behavior can distort the outcome and reduce trust in the mechanism. If enforcement is weak, parties can deviate or abort at points where deviation is economically beneficial.
 
-Recent work by Alexopoulos et al. (BitPriv) demonstrates that privacy-preserving and economically enforceable computation can be achieved in a Bitcoin-native environment through off-chain two-party computation (2PC), collateral-backed incentives, and on-chain dispute resolution~\cite{BitPriv2025}. This thesis addresses the Ethereum setting directly and develops a protocol and prototype tailored to Ethereum execution constraints, with explicit state-machine enforcement, scoped disputes, and deterministic settlement rules.
+Recent work by Alexopoulos et al. (BitPriv) shows that privacy-preserving and economically enforceable computation can be achieved in a Bitcoin-native environment through off-chain two-party computation (2PC), collateral-backed incentives, and on-chain dispute resolution~\cite{BitPriv2025}. Building on that direction, this thesis addresses Ethereum directly and develops a protocol and prototype tailored to Ethereum execution constraints, with explicit state-machine enforcement, scoped disputes, and deterministic settlement rules.
 
 \section{Problem Statement}
-The central problem is to design a protocol for sealed-bid auctions on Ethereum that satisfies four properties simultaneously:
+The central challenge is to design a protocol for sealed-bid auctions on Ethereum that satisfies four properties simultaneously:
 \begin{enumerate}
 \item \textbf{Input privacy}: bids are not revealed before the protocol reaches a valid settlement point.
 \item \textbf{Public enforceability}: the on-chain contract can enforce the agreed output and financial transfers.
@@ -140,18 +140,19 @@ The central problem is to design a protocol for sealed-bid auctions on Ethereum 
 \item \textbf{Practical deployability}: on-chain overhead remains manageable and implementation complexity stays within realistic engineering bounds.
 \end{enumerate}
 
-In public-blockchain deployments these goals interact in non-trivial ways. Stronger cryptographic guarantees may increase operational cost, while cheaper constructions can weaken deterrence against rational deviations. The protocol therefore has to be reasoned about not only cryptographically, but also economically: the expected payoff of honest behavior should dominate profitable deviation under explicit assumptions~\cite{Zhu2019PV2PC}.
+In public-blockchain deployments, these goals interact in non-trivial ways. Stronger cryptographic guarantees may increase operational cost, while cheaper constructions can weaken deterrence against rational deviations. The design therefore has to be reasoned about not only cryptographically, but also economically: the expected payoff of honest behavior should dominate profitable deviation under explicit assumptions~\cite{Zhu2019PV2PC}.
 
-This thesis follows an \emph{optimistic, dispute-driven enforcement} model.
+Accordingly, this thesis follows an \emph{optimistic, dispute-driven enforcement} model.
 On-chain logic enforces deadlines, deposits, slashing, settlement-anchor checks,
-and selective dispute predicates. Off-chain logic performs the full GC/OT
-evaluation and derives \texttt{outputBytes}. Therefore, on-chain logic enforces
-binding, deadlines, and accountable state transitions, while computational
-integrity is established through deterministic off-chain execution and dispute
-evidence.
+and selective dispute predicates, where dispute handling includes bounded,
+selective on-chain GC/OT checks via partial recomputation/verification of
+challenged steps. Off-chain logic performs the full GC/OT evaluation and
+derives \texttt{outputBytes}. In this split, on-chain logic enforces binding,
+deadlines, and accountable state transitions, while computational integrity is
+established through deterministic off-chain execution and dispute evidence.
 
 \section{Research Objectives}
-Based on the approved thesis proposal, the objective of this work is to design and prototype an economically secure 2PC protocol for Ethereum-based sealed-bid auctions, with first-price auctions as the baseline use case.
+Following the approved thesis proposal, the objective is to design and prototype an economically secure 2PC protocol for Ethereum-based sealed-bid auctions, with first-price auctions as the baseline use case.
 
 Concretely, the thesis targets:
 \begin{enumerate}
@@ -163,7 +164,7 @@ Concretely, the thesis targets:
 \end{enumerate}
 
 \section{Contributions of This Thesis}
-The expected contributions of this thesis are the following:
+The expected contributions are the following:
 \begin{enumerate}
 \item \textbf{Ethereum-oriented protocol design:} a protocol that preserves bid privacy while keeping settlement publicly enforceable in a hostile execution environment.
 \item \textbf{Economic-security framing:} a practical incentive model for rational participants, including explicit assumptions and deterrence conditions.
@@ -173,7 +174,7 @@ The expected contributions of this thesis are the following:
 \end{enumerate}
 
 \section{Thesis Structure}
-The remainder of this thesis is organized as follows.
+The remainder of the thesis is organized as follows.
 Chapter~2 reviews foundations and related work on 2PC, garbled circuits, publicly verifiable enforcement, and MEV-relevant blockchain settings. Chapter~3 defines the model, assumptions, adversaries, and formalized requirements.
 Chapter~4 presents the protocol design and phase-by-phase logic.
 Chapter~5 describes the implementation architecture and engineering choices.
@@ -182,24 +183,24 @@ Chapter~7 discusses limitations, summarizes the main findings, and outlines futu
 
 \chapter{Background and Related Work}
 \section{Secure Two-Party Computation Basics}
-Secure two-party computation (2PC) studies how two mutually distrustful parties can jointly compute a function over private inputs while revealing only the prescribed output. In this thesis, the technical baseline follows the garbled-circuit line of work, where one party garbles a circuit and the other evaluates it using input labels obtained via oblivious transfer (OT). Foundational properties, formal treatment, and malicious-security efficiency tradeoffs are documented in the classical and modern literature~\cite{Bellare2012FoundationsGC,LindellPinkas2008}.
+Secure two-party computation (2PC) addresses a basic but demanding question: how can two mutually distrustful parties evaluate a function over private inputs while revealing only the prescribed output? In this thesis, the technical baseline follows the garbled-circuit line of work: one party garbles the circuit, and the other evaluates it using input labels obtained via oblivious transfer (OT). Foundational properties, formal treatment, and malicious-security efficiency tradeoffs are established in the classical and modern literature~\cite{Bellare2012FoundationsGC,LindellPinkas2008}.
 
-For blockchain applications, 2PC is attractive because most heavy cryptographic computation can remain off-chain, while on-chain logic is used primarily for commitments, deadlines, and settlement enforcement. This architecture matches the need to reduce gas cost while still preserving privacy and accountability.
+For blockchain applications, this model is attractive because the cryptographic heavy lifting can stay off-chain, while on-chain logic focuses on commitments, deadlines, and settlement enforcement. The split directly supports the practical objective of lowering gas costs without giving up privacy or accountability.
 
 \section{From Semi-Honest to Malicious Security}
-In a semi-honest model, parties follow the protocol but try to learn extra information from transcripts. This assumption is often insufficient for financial applications, where strategic deviation is economically motivated. Upgrading to malicious security introduces additional mechanisms, for example cut-and-choose checks for garbling correctness, commitment consistency checks, and explicit abort handling~\cite{LindellPinkas2008}.
+Under the semi-honest model, parties follow the protocol but still attempt to extract extra information from observed transcripts. For financial workflows, that assumption is typically too weak, since strategic deviation is economically incentivized. Moving to malicious security adds explicit defenses such as cut-and-choose checks for garbling correctness, commitment-consistency checks, and controlled abort handling~\cite{LindellPinkas2008}.
 
-The key engineering tension is that stronger malicious-security guarantees usually increase communication and verification overhead. In public-blockchain settings, this overhead directly translates into on-chain cost and operational complexity. Therefore, protocol design must balance cryptographic rigor with deployability constraints.
+The engineering tradeoff is straightforward: stronger malicious-security guarantees usually increase both communication and verification overhead. In public-blockchain deployments, those costs map directly to on-chain expense and operational burden, so protocol design must continuously balance cryptographic rigor against deployability.
 
 \section{Public Verifiability and Economic Enforcement}
-Publicly verifiable 2PC aims to make protocol violations externally checkable, so that a third party or smart contract can arbitrate disputes without re-executing the full protocol off-chain. Zhu et al. present an influential direction where dispute resolution is integrated with blockchain-based enforcement for financially secure computation settings~\cite{Zhu2019PV2PC}.
+Publicly verifiable 2PC seeks to make violations externally checkable, so a third party or smart contract can arbitrate disputes without replaying the entire off-chain protocol. Zhu et al.\ provide an influential direction, integrating dispute resolution with blockchain-based enforcement in financially secure computation settings~\cite{Zhu2019PV2PC}.
 
-BitPriv extends this line by combining off-chain 2PC with collateral-backed on-chain punishment and publicly verifiable dispute flow in a Bitcoin-compatible framework~\cite{BitPriv2025}. In this thesis, the \emph{economic-security} viewpoint is formalized for the Ethereum setting: participants are assumed rational and may deviate if profitable, so protocol parameters (deposits, slashing rules, deadlines) must make honest execution the dominant economic strategy.
+BitPriv develops this line further by combining off-chain 2PC with collateral-backed on-chain punishment and a publicly verifiable dispute process in a Bitcoin-compatible framework~\cite{BitPriv2025}. This thesis formalizes that \emph{economic-security} perspective for Ethereum: participants are modeled as rational agents who may deviate when profitable, so deposits, slashing rules, and deadlines must be calibrated such that honest execution is the dominant economic strategy.
 
 \section{Adversarial Execution on Public Blockchains}
-Ethereum's execution environment is transparent by design. Mempool visibility and transaction ordering freedom create room for adversarial behavior, commonly framed as MEV-related strategies~\cite{Daian2019FlashBoys}. This environment is particularly problematic for auction-like protocols, where partial information leaks can influence bidding behavior and settlement outcomes.
+Ethereum is transparent by construction. Mempool visibility and transaction-ordering freedom create systematic room for adversarial behavior, commonly analyzed through MEV-related strategies~\cite{Daian2019FlashBoys}. Auction-like protocols are especially exposed, since even partial leaks can influence bidding behavior and final settlement outcomes.
 
-Ethereum's public verifiability and programmable contracts provide the enforcement substrate needed for commitment checks, dispute escalation, and deterministic settlement rules. The challenge is therefore not only to hide sensitive inputs, but to do so while preserving enforceable and cost-limited execution under adversarial ordering~\cite{Wood2025Ethereum}.
+At the same time, Ethereum offers the enforcement substrate needed for commitment checks, dispute escalation, and deterministic settlement rules through publicly verifiable state and programmable contracts. The design problem is therefore twofold: hide sensitive inputs while retaining enforceable and cost-bounded execution under adversarial ordering~\cite{Wood2025Ethereum}.
 
 \section{Ethereum and the EVM}
 \subsection{Ethereum as Settlement Layer}
@@ -214,21 +215,18 @@ applications.
 Ethereum is relevant because it meets these conditions in a mature deployment
 environment.
 
-First, ecosystem maturity matters.
-Protocol execution is not isolated from surrounding infrastructure: account
-abstractions, wallets, token standards, indexing tools, and operational
-monitoring all affect real deployability.
-Second, composability matters.
-Smart contracts can interact with existing assets and application modules
-through shared state and deterministic calls, allowing enforcement logic to be
-integrated with broader market workflows rather than implemented in a closed
-system.
-Third, economic security matters.
-Settlement semantics depend on economically secured consensus and transaction
-inclusion, not only on local protocol logic.
-Fourth, public accountability matters.
-Transparent contract state and execution traces make commitment checks, timeout
-transitions, dispute outcomes, and payouts externally auditable.
+Beyond those baseline conditions, four deployment properties dominate protocol
+design. Ecosystem maturity matters because protocol execution depends on
+surrounding infrastructure: account abstractions, wallets, token standards,
+indexing tools, and operational monitoring all shape practical deployability.
+Composability matters because smart contracts can interact with existing assets
+and application modules through shared state and deterministic calls, so
+enforcement logic can plug into broader market workflows rather than a closed
+system. Economic security matters because settlement semantics rely on
+economically secured consensus and transaction inclusion, not only local
+contract logic. Public accountability matters because transparent contract
+state and execution traces make commitment checks, timeout transitions, dispute
+outcomes, and payouts externally auditable.
 
 These properties are precisely the features needed by an economically secure
 private protocol: private computation off-chain, but objectively auditable
@@ -246,13 +244,12 @@ This makes the EVM a strong substrate for escrow, collateral locking, hash
 checks, deadline enforcement, and settlement transitions.
 
 At the same time, EVM execution is explicitly resource-priced through gas.
-Storage writes are expensive relative to transient computation, and
-data-heavy or loop-heavy verification scales poorly in gas cost.
-Large cryptographic artifacts and full transcript re-execution are therefore
-impractical as default on-chain behavior.
-In addition, the EVM has no private memory model for contract logic:
-calldata, storage, and state transitions are publicly visible, which rules out
-confidential in-contract evaluation as a baseline design.
+Storage writes are expensive relative to transient computation, and both
+data-heavy and loop-heavy verification paths scale poorly in cost. As a
+result, large cryptographic artifacts and full transcript re-execution are not
+practical default on-chain behavior. The EVM also provides no private memory
+model for contract logic: calldata, storage, and state transitions are public,
+which rules out confidential in-contract evaluation as a baseline design.
 
 These constraints motivate the core architectural decision adopted in this
 thesis:
@@ -302,14 +299,34 @@ on Ethereum and a concrete application context for the protocol developed in
 the following chapters.
 
 \section{Privacy-Preserving Auctions on Blockchains}
-Private auction design on public ledgers has been explored from multiple angles. FAST targets fair auctions using secret transaction techniques~\cite{David2021FAST}. In parallel, systems research explores general private computation layers for blockchain applications. gcVM proposes publicly auditable MPC-compatible execution ideas for EVM-like environments~\cite{Yanai2026gcVM}, while COTI V2 explores a confidentiality-oriented layer-2 approach with additional system assumptions~\cite{Haloani2024COTIv2}.
+Private auction design on public ledgers has been explored from several
+directions. FAST targets fair auctions using secret transaction
+techniques~\cite{David2021FAST}. In parallel, systems work studies broader
+private-computation layers for blockchain applications: gcVM proposes publicly
+auditable MPC-compatible execution ideas for EVM-like
+environments~\cite{Yanai2026gcVM}, while COTI V2 explores a
+confidentiality-oriented layer-2 approach with additional system
+assumptions~\cite{Haloani2024COTIv2}.
 
-These approaches collectively show that confidentiality and public enforceability can be combined, but with different trust, complexity, and cost profiles. This thesis focuses on an L1-oriented Ethereum path with explicit economic incentives and dispute handling, aiming to minimize additional trust assumptions beyond the base chain.
+Taken together, these lines of work show that confidentiality and public
+enforceability can coexist, but only under specific trust, complexity, and
+cost tradeoffs. This thesis concentrates on an L1-oriented Ethereum path with
+explicit economic incentives and dispute handling, and aims to minimize
+additional trust assumptions beyond the base chain.
 
 \section{Deployment Considerations for Ethereum}
-A practical protocol for Ethereum must account for execution costs and data availability paths. If large off-chain artifacts (for example, evaluation payloads derived from garbled-circuit flow) are referenced by on-chain commitments, the protocol must specify how these artifacts are made available and bound to settlement logic. EIP-4844 introduces blob transactions as a relevant mechanism for high-volume data publication with different cost characteristics than calldata~\cite{Buterin2022EIP4844}.
+A practical Ethereum protocol must account for both execution costs and data
+availability pathways. When large off-chain artifacts (for example, evaluation
+payloads derived from garbled-circuit flow) are referenced by on-chain
+commitments, the protocol has to define how those artifacts are published and
+how publication is cryptographically bound to settlement logic. EIP-4844 is
+therefore directly relevant: blob transactions provide a high-volume data
+publication path with cost characteristics distinct from
+calldata~\cite{Buterin2022EIP4844}.
 
-Protocol design choices in this thesis are evaluated not only for security semantics, but also for concrete deployment feasibility under Ethereum's transaction and fee model.
+Accordingly, design choices in this thesis are evaluated not only at the level
+of security semantics, but also for concrete deployment feasibility under
+Ethereum's transaction and fee model.
 
 \section{Positioning of This Thesis}
 Relative to prior work, this thesis is positioned at the intersection of:
@@ -320,12 +337,15 @@ Relative to prior work, this thesis is positioned at the intersection of:
 \item and private auction protocol design for practical deployment~\cite{David2021FAST,Yanai2026gcVM,Haloani2024COTIv2,Buterin2022EIP4844}.
 \end{enumerate}
 
-The main difference from existing systems is the target setting: economically secure 2PC for sealed-bid auctions on Ethereum, with an explicit implementation and evaluation path that aligns protocol assumptions with engineering reality.
+The main distinction from existing systems is the target setting:
+economically secure 2PC for sealed-bid auctions on Ethereum, paired with an
+explicit implementation and evaluation path that keeps protocol assumptions
+aligned with engineering reality.
 
 \chapter{Model and Requirements}
 \section{System Model and Roles}
-This chapter uses an explicit layer vocabulary to avoid mixing protocol and
-application semantics:
+To keep protocol and application semantics clearly separated, this chapter uses
+an explicit layer vocabulary:
 \begin{enumerate}
 \item \textbf{Protocol (2PC core):} pairwise GC/OT execution between one
 garbler $G$ (private input $x$) and one evaluator $E$ (private input $y$), with
@@ -339,31 +359,31 @@ winner decoding, settlement formatting, and ENS assignment that consume already
 bound outputs.
 \end{enumerate}
 
-Terminology used in this chapter is fixed as follows:
-``2PC protocol'' means one GC/OT execution between a garbler and one evaluator,
+Throughout this chapter, terminology is fixed as follows:
+``2PC protocol'' denotes one GC/OT execution between a garbler and one evaluator,
 while ``$n$-buyer auction'' means application-layer composition of multiple such
 runs (one per evaluator/buyer) plus deterministic aggregation.
 
-At protocol-core level, the target computation is deterministic:
+At the protocol-core level, the target computation is deterministic:
 \[
 z=f(x,y).
 \]
-In the auction instantiation, multiple pairwise runs are orchestrated and their
-outputs are aggregated by application logic. The auction logic is not part of
-the 2PC protocol; it is an application that consumes the protocol's bound
-output.
+In the auction instantiation, multiple pairwise runs are orchestrated, and
+their outputs are aggregated by application logic. That auction logic is not
+part of the 2PC protocol; it is an application-layer consumer of the protocol's
+bound output.
 
-Protocol-level privacy is defined per pairwise run: the garbler should not learn
-the evaluator's private input beyond what is implied by the agreed output. In
-the instantiated multi-buyer workflow, buyers should not learn other buyers'
-bids beyond output-implied information. These claims assume correct off-chain
-channel and artifact handling; operational leak vectors such as debug logs,
-local storage exposure, or external telemetry are outside the cryptographic
-guarantee boundary.
+Protocol-level privacy is defined per pairwise run: the garbler should not
+learn the evaluator's private input beyond what is implied by the agreed
+output. In the instantiated multi-buyer workflow, buyers should likewise not
+learn other buyers' bids beyond output-implied information. These claims assume
+correct off-chain channel and artifact handling; operational leak vectors such
+as debug logs, local storage exposure, or external telemetry remain outside the
+cryptographic guarantee boundary.
 
 \section{Contract-Orchestration State Model}
 The following phases describe contract orchestration for the chosen
-instantiation. They are enforcement/liveness stages, not cryptographic 2PC
+instantiation. They are enforcement and liveness stages, not cryptographic 2PC
 primitives:
 \begin{enumerate}
 \item deposits,
@@ -381,19 +401,27 @@ objects such as seed commitments (`comSeed`), garbled-artifact roots
 (`rootGC`), evaluation blob hashes (`blobHashGC`), evaluator-scoped OT roots
 (`buyerRootOTCommitment`), and output anchors (`hOut`). The selected evaluation
 instance is derived from finalized verifier-seed material, and output validity
-is modeled as hash binding against the committed anchor for that instance.
+is modeled as hash binding to the committed anchor for that instance.
 
-The design objective is to keep high-volume cryptographic artifacts off-chain in normal execution, while preserving a scoped and externally verifiable dispute path. This is aligned with practical Ethereum deployment constraints and data-publication tradeoffs (including blob-based publication options)~\cite{Buterin2022EIP4844}.
+The design objective is to keep high-volume cryptographic artifacts off-chain
+during normal execution while preserving a scoped, externally verifiable
+dispute path. This aligns with practical Ethereum deployment constraints and
+data-publication tradeoffs (including blob-based publication
+options)~\cite{Buterin2022EIP4844}.
 
 \section{Adversary and Deviation Model}
-We use an adversarial model that combines:
+The adversarial model combines:
 \begin{enumerate}
 \item \textbf{malicious protocol behavior} at the party level (invalid commitments, inconsistent openings, selective abort),
 \item \textbf{rational economic behavior} (deviation is attempted when expected utility is positive),
 \item and \textbf{adversarial transaction environment} on public Ethereum (observable mempool, reorderability, latency asymmetry)~\cite{Daian2019FlashBoys}.
 \end{enumerate}
 
-The adversary can delay, reorder, or strategically time its own transactions, but cannot break standard cryptographic assumptions. The contract and chain consensus are assumed to follow Ethereum's underlying security model. In this thesis, denial-of-service at the base-consensus layer and chain-level catastrophic failures are out of scope.
+The adversary can delay, reorder, or strategically time its own transactions,
+but it cannot break standard cryptographic assumptions. The contract and chain
+consensus are assumed to follow Ethereum's underlying security model. In this
+thesis, base-consensus denial-of-service and chain-level catastrophic failures
+are out of scope.
 
 Representative deviations considered in the model include:
 \begin{enumerate}
@@ -406,24 +434,34 @@ Representative deviations considered in the model include:
 
 \section{Assumptions}
 \textbf{A1. Cryptographic assumptions.}
-Hash functions used for commitments and anchors are collision-resistant, and the underlying garbled-circuit/OT constructions provide their expected security properties under standard assumptions~\cite{Bellare2012FoundationsGC,LindellPinkas2008}.
+Hash functions used for commitments and anchors are collision-resistant, and
+the underlying garbled-circuit/OT constructions provide their expected security
+properties under standard
+assumptions~\cite{Bellare2012FoundationsGC,LindellPinkas2008}.
 
 \textbf{A2. Deterministic reconstruction interface.}
-Given agreed seeds and domain-separation inputs, honest verifiers reconstruct the same per-instance artifacts and transcript commitments. This assumption is required so disputes are objective and reproducible.
+Given agreed seeds and domain-separation inputs, honest verifiers reconstruct
+the same per-instance artifacts and transcript commitments. This assumption is
+required so that disputes are objective and reproducible.
 
 \textbf{A3. Contract-enforceable timing.}
-Deadlines are represented in contract state and interpreted under Ethereum block progression (deposit, verifier-seed, commitment, evaluator-input, open, dispute, labels, settle windows). A party that misses a required action before its deadline is treated as non-cooperative and penalized by protocol rules.
+Deadlines are represented in contract state and interpreted under Ethereum block
+progression (deposit, verifier-seed, commitment, evaluator-input, open,
+dispute, labels, settle windows). A party that misses a required action before
+its deadline is treated as non-cooperative and penalized by protocol rules.
 
 \textbf{A4. Data availability during dispute windows.}
-Data needed for a valid challenge is available to challengers in time, either by direct exchange or by a publication path bound to on-chain references (for example, blob-hash anchored payloads)~\cite{Buterin2022EIP4844}.
+Data needed for a valid challenge is available to challengers in time, either
+by direct exchange or by a publication path bound to on-chain references (for
+example, blob-hash anchored payloads)~\cite{Buterin2022EIP4844}.
 For blob-linked publication paths, this availability assumption is scoped to the
 dispute window. Blob references are treated as retrieval anchors for challenge
 resolution (implementation reference: Appendix~\ref{app:a4}).
 
 \textbf{A5. Constrained on-chain verification.}
 On-chain verification is intentionally constrained to selective checks (for
-example, leaf-level consistency checks), aligning verification cost with Ethereum deployment
-constraints.
+example, leaf-level consistency checks), aligning verification cost with
+Ethereum deployment constraints.
 
 \textbf{A6. Instantiation assumption: ENS adapter correctness and authority.}
 For the ENS application mapping, the adapter called by the contract is assumed
@@ -438,10 +476,17 @@ Under the above model, requirements are separated into:
 \textbf{engineering requirements for enforcement/instantiation} (R4--R6).
 
 \textbf{R1. Input privacy.}
-No party learns the counterparty's private input beyond what is implied by the prescribed output and mandatory on-chain disclosures.
+No party learns the counterparty's private input beyond what is implied by the
+prescribed output and mandatory on-chain disclosures. This requirement follows
+the BitPriv covert-2PC privacy objective and standard GC/OT security
+assumptions~\cite{BitPriv2025,Bellare2012FoundationsGC,LindellPinkas2008}.
 
 \textbf{R2. Output correctness and binding.}
-An accepted settlement must correspond to a valid protocol-consistent output. Invalid output labels or inconsistent evidence must be rejectable by the contract.
+An accepted settlement must correspond to a valid protocol-consistent output.
+Invalid output labels or inconsistent evidence must be rejectable by the
+contract. This requirement is aligned with BitPriv's enforceable-correctness
+framing and grounded in standard GC/OT correctness and binding
+assumptions~\cite{BitPriv2025,Bellare2012FoundationsGC,LindellPinkas2008}.
 In this implementation, settlement-time checks establish anchor binding and
 tuple validity, while deterministic off-chain evaluation and dispute evidence
 provide computational integrity. This deployable-verification model is
@@ -451,27 +496,34 @@ Implementation excerpts for this requirement are collected in
 Appendix~\ref{app:a2} and Appendix~\ref{app:d1}.
 
 \textbf{R3. Publicly verifiable accountability.}
-When a party deviates in a way covered by dispute predicates, a challenger can provide evidence that is verifiable by the contract (directly or through selective verification hooks), leading to deterministic blame assignment~\cite{Zhu2019PV2PC}.
+When a party deviates in a way covered by dispute predicates, a challenger can
+provide evidence that is verifiable by the contract (directly or through
+selective verification hooks), leading to deterministic blame assignment in the
+BitPriv-style accountability model~\cite{BitPriv2025,Zhu2019PV2PC}.
 Implementation excerpts for dispute and slashing are collected in
 Appendix~\ref{app:a3}, Appendix~\ref{app:b3}, and
 Appendix~\ref{app:c1}--\ref{app:c2}.
 
 \textbf{R4. Liveness with penalties.}
-A single uncooperative party should not be able to block progress indefinitely. If progress is blocked, timeout paths must release funds and/or apply penalties according to predefined rules.
+A single uncooperative party should not be able to block progress indefinitely.
+If progress is blocked, timeout paths must release funds and/or apply penalties
+according to predefined rules.
 
 \textbf{R5. Application-level settlement integrity.}
 Final payout execution must be unambiguous and consistent with the agreed settlement function $g(z)$.
 
 \textbf{R6. Minimal information leakage in enforcement.}
-Dispute and settlement data published on-chain should be limited to what is necessary for enforceability.
+Dispute and settlement data published on-chain should be limited to what is
+necessary for enforceability.
 
 \subsection{Proof Sketches for R1--R3}
-Under Assumptions A1--A5, this thesis does not reproduce a full formal proof;
-instead, it uses standard GC/OT security properties and a BitPriv-style
-publicly verifiable covert-security structure as the proof basis
-for the implemented enforcement model~\cite{BitPriv2025,Bellare2012FoundationsGC,LindellPinkas2008,Zhu2019PV2PC}.
-Security failures requiring violation of Assumptions A1--A5 are outside the
-claim scope.
+Under Assumptions A1--A5, this thesis does not reproduce a full formal proof.
+Instead, it adopts standard GC/OT security properties together with a
+BitPriv-style publicly verifiable covert-security structure as the proof basis
+for the implemented enforcement
+model~\cite{BitPriv2025,Bellare2012FoundationsGC,LindellPinkas2008,Zhu2019PV2PC}.
+Failures that would require violating Assumptions A1--A5 are outside the claim
+scope.
 
 \textbf{R1 (Input privacy).}
 Input privacy inherits from the GC/OT construction.
@@ -479,8 +531,8 @@ The garbler observes commitments and OT-level transcript information, but does
 not learn evaluator input bits; the evaluator receives only input labels
 selected by its private OT choices and cannot recover garbler input beyond
 output-implied leakage.
-In the implemented workflow, additional visibility is restricted to mandatory
-on-chain disclosures required for enforcement.
+In the implemented workflow, any additional visibility is limited to mandatory
+on-chain disclosures needed for enforcement.
 Therefore, under standard GC privacy and OT security assumptions (A1),
 evaluator and garbler inputs remain hidden except for prescribed output leakage
 and explicit enforcement disclosures.
@@ -488,7 +540,7 @@ and explicit enforcement disclosures.
 \textbf{R2 (Output correctness and binding).}
 GC correctness implies that honestly generated and evaluated circuits return
 $f(x,y)$.
-In this implementation, settlement is anchor-bound to the selected instance
+In the implementation, settlement is anchor-bound to the selected instance
 $m$: the contract accepts only \texttt{outputBytes} consistent with committed
 $\mathrm{hOut}_m$ and output-domain validity checks.
 If a party submits \texttt{outputBytes} inconsistent with the committed anchor,
@@ -510,26 +562,32 @@ reconstruction fails, or contract execution is incorrect---all excluded by
 Assumptions A1--A5.
 This yields selective public accountability for deviations covered by the
 implemented dispute hooks.
-These sketches justify that the implemented protocol inherits standard 2PC
-security properties while adapting enforcement to Ethereum constraints.
+Taken together, these sketches justify that the implemented protocol inherits
+standard 2PC security properties while adapting enforcement to Ethereum
+constraints.
 
 \section{Economic-Security Requirements}
-Security claim (2PC core): deviations that can be evidenced via verifiable
+Security claim (2PC core): deviations that can be evidenced through verifiable
 transcript checks should be economically dominated by honest execution.
-Engineering choice (instantiation): enforce this through deposits, slashing,
-and deadline rules in the contract layer. Beyond cryptographic correctness, this
-thesis therefore requires \emph{economic deterrence}: honest behavior should
-dominate profitable deviation in expectation~\cite{BitPriv2025,Zhu2019PV2PC}.
+Engineering choice (instantiation): this dominance is enforced through
+deposits, slashing, and deadline rules in the contract layer. Beyond
+cryptographic correctness, the thesis therefore requires \emph{economic
+deterrence}: honest behavior should dominate profitable deviation in
+expectation~\cite{BitPriv2025,Zhu2019PV2PC}.
 For a deviation strategy $\delta$, define
 \[
 U_{\delta}=G_{\delta}-p_{\mathrm{det}}\cdot L_{\delta}-C_{\delta},
 \]
-where $G_{\delta}$ is the potential gain from deviation, $p_{\mathrm{det}}$ is the probability of successful detection/challenge, $L_{\delta}$ is the financial loss under penalties/slashing if detected, and $C_{\delta}$ is the operational cost of executing the deviation.
+where $G_{\delta}$ is the potential gain from deviation,
+$p_{\mathrm{det}}$ is the probability of successful detection/challenge,
+$L_{\delta}$ is the financial loss under penalties/slashing if detected, and
+$C_{\delta}$ is the operational cost of executing the deviation.
 For garbler-side cheating analysis, $p_{\mathrm{det},G}$ denotes detection
 probability induced by dispute predicates and enforcement checks (for example,
 GC-leaf/OT-root disputes and timeout-triggered accountability).
 
-The requirement is to parameterize deposits, slashing splits, and deadlines so that, for relevant deviation classes,
+The requirement is to parameterize deposits, slashing splits, and deadlines so
+that, for relevant deviation classes,
 \[
 U_{\delta}\leq U_{\mathrm{honest}},
 \]
@@ -557,12 +615,13 @@ $C_{\mathrm{disp},j}$ is evaluator dispute transaction cost, and
 $B_{\mathrm{grief},j}$ is expected benefit from griefing delay.
 \end{enumerate}
 
-These inequalities define the calibration method: deposit/penalty parameters are
-chosen to satisfy these constraints under measured implementation conditions.
+These inequalities define the calibration method: deposit and penalty
+parameters are chosen to satisfy the constraints under measured implementation
+conditions.
 For cut-and-choose strategies, $p_{\mathrm{det},G}$ is directly tied to opening
 coverage: with one evaluation instance and the remaining instances opened, the
 detection probability for inconsistencies on opened instances grows with $N$.
-In the implemented PoC, $N=10$ is used as a conservative baseline that increases
+In the implemented PoC, $N=10$ is used as a conservative baseline that raises
 opening coverage and supports practical deterrence in the evaluated scenarios.
 
 Practically, this yields four design requirements:
@@ -584,7 +643,8 @@ values are chosen conservatively to cover worst-case transaction and data
 availability behavior within the dispute window.
 
 \section{Scope Boundaries for This Thesis}
-This chapter formalizes the baseline target used in the remainder of the thesis:
+This chapter formalizes the baseline target used throughout the remainder of
+the thesis:
 \begin{enumerate}
 \item two-role economically secure 2PC (one garbler and one evaluator) as the primary cryptographic model; multi-buyer workflows are realized as repeated pairwise runs,
 \item application semantics are intentionally secondary to the protocol core; auction logic is used as a concrete mapping of output-to-settlement rules,
@@ -592,40 +652,44 @@ This chapter formalizes the baseline target used in the remainder of the thesis:
 \item and constrained on-chain verification as the deployable enforcement model.
 \end{enumerate}
 
-The protocol is specified at the commitment/dispute/state-machine
-layer, while ENS-auction rules are treated as an application-layer
-instantiation. Claims in this manuscript are scoped to the implemented
-two-role 2PC enforcement model and its multi-participant composition pattern.
-The implemented $n$-buyer extension is treated as a valid composition of
-pairwise 2PC executions; native $n$-party cryptographic constructions,
-production-scale market design, and full formal game-theoretic equilibrium
-proofs are reserved for follow-on work.
+The protocol is specified at the commitment/dispute/state-machine layer, while
+ENS-auction rules are treated as an application-layer instantiation. Claims in
+this manuscript are scoped to the implemented two-role 2PC enforcement model
+and its multi-participant composition pattern. The implemented $n$-buyer
+extension is treated as a valid composition of pairwise 2PC executions; native
+$n$-party cryptographic constructions, production-scale market design, and full
+formal game-theoretic equilibrium proofs are reserved for follow-on work.
 
 The cryptographic core remains 2PC: each execution is between one garbler and
-one evaluator. The $n$-buyer auction is an application-layer composition: one
-on-chain state machine coordinates multiple pairwise
+one evaluator. The $n$-buyer auction is an application-layer composition in
+which one on-chain state machine coordinates multiple pairwise
 garbler$\leftrightarrow E_j$ interactions and aggregates them into one auction
-outcome. In this thesis, ``$n$-buyer'' describes workflow and application
-participant set (buyers as evaluators),
-not a change in the underlying 2PC security model.
+outcome. In this thesis, ``$n$-buyer'' describes the workflow and application
+participant set (buyers as evaluators), not a change in the underlying 2PC
+security model.
 
 \chapter{Protocol Design}
 \section{Design Objectives and Strategy}
-The protocol is designed around three constraints that must hold simultaneously:
+The protocol is designed around three constraints that must hold at the same time:
 \begin{enumerate}
 \item private inputs are processed off-chain via garbled-circuit execution,
 \item outcome enforcement remains publicly verifiable on Ethereum,
 \item and deviations are deterred through deposits, slashing, and deadline-triggered fallback paths.
 \end{enumerate}
 
-This chapter specifies the protocol designed and implemented in this thesis. It defines an Ethereum-oriented state machine with implementation-constrained checks, keeps expensive cryptographic work off-chain, and reserves on-chain logic for commitment binding, selective dispute predicates, and deterministic payout/assignment transitions.
+This chapter specifies the protocol as designed and implemented in this thesis.
+It presents an Ethereum-oriented state machine with
+implementation-constrained checks, keeps expensive cryptographic work
+off-chain, and reserves on-chain logic for commitment binding, selective
+dispute predicates, and deterministic payout/assignment transitions.
 
 \section{Protocol Artifacts and State}
-For each cut-and-choose instance $i\in\{0,\dots,N-1\}$, the garbler commits a tuple:
+For each cut-and-choose instance $i\in\{0,\dots,N-1\}$, the garbler commits to
+the tuple:
 \[
 (\mathrm{comSeed}_i,\mathrm{rootGC}_i,\mathrm{blobHashGC}_i,\mathrm{hOut}_i).
 \]
-The fields have the following role:
+Each field has a specific role:
 \begin{enumerate}
 \item \textbf{$\mathrm{comSeed}_i$}: binding hash of the garbling seed for instance $i$.
 \item \textbf{$\mathrm{rootGC}_i$}: terminal incremental-hash state over garbled-circuit artifacts used by the GC dispute predicate.
@@ -640,7 +704,7 @@ For each evaluator $E_j$ and instance $i$, the garbler additionally commits eval
 \[
 \mathrm{rootOT}_{j,i}.
 \]
-These roots are later challengeable on opened instances via deterministic
+These roots become challengeable on opened instances through deterministic
 recomputation from revealed seed material (implementation excerpts:
 Appendix~\ref{app:c1}--\ref{app:c2}).
 
@@ -654,17 +718,19 @@ and selects the evaluation instance deterministically as
 \[
 m = H(\texttt{"M"},\mathrm{verifierSeed},\mathrm{circuitId},\mathrm{contractAddress}) \bmod N.
 \]
-All non-selected instances form the opened set $S_{\mathrm{open}}$ for cut-and-choose verification.
+All non-selected instances form the opened set $S_{\mathrm{open}}$ used for
+cut-and-choose verification.
 
 \section{Phase-by-Phase Protocol Flow}
 \subsection{Pre-Phase: Participant Set}
 Before deposits start, the garbler registers additional evaluators (buyers in
-the ENS-auction instantiation). This freezes the evaluator set for the run and
-binds each participant to a public receiver address used in final assignment.
+the ENS-auction instantiation). This freezes the evaluator set for the run,
+which in turn binds each participant to a public receiver address used in final
+assignment.
 
 \subsection{Phase 1: Deposits}
-The garbler and all registered evaluators lock collateral. If deposits are
-incomplete at the deadline, refund paths allow participants to recover funds.
+The garbler and all registered evaluators lock collateral. If deposits are not
+complete by the deadline, refund paths allow participants to recover funds.
 Successful completion advances the protocol to verifier-seed handling.
 
 \subsection{Phase 2: Evaluator Seed Commit-Reveal and Evaluation Index}
@@ -674,10 +740,12 @@ reveals trigger default-to-zero seed with slashing to the garbler under current
 contract rules. Once all evaluators are resolved (ready or defaulted), the
 contract finalizes $\mathrm{verifierSeed}$ and computes $m$ deterministically.
 
-This phase prevents one-party late selection of the evaluation index and ensures that cut-and-choose selection is reproducible from on-chain state.
+This phase prevents one-party late selection of the evaluation index and, for
+the same reason, makes cut-and-choose selection reproducible from on-chain
+state.
 
 \subsection{Phase 3: Garbler Commitments}
-Phase 3 has two contract-enforced steps:
+Phase 3 contains two contract-enforced steps:
 \begin{enumerate}
 \item \textbf{Core commitments:} the garbler submits $(\mathrm{comSeed}_i,\mathrm{rootGC}_i,\mathrm{blobHashGC}_i,\mathrm{hOut}_i)$ for all $i$.
 \item \textbf{Evaluator-scoped OT commitments:} for every evaluator $E_j$, the garbler submits $\mathrm{rootOT}_{j,i}$ for all $i$.
@@ -689,7 +757,7 @@ the contract rules.
 \subsection{Phase 4: Evaluator Liveness and Input Readiness}
 Each evaluator must confirm readiness before deadline. Evaluators that remain
 unresolved are defaulted to semantic input $0$ and slashed. This guarantees
-progress to the opening phase even under partial non-cooperation.
+progress to the opening phase even when some participants do not cooperate.
 
 \subsection{Phase 5: Cut-and-Choose Openings}
 The garbler reveals $N-1$ seeds for indices in $S_{\mathrm{open}}$ and proves
@@ -718,7 +786,7 @@ Appendix~\ref{app:a3}, Appendix~\ref{app:b2}, Appendix~\ref{app:b3}, and
 Appendix~\ref{app:c1}--\ref{app:c2}.
 
 The protocol advances from dispute to label reveal when all active evaluators
-close their dispute state, or when the dispute deadline expires.
+close their dispute state or when the dispute deadline expires.
 
 \subsection{Phase 7: Label Reveal and Evaluation Payload Binding}
 The garbler reveals garbler labels for the evaluation instance $m$. In the same
@@ -727,8 +795,9 @@ $\mathrm{blobHashGC}_m$. This binds settlement to one concrete EIP-4844 payload
 reference in that transaction (specific blob index and versioned hash).
 Payload semantics are verified through off-chain reconstruction and dispute
 checks, while on-chain logic enforces hash binding and phase integrity.
-Because blob data is ephemeral, this implementation assumes payload retrievability at
-least throughout the dispute horizon (Assumption~A4)~\cite{Buterin2022EIP4844}.
+Because blob data is ephemeral, this implementation assumes payload
+retrievability at least throughout the dispute horizon
+(Assumption~A4)~\cite{Buterin2022EIP4844}.
 The concrete on-chain binding check is shown in Appendix~\ref{app:a4}.
 
 \subsection{Phase 8: Settlement and Assignment}
@@ -742,7 +811,9 @@ In the current proof-of-concept encoding:
 \[
 \mathrm{outputBytes}=\mathrm{encodePacked}(\mathrm{winnerId},\mathrm{winningBid},\mathrm{chosenNamehash}).
 \]
-After acceptance, the contract applies first-price transfer logic (winner pays own bid from collateral vault), records winner metadata, and transitions to final ENS assignment and payout settlement.
+After acceptance, the contract applies first-price transfer logic (winner pays
+own bid from collateral vault), records winner metadata, and transitions to
+final ENS assignment and payout settlement.
 Accepted settlement in this implementation certifies anchor-consistent and
 well-formed output bytes under the protocol's selective-verification model.
 Implementation excerpts are collected in Appendix~\ref{app:a2}.
@@ -760,14 +831,19 @@ multiple competing evaluators (buyers in the auction application) under a
 common commitment/dispute framework.
 
 \section{Protocol vs Application Layer}
-The protocol core is intentionally application-agnostic: commitments, openings, disputes, deadlines, and settlement anchors are independent of specific business rules. The ENS auction logic is the current application mapping:
+The protocol core is intentionally application-agnostic: commitments, openings,
+disputes, deadlines, and settlement anchors are independent of specific
+business rules. The ENS auction logic is the current application mapping:
 \begin{enumerate}
 \item the computed output determines winner identity and winning bid,
 \item final assignment binds the chosen ENS name hash to the winner's registered receiver,
 \item and first-price payment is executed from vault balances.
 \end{enumerate}
 
-The implementation currently models a fixed shortlist of offered ENS name hashes and validates that the chosen output name belongs to that offered set. This is an engineering simplification of the broader application vision and does not change the protocol-level enforcement structure.
+The implementation currently models a fixed shortlist of offered ENS name hashes
+and validates that the chosen output name belongs to that offered set. This is
+an engineering simplification of the broader application vision and does not
+change the protocol-level enforcement structure.
 
 \section{Specification Conformance}
 For reproducibility, the protocol notation and ordering in this chapter follow
@@ -780,8 +856,8 @@ transition logic used in the prototype.
 
 \chapter{Implementation (Proof of Concept)}
 \section{System Architecture}
-The proof-of-concept consists of off-chain protocol services and an on-chain enforcement contract.
-The garbler and evaluators (buyers in the ENS-auction instantiation) execute
+The proof-of-concept combines off-chain protocol services with an on-chain enforcement contract.
+The garbler and evaluators (buyers in the ENS-auction instantiation) run
 cryptographic computation and evidence preparation off-chain, while Ethereum L1
 enforces deadlines, commitments, disputes, and settlement transitions.
 
@@ -808,10 +884,10 @@ enforces deadlines, commitments, disputes, and settlement transitions.
 
 \section{On-Chain Architecture}
 \subsection{State Machine and Core Objects}
-The contract implementation in \texttt{MillionairesProblem.sol} realizes the protocol as an explicit finite state machine with hard deadlines.
-The stage set includes deposits, evaluator seed commit/reveal, core
-commitments, evaluator-scoped OT commitments, evaluator liveness finalization,
-opening, dispute, label reveal, settlement, assignment, and closure.
+At contract level, the core 2PC enforcement contract models the protocol as an explicit finite state machine with hard deadlines.
+The stages include deposits, evaluator seed commit/reveal, core commitments,
+evaluator-scoped OT commitments, evaluator liveness finalization, opening,
+dispute, label reveal, settlement, assignment, and closure.
 
 Protocol-critical commitment objects are stored per cut-and-choose instance:
 \[
@@ -821,22 +897,22 @@ and per evaluator-instance OT commitments:
 \[
 \mathrm{rootOT}_{j,i}.
 \]
-This state layout directly supports dispute traceability and deterministic verification of opened instances.
+This state layout directly supports dispute traceability and deterministic verification for opened instances.
 
 \subsection{Phase Handlers}
 The contract exposes dedicated handlers for each transition class:
 \begin{enumerate}
-\item \textbf{Seed handling and evaluation-index derivation:} evaluator seed commit/reveal finalization and deterministic $m$ selection.
-\item \textbf{Commitment publication:} the garbler submits core commitments, then evaluator-scoped OT roots.
-\item \textbf{Liveness progression:} unresolved evaluators are defaulted and slashed after deadline, allowing protocol progress.
+\item \textbf{Seed handling and evaluation index derivation:} evaluator seed commit and reveal finalization, plus deterministic $m$ selection.
+\item \textbf{Commitment publication:} the garbler submits core commitments, then OT roots per evaluator.
+\item \textbf{Liveness progression:} unresolved evaluators are defaulted and slashed after deadline, preserving protocol progress.
 \item \textbf{Opening and dispute entry:} the garbler reveals $N-1$ openings; active evaluators enter dispute window.
 \item \textbf{Settlement and assignment:} output anchor validation, vault updates, winner recording, and final assignment.
 \end{enumerate}
 
-This implementation structure keeps transition logic auditable on-chain and avoids ambiguous cross-phase behavior.
+This implementation structure keeps transition logic auditable on-chain and cross-phase behavior unambiguous.
 
 \subsection{Dispute and Accountability Mechanism}
-Two explicit dispute predicates are implemented:
+Two explicit dispute predicates are implemented on-chain:
 \begin{enumerate}
 \item \textbf{GC leaf dispute:} verifies one challenged gate leaf on an opened instance via seed-consistent recomputation, incremental-hash proof, and layout proof.
 \item \textbf{Evaluator-scoped OT root dispute:} recomputes expected OT root for one evaluator and one opened instance; mismatch slashes garbler, false challenge slashes evaluator.
@@ -844,13 +920,13 @@ Two explicit dispute predicates are implemented:
 
 The dispute window closes either when all active evaluators close their dispute
 state or when deadline-based finalization is triggered.
-This design provides constrained on-chain verification while preserving economically enforceable blame assignment.
+The design provides constrained on-chain verification while preserving economically enforceable blame assignment.
 
 \subsection{Settlement and Assignment Path}
 Settlement accepts an output only if the computed anchor equals committed $\mathrm{hOut}_m$ for the evaluation instance.
-The accepted output is decoded into winner id, winning bid, and chosen name hash.
-The contract then applies first-price vault transfer logic and executes assignment in a separate finalization step.
-This separation keeps settlement correctness checks explicit and makes final payout/assignment transitions observable on-chain.
+It then decodes the accepted output into winner id, winning bid, and chosen name hash.
+Next, the contract applies first-price vault transfer logic and executes assignment in a separate finalization step.
+This separation keeps settlement correctness checks explicit and makes payout/assignment transitions observable on-chain.
 
 \subsection{Core Security Snippets}
 The four core aspects below are kept in the main implementation chapter as
@@ -935,7 +1011,7 @@ function settle(bytes calldata outputBytes) external {
 \end{lstlisting}
 
 \subsection{Code Excerpt Roadmap}
-Excerpts illustrate enforcement; the security argument is in Chapter~3/4.
+Excerpts illustrate enforcement, while the security argument is in Chapter~3/4.
 To keep the main narrative focused, full code excerpts are grouped in appendices
 and referenced from the mechanism discussion:
 \begin{enumerate}
@@ -958,12 +1034,12 @@ Appendix~\ref{app:d2}.
 In this proof-of-concept, the protocol is instantiated as an ENS auction application.
 The application-specific mapping is implemented as follows:
 \begin{enumerate}
-\item bids are provided by buyers $B_1,\dots,B_n$, while the protocol computes and enforces the winner outcome,
-\item the settlement payload encodes \texttt{winnerId}, \texttt{winningBid}, and \texttt{chosenNamehash},
-\item the contract validates that the chosen name hash belongs to the offered ENS set and that the winning bid is economically valid,
+\item bids are provided by buyers $B_1,\dots,B_n$, and the protocol computes and enforces the winner outcome,
+\item the settlement payload encodes winner ID, winning bid, and chosen name hash,
+\item the contract checks that the chosen name hash is offered and that the winning bid is economically valid,
 \item final assignment is executed by calling the ENS adapter with the winner receiver address after settlement finalization.
 \end{enumerate}
-This makes the ENS auction an implemented application layer over the protocol core, not only an abstract example.
+This makes the ENS auction an implemented application layer over the protocol core rather than only an abstract example.
 
 \section{Off-Chain Architecture}
 \subsection{Shared Protocol Library}
@@ -981,10 +1057,11 @@ Using one shared library is a protocol-integrity decision: both roles derive ide
 
 \subsection{Garbler Off-Chain Service}
 The \texttt{off-chain-alice} service performs garbler-side preparation and publication.
-Its command set covers deposit, commitment construction, OT-root submission, opening reveal, label reveal, and evaluation artifact export.
-Garbler-side tooling produces the exact commitment tuple expected
-by the contract and can emit evaluation payload artifacts for blob-linked
-settlement flow.
+Its command set covers deposit, commitment construction, OT-root submission,
+opening reveal, label reveal, and evaluation artifact export.
+Garbler-side tooling produces the exact commitment tuple expected by the
+contract and can emit evaluation payload artifacts for blob-linked settlement
+flow.
 
 \subsection{Evaluator Off-Chain Services}
 The \texttt{off-chain-bob} service performs evaluator-side actions for each
@@ -996,25 +1073,25 @@ evaluator $E_j$ (buyer $B_j$ in the ENS application):
 \item settlement submission and assignment finalization.
 \end{enumerate}
 This role separation supports the $n$-evaluator extension while preserving one
-protocol logic core.
+shared protocol logic core.
 
 \section{Protocol-to-Code Mapping}
 Implementation traceability is one of the core PoC goals.
-The protocol phases in Chapter~4 map to concrete implementation entry points as follows:
+Accordingly, the protocol phases in Chapter~4 map to concrete implementation entry points as follows:
 \begin{enumerate}
 \item \textbf{Deposits and participant readiness:} contract deposit and evaluator-ready paths plus evaluator-side commands.
 \item \textbf{Verifier-seed commit/reveal:} evaluator commit/reveal handlers on-chain and corresponding evaluator commands off-chain.
 \item \textbf{Core commitments and OT roots:} garbler commitment and OT-root submission handlers on-chain, commitment builders in garbler service.
-\item \textbf{Opening/dispute:} reveal-openings, dispute handlers, and off-chain dispute packet generation.
-\item \textbf{Settlement/assignment:} off-chain output-anchor derivation plus on-chain settlement and assignment handlers.
+\item \textbf{Opening and dispute:} reveal-openings, dispute handlers, and off-chain dispute packet generation.
+\item \textbf{Settlement and assignment:} off-chain output-anchor derivation, then on-chain settlement and assignment handlers.
 \end{enumerate}
 
-The important point is that protocol claims are not narrative-only: each step is bound to executable code paths in Solidity and Rust.
+The key point is that protocol claims are not narrative-only: each step is bound to executable code paths in Solidity and Rust.
 
 \section{Implementation Design Choices and Scope}
 This thesis uses a proof-of-concept implementation to validate end-to-end
 protocol enforceability.
-Several choices are deliberate protocol-engineering decisions:
+Three choices are deliberate protocol-engineering decisions:
 \begin{enumerate}
 \item \textbf{Shared deterministic GC/OT rules across Solidity and Rust:} the constrained canonical representation is required to guarantee verifier parity.
 \item \textbf{Constrained on-chain verification:} leaf-level and root-level checks are chosen to keep verification gas-limited and deployable on Ethereum.
@@ -1025,20 +1102,20 @@ The implementation therefore serves as an end-to-end feasibility validation of
 the protocol model under Ethereum constraints.
 
 \section{Validation and Reproducibility}
-Validation is organized in three layers:
+Validation is organized into three layers:
 \begin{enumerate}
-\item \textbf{Smart-contract tests:} transition, timeout, dispute, settlement, and ENS-assignment behavior in the two Solidity suites (\texttt{MillionairesProblem.t.sol} and \texttt{NPartyLifecycle.t.sol}).
-\item \textbf{Off-chain deterministic tests:} parity and encoding checks in the off-chain-common integration tests (cut-and-choose flow, OT flow, settlement-anchor derivation, eval-blob payload, EIP-4844 hash derivation).
-\item \textbf{End-to-end scenario script:} \texttt{scripts/demo\_protocol\_cases.sh} for honest success flow, evaluator-defaulted liveness flow, and garbler-cheat dispute flow.
+\item \textbf{Smart-contract tests:} the 2PC protocol test suite covers transition, timeout, dispute, settlement, and ENS-assignment behavior. Lifecycle behavior is covered in a dedicated lifecycle suite.
+\item \textbf{Off-chain deterministic tests:} off-chain-common integration tests check parity and encoding. Coverage includes cut-and-choose and OT flows, settlement-anchor derivation, eval-blob checks, and EIP-4844 hash derivation.
+\item \textbf{End-to-end scenario script:} dedicated demo coverage for honest success, evaluator default, and garbler-cheat dispute flows.
 \end{enumerate}
 
-These three validation layers are the reproducibility baseline for the implemented protocol and its ENS auction application path.
+Together, these three validation layers are the reproducibility baseline for the implemented protocol and its ENS auction application path.
 
 \chapter{Evaluation}
 \section{Evaluation Objectives}
-This evaluation measures protocol-core enforcement costs using the ENS auction
-as the concrete application instantiation.
-The objective is implementation-backed evidence across four layers:
+This chapter evaluates protocol-core enforcement costs with the ENS auction as
+the concrete application instantiation.
+The goal is to provide implementation-backed evidence across four layers:
 \begin{enumerate}
 \item scenario validation under honest and adversarial flows,
 \item on-chain enforcement cost profile (per-call gas and per-scenario totals),
@@ -1048,53 +1125,54 @@ The objective is implementation-backed evidence across four layers:
 
 \section{Methodology and Experimental Setup}
 \subsection{Measured Quantities}
-The instrumentation records:
+The instrumentation records five measurement groups:
 \begin{enumerate}
 \item per-transaction gas usage for protocol-relevant calls,
-\item per-scenario total gas, transaction count, terminal stage, and settlement/assignment/slashing outcomes,
-\item off-chain wall-clock timings for selected CLI/runtime operations,
+\item per-scenario totals: gas, transaction count, terminal stage, and final settlement, assignment, and slashing outcomes,
+\item off-chain wall-clock timings for selected CLI operations,
 \item serialized artifact sizes and structural counts,
 \item scaling indicator tables for \(n\)- and \(N\)-sensitivity.
 \end{enumerate}
 
 \subsection{Execution Environment}
-Evaluation runs were executed on a local deterministic Anvil chain using an
-automated scenario harness (honest/default/cheat) and a dedicated moderate
-scaling sweep harness (\(n\)- and \(N\)-sensitivity points).
-Measurements were recorded in machine-readable artifacts and then rendered into
-the Chapter 6 tables.
+Evaluation runs were executed on a local deterministic Anvil chain.
+Two harnesses were used: an automated scenario harness
+(honest/default/cheat) and a dedicated moderate scaling sweep harness
+(\(n\)- and \(N\)-sensitivity points).
 
 For the measured baseline, the protocol parameters were:
 \begin{enumerate}
 \item number of cut-and-choose instances: $N=10$,
 \item number of evaluators (buyers in the ENS application): $n=3$,
-\item circuit bit width: $57$,
+\item circuit bit width: $57$ (chosen so the bid domain for this baseline stays below the 1.2 ETH collateral cap),
 \item collateral per participant: $1.2$ ETH,
 \item auction rule: first-price settlement with deterministic winner decoding.
 \end{enumerate}
 
-The parameter roles are separated intentionally:
-\(N\) controls cut-and-choose verification coverage, while \(n\) controls the
-size of the auction instantiation.
+The role split between parameters is intentional:
+\(N\) controls cut-and-choose verification coverage, while \(n\) sets the size
+of the auction instantiation.
 
-Local deterministic execution provides reproducible cost and behavior
-measurements; production fee calibration requires deployment-specific
-gas-price and blob-fee assumptions.
+Local deterministic execution gives reproducible behavior and cost traces.
+Production fee calibration still depends on deployment-specific gas-price and
+blob-fee assumptions.
 
 \subsection{Scenario Matrix}
 \begin{table}[htbp]
 \centering
-\begin{tabular}{|p{3.2cm}|p{4.9cm}|p{6.4cm}|}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{|p{2.8cm}|p{4.2cm}|p{7.4cm}|}
 \hline
 \textbf{Scenario} & \textbf{Injected condition} & \textbf{Expected property check} \\
 \hline
-Honest success flow & No deviations by garbler or evaluators & Protocol reaches \texttt{Closed}, settlement accepted, ENS assignment completed, no unresolved evaluators. \\
+Honest success flow & No deviations by garbler or evaluators & Protocol reaches Closed; settlement is accepted; ENS assignment completes; no unresolved evaluators remain. \\
 \hline
-Evaluator defaulted flow & One evaluator does not complete evaluator-input readiness before deadline & Default-to-zero and slashing are applied; protocol still reaches settlement and assignment. \\
+Evaluator defaulted flow & One evaluator does not complete evaluator input readiness before deadline & Default-to-zero and slashing are applied; protocol still reaches settlement, then assignment. \\
 \hline
-Garbler-cheat flow & Garbler commits tampered \texttt{rootGC} for an opened instance & GC-leaf dispute succeeds, garbler is slashed, contract closes without settlement/assignment. \\
+Garbler-cheat flow & Garbler commits tampered rootGC for an opened instance & GC-leaf dispute succeeds; garbler is slashed; contract closes without settlement or assignment. \\
 \hline
 \end{tabular}
+}
 \caption{End-to-end evaluation scenarios used for protocol validation.}
 \label{tab:evaluation-scenarios}
 \end{table}
@@ -1102,7 +1180,7 @@ Garbler-cheat flow & Garbler commits tampered \texttt{rootGC} for an opened inst
 \section{Scenario Results}
 \input{evaluation/tables/scenario_summary.tex}
 
-Observed invariants confirmed:
+Across all executed runs, the following invariants were confirmed:
 \begin{enumerate}
 \item honest execution reached \texttt{Closed} with accepted settlement and completed assignment,
 \item evaluator default triggered deterministic default/slashing while preserving liveness,
@@ -1110,7 +1188,8 @@ Observed invariants confirmed:
 \end{enumerate}
 
 \section{Requirement Coverage from the Results}
-The executed scenarios provide direct evidence for key requirements defined in Chapter~3:
+The executed scenarios provide direct evidence for key requirements from
+Chapter~3:
 \begin{enumerate}
 \item \textbf{R2 (Output correctness and binding):} Scenario 1 and Scenario 2 accepted settlement only with valid \texttt{hOut}-bound output bytes and domain-constrained decoded fields.
 \item \textbf{R3 (Publicly verifiable accountability):} Scenario 3 shows objective, contract-verifiable evidence leading to deterministic slashing of a cheating party.
@@ -1122,9 +1201,10 @@ The executed scenarios provide direct evidence for key requirements defined in C
 \subsection{Per-call Gas Profile}
 \input{evaluation/tables/gas_by_call.tex}
 The per-call profile shows that commitment publication dominates the optimistic
-path: \texttt{submitCommitments} and buyer-scoped
+path.
+\texttt{submitCommitments} and buyer-scoped
 \texttt{submitOtRootsForBuyer} are the largest recurring costs.
-Opening and dispute-phase closure calls are moderate in comparison, while
+Opening and dispute-phase closure calls are moderate by comparison, while
 \texttt{disputeGarbledTable} is the dominant selective-verification cost in the
 cheating path.
 
@@ -1142,18 +1222,19 @@ Artifact measurements reflect the intended design split.
 Settlement-critical payloads such as \texttt{outputBytes} stay compact and
 fixed-size, while the evaluation blob dominates raw bytes and remains off-chain
 except for hash-bound enforcement hooks.
-This supports constrained on-chain verification with heavier data handling kept
-outside contract state.
+This is consistent with constrained on-chain verification and heavier data
+handling outside contract state.
 
 \subsection{Off-chain Runtime}
 \input{evaluation/tables/runtime_observed.tex}
-Observed local runtimes are in the millisecond range for the profiled CLI
-operations and remain stable across the baseline scenarios.
+Observed local runtimes for the profiled CLI operations are in the millisecond
+range and remain stable across the baseline scenarios.
 Commitment preparation and label-reveal-related steps are the largest measured
 off-chain contributors, while output encoding/anchor derivation is
 comparatively small.
-These values are implementation timings, intended for reproducibility and
-relative comparison rather than hardware-independent benchmarking.
+These values are implementation timings.
+They are intended for reproducibility and relative comparison, not as
+hardware-independent benchmarks.
 
 \subsection{Scaling Indicators}
 \input{evaluation/tables/scaling_buyers.tex}
@@ -1198,8 +1279,8 @@ scope boundaries, not universal superiority claims.
 \clearpage
 
 \section{Threats to Validity}
-The presented evidence is strong for implementation-level protocol behavior,
-with bounded external validity:
+The evidence is strong for implementation-level protocol behavior, but external
+validity remains bounded:
 \begin{enumerate}
 \item local execution does not model live mempool competition or adversarial
 transaction ordering,
@@ -1215,11 +1296,11 @@ privacy-preserving protocol interface.
 
 \chapter{Discussion and Conclusion}
 \section{Discussion of the Main Findings}
-This thesis set out to design and validate an economically secure 2PC protocol
-for Ethereum, with sealed-bid auctions as the concrete application context.
-The implementation and evaluation demonstrate that this objective is feasible
-when enforcement is encoded as a strict on-chain state machine while the heavy
-private computation remains off-chain.
+We set out to design and validate an economically secure 2PC protocol for
+Ethereum, with sealed-bid auctions as the concrete application context. The
+implementation and evaluation show that this objective is feasible when
+enforcement is encoded as a strict on-chain state machine while heavy private
+computation remains off-chain.
 
 Three implemented findings are central.
 First, \textbf{output binding and settlement integrity} are enforceable through
@@ -1235,13 +1316,13 @@ be embedded into practical Ethereum settlement workflows through commitments,
 deadlines, and selective challenge predicates, without requiring universal
 on-chain re-execution.
 
-The implementation process also exposed three design lessons:
-deployability constraints are first-order protocol parameters, cost-aware
-verification design is necessary for L1 feasibility, and protocol simplicity
-materially improves end-to-end implementability and auditability.
+The implementation process also surfaced three design lessons. Deployability
+constraints are first-order protocol parameters, cost-aware verification design
+is necessary for L1 feasibility, and protocol simplicity materially improves
+end-to-end implementability and auditability.
 
 These conclusions remain consistent with publicly verifiable financially secure
-2PC directions in prior work, while grounding them in a concrete
+2PC directions in prior work, while grounding them in a concrete,
 deployment-oriented enforcement model for Ethereum~\cite{Zhu2019PV2PC,BitPriv2025}.
 
 \section{Protocol-Core vs Application Layer}
@@ -1252,9 +1333,9 @@ protocol-core mechanisms; the ENS auction is one application-layer
 instantiation over that backbone, realized here by first-price settlement and
 deterministic assignment of the selected namehash.
 
-This separation increases architectural transferability while limiting
-application-specific assumptions inside the protocol-core security and
-enforcement model.
+This separation improves architectural transferability while limiting
+application-specific assumptions in the protocol-core security and enforcement
+model.
 The same core can be instantiated for sealed tenders, private matching,
 confidential allocation, or selective procurement, provided outcomes can be
 encoded into anchor-bound settlement bytes with deterministic execution rules.
@@ -1286,8 +1367,8 @@ architectural transferability, but does not establish welfare-optimality or
 incentive properties across broader private auction mechanisms.
 \end{enumerate}
 
-These boundaries sharpen what is demonstrated and measured in this thesis and
-define the precise extension surface for subsequent work.
+These boundaries clarify what is demonstrated and measured in this thesis, and
+they define a precise extension surface for follow-on work.
 
 \section{Future Work}
 Near-term engineering work concerns deployment calibration and broader empirical
@@ -1324,20 +1405,19 @@ while preserving the enforcement-first contribution of this work~\cite{Haloani20
 \end{enumerate}
 
 \section{Conclusion}
-The central result of this thesis is that privacy-preserving market execution
-on Ethereum can be achieved through economically enforceable off-chain
-computation, without requiring full on-chain private computation.
+The central result is that privacy-preserving market execution on Ethereum can
+be achieved through economically enforceable off-chain computation, without
+requiring full on-chain private computation.
 
-The implemented Solidity/Rust prototype demonstrates that commitments,
+Our implemented Solidity/Rust prototype demonstrates that commitments,
 deadlines, selective disputes, and deterministic settlement can be composed
 into a coherent L1 enforcement workflow under a concrete auction
 instantiation.
 This establishes a deployment-oriented design pattern for private market
 mechanisms on public blockchains.
 
-Overall, this work provides a credible L1-native path toward enforceable
-private market execution through disciplined protocol engineering and economic
-alignment.
+Overall, we provide a credible L1-native path toward enforceable private market
+execution through disciplined protocol engineering and economic alignment.
 
 \appendix
 
