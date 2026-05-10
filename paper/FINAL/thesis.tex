@@ -780,7 +780,8 @@ retrievability at least throughout the dispute horizon
 The concrete on-chain binding check is shown in Appendix~\ref{app:a4}.
 
 \subsection{Phase 8: Settlement and Assignment}
-Any participant can submit \texttt{outputBytes}. The contract accepts only if:
+Any participant can submit \texttt{outputBytes} after Phase~7. The contract
+accepts only if:
 \begin{enumerate}
 \item $H(\texttt{"OUT"},\mathrm{circuitId},m,\mathrm{outputBytes}) = \mathrm{hOut}_m$,
 \item decoded fields are well-formed and within bounds (winner id, winning bid, offered name hash).
@@ -853,7 +854,7 @@ enforces deadlines, commitments, disputes, and settlement transitions.
   \node[box, fill=yellow!20, right=40mm of alice, yshift=-8mm, minimum width=52mm, minimum height=16mm] (contract) {\textbf{Ethereum L1 Contract}\\state machine, deadlines,\\deposits, disputes, settlement};
 
   \draw[<->, thick] (alice) -- node[left, align=center] {off-chain protocol exchange\\(seeds, artefacts, proofs)} (bobs);
-  \draw[->, thick] (alice) -- node[above, align=center] {on-chain actions\\(commit/reveal/dispute/settle)} (contract);
+  \draw[->, thick] (alice) -- node[above, align=center] {on-chain actions\\(commit/reveal/dispute)} (contract);
   \draw[->, thick] (bobs.east) -- node[below, align=center] {on-chain actions\\(ready/challenge/settle/abort)} (contract.south west);
 \end{tikzpicture}
 }
