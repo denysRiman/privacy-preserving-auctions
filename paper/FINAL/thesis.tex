@@ -260,6 +260,8 @@ Semi-honest security assumes parties follow the protocol but may try to infer ad
 
 The practical tradeoff is multi-dimensional. Stronger malicious guarantees increase not only communication and verification cost, but also off-chain setup effort and end-to-end latency from setup to enforceable completion. In auction environments with moving market conditions, this latency interacts directly with economic utility, so security level and deployability must be calibrated jointly rather than optimized in isolation.
 
+Concretely, moving toward stronger malicious security usually increases off-chain computation overhead in preparation and checking phases (for example, heavier consistency checks, larger challenge-ready evidence, and additional transcript validation work). This extra off-chain work increases latency to practical finality, understood here as the time between protocol setup and enforceable on-chain completion. For financial applications, especially auctions where external prices move continuously, this delay is not neutral: slower finality can reduce strategy quality and market relevance of the computed outcome.
+
 \section{Related Work}
 
 \subsection{Privacy on Blockchains}
