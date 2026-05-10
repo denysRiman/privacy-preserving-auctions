@@ -798,17 +798,27 @@ Accepted settlement in this implementation certifies anchor-consistent and
 well-formed output bytes under the protocol's selective-verification model.
 Implementation excerpts are collected in Appendix~\ref{app:a2}.
 
-\section{n-Evaluator Generalization (Auction Instantiation: n Buyers)}
-Relative to a single-evaluator baseline, the protocol generalizes by:
+\section{Multi-Evaluator Auction Instantiation}
+The auction instantiation coordinates one garbler and $n$ evaluators (buyers)
+under a single contract state machine. The contract tracks
+evaluator-specific readiness, OT commitments, dispute status, and settlement
+participation while preserving a common evaluation index for the run and a shared settlement
+path.
+
+The underlying cryptographic unit remains pairwise 2PC: each evaluator $E_j$
+participates in a separate garbler$\leftrightarrow E_j$ GC/OT execution, while
+the contract composes these pairwise executions into one auction workflow.
+
+The multi-evaluator orchestration relies on four implementation mechanisms:
 \begin{enumerate}
 \item evaluator-scoped OT commitments $\mathrm{rootOT}_{j,i}$ instead of one global OT root,
 \item per-evaluator liveness/default handling in Phase 4,
 \item per-evaluator dispute closure tracking in Phase 6,
 \item and deterministic $m$ derived from aggregated evaluator seed material.
 \end{enumerate}
-This keeps the protocol backbone unchanged while allowing one run to include
-multiple competing evaluators (buyers in the auction application) under a
-common commitment/dispute framework.
+This separation keeps cryptographic security reasoning at the pairwise-2PC
+level, while the auction behavior is realized by deterministic multi-evaluator
+coordination and aggregation in the application layer.
 
 \section{Protocol vs Application Layer}
 The protocol core is intentionally application-agnostic: commitments, openings,
