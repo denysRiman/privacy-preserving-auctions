@@ -666,6 +666,21 @@ and selects the evaluation instance deterministically as
 \[
 m = H(\texttt{"M"},\mathrm{verifierSeed},\mathrm{circuitId},\mathrm{contractAddress}) \bmod N.
 \]
+This selection is intended to be unbiased with respect to the garbler. The
+garbler does not control $\mathrm{verifierSeed}$, which is derived from
+evaluator commit-reveal inputs only. Because evaluators commit
+$H(\mathrm{seed},\mathrm{salt})$ before reveal, they cannot change committed
+seeds after observing others. A late revealer may still try to withhold reveal
+after seeing other reveals; this path is handled by deterministic
+default-to-zero resolution and slashing. In addition, $\mathrm{circuitId}$ and
+$\mathrm{contractAddress}$ are fixed before index finalization, and the
+contract computes $m$ deterministically once the reveal/default-resolution
+phase closes. Therefore, if at least one evaluator contributes an unpredictable
+seed, $m$ is pseudorandom from the garbler's perspective and cannot be biased
+by garbler-side input selection. Attempted rerun-level bias by aborting is
+economically deterred (under the protocol's utility assumptions) by collateral
+and deadline penalties defined in the economic-security requirements; this is
+an incentive argument, not a cryptographic impossibility claim.
 All non-selected instances form the opened set $S_{\mathrm{open}}$ used for
 cut-and-choose verification.
 
