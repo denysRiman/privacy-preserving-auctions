@@ -218,6 +218,8 @@ These differences matter for any protocol that depends on timed commitments, tra
 \paragraph*{Why Ethereum for This Thesis.}
 For this thesis, the settlement layer must satisfy four practical conditions: executable enforcement logic, native asset custody, publicly verifiable state transitions, and interoperability with existing on-chain applications. Ethereum is selected because it combines these properties in a mature production ecosystem while exposing exactly the adversarial realities relevant for private auctions: mempool visibility, strategic transaction ordering, and latency asymmetries~\cite{Wood2025Ethereum,Daian2019FlashBoys,Qin2022MEV}.
 
+The economic scale is also material for motivation. As of May~10,~2026, Ethereum accounts for roughly USD~85.5 billion in DeFi total value locked, while Ethereum-based DEX activity is approximately USD~44.9 billion over a 30-day window~\cite{DefiLlamaEthereumChain2026,DefiLlamaEthereumDexVolume2026}. This indicates that auction-relevant value and trading flow are already large enough that privacy leakage and delayed finality are practical, not purely theoretical, concerns.
+
 The choice is therefore not ``Ethereum despite adversarial execution'' but ``Ethereum because adversarial execution must be treated as first-class design input.'' This principle guides the transition from background concepts to concrete protocol requirements in Chapter~3.
 
 \subsection{Ethereum and the EVM}
