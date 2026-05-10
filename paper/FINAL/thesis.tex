@@ -549,13 +549,18 @@ D_G > \frac{G_G-C_G}{p_{\mathrm{det},G}} \quad (p_{\mathrm{det},G}>0),
 where $D_G$ is slashable garbler collateral, $G_G$ is expected gain from a
 covered cheating strategy (for example, manipulating one gate/root/output), and
 $C_G$ is attacker-side operational cost.
-\item \textbf{Evaluator-side false-dispute deterrence:}
+\item \textbf{Evaluator-side withholding/false-dispute deterrence:}
 \[
-P_{\mathrm{false},j}+C_{\mathrm{disp},j}>B_{\mathrm{grief},j},
+\max\!\Big(
+P_{\mathrm{false},j}+C_{\mathrm{disp},j},\;
+P_{\mathrm{noreveal},j}+C_{\mathrm{withhold},j}
+\Big)>B_{\mathrm{block},j},
 \]
-where $P_{\mathrm{false},j}$ is the false-dispute penalty for evaluator $E_j$,
-$C_{\mathrm{disp},j}$ is evaluator dispute transaction cost, and
-$B_{\mathrm{grief},j}$ is expected benefit from griefing delay.
+where $P_{\mathrm{false},j}$ is the penalty for an unsuccessful/false dispute by evaluator $E_j$,
+$P_{\mathrm{noreveal},j}$ is the penalty for withholding required reveal/output progress near deadlines,
+$C_{\mathrm{disp},j}$ is evaluator dispute transaction cost,
+$C_{\mathrm{withhold},j}$ is the evaluator-side operational/transaction cost of a withholding strategy, and
+$B_{\mathrm{block},j}$ is the expected benefit from delaying or preventing enforceable completion.
 \end{enumerate}
 
 These inequalities define the calibration method: deposit and penalty
