@@ -1,4 +1,4 @@
-\documentclass[final,oneside]{vutinfth}
+\documentclass[final,twoside]{vutinfth}
 
 % Core thesis metadata.
 \newcommand{\authorname}{Denys Nahornyi}
@@ -6,6 +6,17 @@
 \newcommand{\thesistitlede}{Economically secure 2PC on Ethereum}
 \newcommand{\curriculumen}{Master's programme Software Engineering \& Internet Computing}
 \newcommand{\curriculumde}{Masterstudium Software Engineering \& Internet Computing}
+\newcommand{\thesistitle}{\thesistitleen}
+
+% PDF/A metadata block.
+\begin{filecontents*}[overwrite]{\jobname.xmpdata}
+\Author{\authorname}
+\Title{\thesistitle}
+\Language{en-US}
+\Keywords{privacy-preserving auctions\sep secure two-party computation\sep Ethereum\sep smart contracts}
+\Publisher{TU Wien}
+\Subject{Master Thesis}
+\end{filecontents*}
 
 % UTF-8 input and modern font output.
 \usepackage{lmodern}
@@ -13,6 +24,8 @@
 \usepackage[utf8]{inputenc}
 \usepackage{tikz}
 \usepackage{listings}
+\usepackage[ruled,linesnumbered,algochapter]{algorithm2e}
+\usepackage[a-2b,mathxmp]{pdfx}
 \usetikzlibrary{arrows.meta,positioning}
 \lstdefinestyle{soliditysnippet}{
   basicstyle=\ttfamily\footnotesize,
@@ -49,14 +62,19 @@
 
 \begin{acknowledgements*}
 I would like to express my sincere gratitude to my supervisor, Assistant Prof.
-Georgia Avarikioti, for her guidance, scientific feedback, and support
-throughout this thesis.
+Georgia Avarikioti, for her guidance, insightful feedback, and continuous
+support throughout this thesis.
 
-I also thank Ioannis Alexopoulos for valuable discussions on protocol design and
-for practical advice during implementation and evaluation.
+I am especially grateful to Ioannis Alexopoulos for his valuable discussions on
+protocol design, as well as for his thoughtful feedback and practical guidance
+during the implementation and evaluation phases. His input not only improved
+the technical quality of this work but also helped shape its overall direction.
 
-Finally, I am grateful to my family and friends for their encouragement and
-patience during this work.
+Finally, I would like to thank my family for their unwavering emotional and
+material support, without which this work would not have been possible. I am
+equally grateful to my friends for their encouragement, patience, and
+inspiration throughout this journey. I also want to thank my girlfriend, Maria,
+for her love, understanding, and constant support throughout this process.
 \end{acknowledgements*}
 
 \begin{kurzfassung}
@@ -166,11 +184,10 @@ Concretely, the thesis targets:
 \section{Contributions of This Thesis}
 The expected contributions are the following:
 \begin{enumerate}
-\item \textbf{Ethereum-oriented protocol design:} a protocol that preserves bid privacy while keeping settlement publicly enforceable in a hostile execution environment.
+\item \textbf{Ethereum-oriented protocol design and engineering:} a protocol that preserves bid privacy while keeping settlement publicly enforceable in a hostile execution environment, using explicit phase transitions, enforceable dispute predicates, and deterministic settlement logic.
 \item \textbf{Economic-security framing:} a practical incentive model for rational participants, including explicit assumptions and deterrence conditions.
 \item \textbf{Prototype implementation:} an integrated proof-of-concept with on-chain contract logic and off-chain 2PC components.
 \item \textbf{Empirical evidence:} implementation-driven measurements and scenario-based analysis of optimistic and dispute executions.
-\item \textbf{Ethereum-specific protocol engineering:} a concrete protocol realization for Ethereum with explicit phase transitions, enforceable dispute predicates, and settlement logic.
 \end{enumerate}
 
 \section{Thesis Structure}
@@ -1642,6 +1659,10 @@ Representative prompts (English) used in this process include:
 All AI-assisted outputs were reviewed, revised, and adapted by the author
 prior to inclusion.
 \end{aitools}
+
+\listoffigures
+\cleardoublepage
+\listoftables
 
 \bibliographystyle{unsrt}
 \bibliography{references}
