@@ -35,6 +35,9 @@
   showstringspaces=false,
   frame=single
 }
+% Keep hierarchy readable: number down to subsections only.
+\setsecnumdepth{subsection}
+\settocdepth{subsection}
 
 % Required persons.
 \setauthor{}{\authorname}{}{male}
@@ -192,176 +195,88 @@ The expected contributions are the following:
 
 \section{Thesis Structure}
 The remainder of the thesis is organized as follows.
-Chapter~2 reviews foundations and related work on 2PC, garbled circuits, publicly verifiable enforcement, and MEV-relevant blockchain settings. Chapter~3 defines the model, assumptions, adversaries, and formalized requirements.
+Chapter~2 first introduces the blockchain, Ethereum, EVM, ENS, and 2PC background needed for this thesis, and then positions this work relative to privacy-preserving blockchain protocols and blockchain-based auction mechanisms. Chapter~3 defines the model, assumptions, adversaries, and formalized requirements.
 Chapter~4 presents the protocol design and phase-by-phase logic.
 Chapter~5 describes the implementation architecture and engineering choices.
 Chapter~6 evaluates the prototype with respect to cost, performance, and protocol behavior under key scenarios.
 Chapter~7 discusses limitations, summarizes the main findings, and outlines future work.
 
 \chapter{Background and Related Work}
-\section{Secure Two-Party Computation Basics}
-Secure two-party computation (2PC) addresses a basic but demanding question: how can two mutually distrustful parties evaluate a function over private inputs while revealing only the prescribed output? In this thesis, the technical baseline follows the garbled-circuit line of work: one party garbles the circuit, and the other evaluates it using input labels obtained via oblivious transfer (OT). Foundational properties, formal treatment, and malicious-security efficiency tradeoffs are established in the classical and modern literature~\cite{Bellare2012FoundationsGC,LindellPinkas2008}.
-Modern optimizations such as Half-Gates reduce garbled-circuit communication while preserving standard security guarantees, which is directly relevant for deployment-oriented 2PC engineering~\cite{Zahur2015HalfGates}.
+\section{Background}
 
-For blockchain applications, this model is attractive because the cryptographic heavy lifting can stay off-chain, while on-chain logic focuses on commitments, deadlines, and settlement enforcement. The split directly supports the practical objective of lowering gas costs without giving up privacy or accountability.
+\subsection{Blockchain Basics}
+\paragraph*{General Model: State-Machine Replication.}
+A blockchain can be modeled as a replicated append-only state machine maintained under decentralized consensus. Nodes process transactions according to shared rules and converge to the same ordered state-transition history. This model is the systems baseline for enforceable digital agreements: transitions are globally visible, replayable, and externally verifiable from public state~\cite{Wood2025Ethereum}.
 
-\section{From Semi-Honest to Malicious Security}
-Under the semi-honest model, parties follow the protocol but still attempt to extract extra information from observed transcripts. For financial workflows, that assumption is typically too weak, since strategic deviation is economically incentivized. Moving to malicious security adds explicit defenses such as cut-and-choose checks for garbling correctness, commitment-consistency checks, and controlled abort handling~\cite{LindellPinkas2008}.
+For protocol design, this abstraction is not merely conceptual. It determines what can be objectively checked by third parties, how deadlines are interpreted, and which evidence artifacts can be tied to deterministic state transitions. In this thesis, that property is essential because enforcement is delegated to on-chain state progression rather than trusted off-chain arbitration.
 
-The engineering tradeoff is straightforward: stronger malicious-security guarantees usually increase both communication and verification overhead. In public-blockchain deployments, those costs map directly to on-chain expense and operational burden, so protocol design must continuously balance cryptographic rigor against deployability.
+\paragraph*{Permissionless Blockchains: Proof of Work and Proof of Stake.}
+In permissionless systems, participation does not require prior authorization, so consensus must include explicit Sybil resistance. Proof of Work (PoW) and Proof of Stake (PoS) are the main families: both target robust agreement under adversarial conditions, but differ in resource assumptions, participation dynamics, and security-economic surfaces.
 
-\section{Public Verifiability and Economic Enforcement}
-Publicly verifiable 2PC seeks to make violations externally checkable, so a third party or smart contract can arbitrate disputes without replaying the entire off-chain protocol. Zhu et al.\ provide an influential direction, integrating dispute resolution with blockchain-based enforcement in financially secure computation settings~\cite{Zhu2019PV2PC}.
+These differences matter for any protocol that depends on timed commitments, transaction inclusion, and challenge windows. Finality behavior, congestion conditions, and inclusion incentives are part of the execution environment and therefore part of the effective threat model.
 
-BitPriv develops this line further by combining off-chain 2PC with collateral-backed on-chain punishment and a publicly verifiable dispute process in a Bitcoin-compatible framework~\cite{BitPriv2025}. This thesis formalizes that \emph{economic-security} perspective for Ethereum: participants are modeled as rational agents who may deviate when profitable, so deposits, slashing rules, and deadlines must be calibrated such that honest execution is the dominant economic strategy.
+\paragraph*{Why Ethereum for This Thesis.}
+For this thesis, the settlement layer must satisfy four practical conditions: executable enforcement logic, native asset custody, publicly verifiable state transitions, and interoperability with existing on-chain applications. Ethereum is selected because it combines these properties in a mature production ecosystem while exposing exactly the adversarial realities relevant for private auctions: mempool visibility, strategic transaction ordering, and latency asymmetries~\cite{Wood2025Ethereum,Daian2019FlashBoys,Qin2022MEV}.
 
-\section{Adversarial Execution on Public Blockchains}
-Ethereum is transparent by construction. Mempool visibility and transaction-ordering freedom create systematic room for adversarial behavior, commonly analyzed through MEV-related strategies~\cite{Daian2019FlashBoys}. Auction-like protocols are especially exposed, since even partial leaks can influence bidding behavior and final settlement outcomes.
-Recent empirical quantification shows that extractable-value opportunities remain broad in practice, reinforcing the need to model adversarial ordering explicitly~\cite{Qin2022MEV}.
+The choice is therefore not ``Ethereum despite adversarial execution'' but ``Ethereum because adversarial execution must be treated as first-class design input.'' This principle guides the transition from background concepts to concrete protocol requirements in Chapter~3.
 
-At the same time, Ethereum offers the enforcement substrate needed for commitment checks, dispute escalation, and deterministic settlement rules through publicly verifiable state and programmable contracts. The design problem is therefore twofold: hide sensitive inputs while retaining enforceable and cost-bounded execution under adversarial ordering~\cite{Wood2025Ethereum}.
+\subsection{Ethereum and the EVM}
+\paragraph*{Ethereum as Settlement Layer.}
+Ethereum extends the blockchain state-machine model with programmable smart contracts, enabling stateful protocol logic without a trusted intermediary~\cite{Wood2025Ethereum}. For deployment-oriented protocol engineering, four properties are central.
 
-\section{Ethereum and the EVM}
-\subsection{Ethereum as Settlement Layer}
-A blockchain can be modeled as a replicated append-only state machine
-maintained under decentralized consensus.
-Ethereum extends this model with programmable smart contracts, enabling
-stateful protocol logic without a trusted intermediary~\cite{Wood2025Ethereum}.
-For this thesis, a suitable settlement layer must satisfy four practical
-conditions: executable enforcement logic, native asset custody, publicly
-verifiable state transitions, and interoperability with existing on-chain
-applications.
-Ethereum is relevant because it meets these conditions in a mature deployment
-environment.
+First, ecosystem maturity: operational tooling, wallet support, and indexing infrastructure reduce integration and observability friction. Second, composability: contracts can interact with existing on-chain assets and modules through shared state and deterministic calls. Third, economic security: settlement semantics rely on consensus-backed inclusion/finalization, not only local contract code correctness. Fourth, public accountability: all contract-visible transitions (commitment publication, timeout progression, dispute outcomes, payouts) are externally auditable.
 
-Beyond those baseline conditions, four deployment properties dominate protocol
-design. Ecosystem maturity matters because protocol execution depends on
-surrounding infrastructure: account abstractions, wallets, token standards,
-indexing tools, and operational monitoring all shape practical deployability.
-Composability matters because smart contracts can interact with existing assets
-and application modules through shared state and deterministic calls, so
-enforcement logic can plug into broader market workflows rather than a closed
-system. Economic security matters because settlement semantics rely on
-economically secured consensus and transaction inclusion, not only local
-contract logic. Public accountability matters because transparent contract
-state and execution traces make commitment checks, timeout transitions, dispute
-outcomes, and payouts externally auditable.
+Together, these properties match the objective of economically secure private computation: confidentiality-critical work can remain off-chain, while enforcement remains transparent and objective on-chain.
 
-These properties are precisely the features needed by an economically secure
-private protocol: private computation off-chain, but objectively auditable
-enforcement on-chain.
-The same environment also imposes strict cost and transparency constraints that
-shape protocol architecture.
+\paragraph*{EVM Constraints and Gas-Driven Architecture.}
+Smart contracts execute in the Ethereum Virtual Machine (EVM), a deterministic bytecode runtime replicated by validators. Deterministic replication is the technical basis for public enforceability: all validators must reach the same post-state from the same pre-state and transaction input.
 
-\subsection{EVM Constraints and Architectural Implications}
-Ethereum contract logic is executed in the Ethereum Virtual Machine (EVM), a
-deterministic bytecode runtime replicated across validators.
-Deterministic replicated execution is essential for public enforceability:
-every validator must reach the same post-state from the same input
-transaction.
-This makes the EVM a strong substrate for escrow, collateral locking, hash
-checks, deadline enforcement, and settlement transitions.
+At the same time, the EVM imposes strong practical constraints. Execution is gas-priced, storage writes are expensive, and data-heavy verification scales poorly. Full transcript re-execution is therefore not a practical default behavior for large cryptographic artifacts. In addition, calldata/storage/state transitions are public, which rules out native confidential in-contract execution as a baseline approach.
 
-At the same time, EVM execution is explicitly resource-priced through gas.
-Storage writes are expensive relative to transient computation, and both
-data-heavy and loop-heavy verification paths scale poorly in cost. As a
-result, large cryptographic artifacts and full transcript re-execution are not
-practical default on-chain behavior. The EVM also provides no private memory
-model for contract logic: calldata, storage, and state transitions are public,
-which rules out confidential in-contract evaluation as a baseline design.
-
-These constraints motivate the core architectural decision adopted in this
-thesis:
+These constraints motivate the architecture adopted in this thesis:
 \begin{enumerate}
-\item execute heavy private computation off-chain,
-\item keep on-chain logic focused on commitments, deadlines, and bounded
-predicate checks,
-\item use selective dispute predicates for public accountability rather than
-universal on-chain recomputation.
-\end{enumerate}
-This is a deployment-oriented adaptation to EVM economics, not a reduction in
-security intent.
-
-\section{ENS Auctions}
-The Ethereum Name Service (ENS) maps human-readable names (for example,
-\texttt{alice.eth}) to Ethereum addresses and related records~\cite{EIP137ENS,ENSDocs}.
-ENS names can carry direct utility as routing identifiers, but also identity and
-branding premiums.
-Memorable or category-defining names may therefore accumulate resale value,
-which turns them into economically contested scarce assets.
-This scarcity makes market-based allocation mechanisms, including auctions,
-a natural design choice.
-Classical auction theory formally shows that equilibrium bidding and allocation outcomes depend on bidder-information structure, which further motivates privacy-aware execution in this setting~\cite{MilgromWeber1982}.
-
-In a transparent blockchain environment, fully public bidding leaks
-willingness-to-pay and strategy information, which can distort competition and
-create strategic disadvantages under adversarial ordering conditions~\cite{Daian2019FlashBoys}.
-Bid privacy is therefore economically meaningful, not merely a cosmetic feature.
-In particular, transparent auction flows are exposed to:
-\begin{enumerate}
-\item \textbf{valuation leakage:} visible bids reveal reservation-price signals
-and strategy profiles,
-\item \textbf{reactive bidding:} participants can condition behavior on observed
-partial information rather than sealed valuations,
-\item \textbf{coordination and collusion channels:} transparency can simplify
-monitoring and enforcement of cartel-like strategies,
-\item \textbf{ordering manipulation/front-running:} observable transactions can
-be strategically reordered or preempted in adversarial execution
-environments~\cite{Daian2019FlashBoys}.
+\item execute heavy private computation off-chain;
+\item keep on-chain logic focused on commitments, deadlines, and bounded checks;
+\item rely on selective dispute predicates for accountability instead of universal on-chain recomputation.
 \end{enumerate}
 
-At the same time, name assignment and payment settlement must remain publicly
-enforceable.
-ENS auctions therefore capture both the privacy requirement (for bid formation)
-and the enforceability requirement (for final allocation and payment).
-For this reason, they provide a suitable benchmark for economically secure 2PC
-on Ethereum and a concrete application context for the protocol developed in
-the following chapters.
+Data publication strategy is part of the same constraint set. If settlement references large off-chain artifacts, publication and availability pathways influence cost and liveness assumptions. EIP-4844 blob transactions are therefore directly relevant for practical deployment analysis~\cite{Buterin2022EIP4844}.
 
-\section{Privacy-Preserving Auctions on Blockchains}
-Private auction design on public ledgers has been explored from several
-directions. FAST targets fair auctions using secret transaction
-techniques~\cite{David2021FAST}. In parallel, systems work studies broader
-private-computation layers for blockchain applications: gcVM proposes publicly
-auditable MPC-compatible execution ideas for EVM-like
-environments~\cite{Yanai2026gcVM}, while COTI V2 explores a
-confidentiality-oriented layer-2 approach with additional system
-assumptions~\cite{Haloani2024COTIv2}.
+\subsection{Ethereum Name Service}
+The Ethereum Name Service (ENS) maps human-readable names (for example, \texttt{alice.eth}) to Ethereum addresses and related records~\cite{EIP137ENS,ENSDocs}. Valuable names behave as scarce digital assets and are naturally allocated via market mechanisms such as auctions. Classical auction theory shows that equilibrium outcomes depend on information structure, which makes privacy properties economically material in this setting~\cite{MilgromWeber1982}.
 
-Taken together, these lines of work show that confidentiality and public
-enforceability can coexist, but only under specific trust, complexity, and
-cost tradeoffs. This thesis concentrates on an L1-oriented Ethereum path with
-explicit economic incentives and dispute handling, and aims to minimize
-additional trust assumptions beyond the base chain.
-Recent survey work systematically maps cryptocurrency design trade-offs and shows that security analysis should be coupled with incentive and deployment constraints~\cite{Bonneau2015SoK}.
+In transparent blockchain execution, public bids leak willingness-to-pay and strategy signals. This exposes auction flows to valuation leakage, reactive bidding on partially observed information, collusion support channels, and ordering manipulation opportunities~\cite{Daian2019FlashBoys}. Hence, bid privacy is not an aesthetic feature; it is a mechanism-quality requirement.
 
-\section{Deployment Considerations for Ethereum}
-A practical Ethereum protocol must account for both execution costs and data
-availability pathways. When large off-chain artifacts (for example, evaluation
-payloads derived from garbled-circuit flow) are referenced by on-chain
-commitments, the protocol has to define how those artifacts are published and
-how publication is cryptographically bound to settlement logic. EIP-4844 is
-therefore directly relevant: blob transactions provide a high-volume data
-publication path with cost characteristics distinct from
-calldata~\cite{Buterin2022EIP4844}.
+ENS auctions are a suitable benchmark for this thesis because they require both properties simultaneously: private bid formation and publicly enforceable final allocation/payment. They also provide a clean application context for separating protocol-core guarantees from application-layer semantics.
 
-Accordingly, design choices in this thesis are evaluated not only at the level
-of security semantics, but also for concrete deployment feasibility under
-Ethereum's transaction and fee model.
+\subsection{Secure Two-Party Computation}
+\paragraph*{2PC and Garbled Circuits.}
+Secure two-party computation (2PC) asks how two mutually distrustful parties can evaluate a function over private inputs while revealing only the prescribed output. The baseline adopted in this thesis follows the garbled-circuit line with oblivious transfer (OT) for input-label delivery. Foundations and formal treatments are established in classical and modern work~\cite{Bellare2012FoundationsGC,LindellPinkas2008}, while optimizations such as Half-Gates improve communication efficiency under standard security assumptions~\cite{Zahur2015HalfGates}.
 
-\section{Positioning of This Thesis}
-Relative to prior work, this thesis is positioned at the intersection of:
-\begin{enumerate}
-\item garbled-circuit-based 2PC foundations~\cite{Bellare2012FoundationsGC,LindellPinkas2008},
-\item publicly verifiable and financially motivated enforcement models~\cite{Zhu2019PV2PC,BitPriv2025},
-\item adversarial blockchain execution analysis with MEV-aware reasoning~\cite{Daian2019FlashBoys,Wood2025Ethereum},
-\item and private auction protocol design for practical deployment~\cite{David2021FAST,Yanai2026gcVM,Haloani2024COTIv2,Buterin2022EIP4844}.
-\end{enumerate}
+In blockchain-integrated settings, this approach enables an explicit labor split: private heavy computation is handled off-chain, and chain logic focuses on commitment binding, deadline enforcement, dispute entry points, and settlement transitions.
 
-The main distinction from existing systems is the target setting:
-economically secure 2PC for sealed-bid auctions on Ethereum, paired with an
-explicit implementation and evaluation path that keeps protocol assumptions
-aligned with engineering reality.
+\paragraph*{From Semi-Honest to Malicious Security.}
+Semi-honest security assumes parties follow the protocol but may try to infer additional information from observed transcripts. In financial workflows, this assumption is often insufficient because profitable strategic deviation is expected. Malicious security introduces explicit safeguards such as commitment-consistency checks, cut-and-choose-style validation, and controlled abort handling~\cite{LindellPinkas2008}.
+
+The practical tradeoff is multi-dimensional. Stronger malicious guarantees increase not only communication and verification cost, but also off-chain setup effort and end-to-end latency from setup to enforceable completion. In auction environments with moving market conditions, this latency interacts directly with economic utility, so security level and deployability must be calibrated jointly rather than optimized in isolation.
+
+\section{Related Work}
+
+\subsection{Privacy on Blockchains}
+Publicly verifiable 2PC studies how deviations can be externally validated so a smart contract or third party can arbitrate disputes without replaying full private execution. Zhu et al.\ provide a key direction for blockchain-based financially secure computation~\cite{Zhu2019PV2PC}. BitPriv extends this perspective with collateral-backed punishment and publicly verifiable dispute handling~\cite{BitPriv2025}.
+
+A parallel line addresses private smart contracts on expressive blockchain platforms. Hawk demonstrates privacy-preserving smart contracts but depends on a trusted manager role~\cite{Kosba2016Hawk}. Zexe and VeriZexe target decentralized private computation with stronger function/privacy capabilities via succinct proof systems~\cite{Bowe2018Zexe,Xiong2023VeriZexe}. These systems establish important capability frontiers, but they also imply a different cryptographic and engineering budget than the one targeted in this thesis.
+
+System-oriented designs explore additional points in the tradeoff space. gcVM investigates publicly auditable MPC-compatible execution in EVM-like environments~\cite{Yanai2026gcVM}; COTI V2 studies confidentiality-oriented L2 design under extra system assumptions~\cite{Haloani2024COTIv2}. For Ethereum deployment, data publication pathways are also first-order concerns: EIP-4844 introduces blob-based publication with different availability and cost characteristics from calldata~\cite{Buterin2022EIP4844}.
+
+Positioning of this thesis is therefore explicit: for sealed-bid auctions on Ethereum, the target is a lighter deployment profile without zkSNARK dependency in the core enforcement path, without trusted manager roles, and without TEE/external-committee trust assumptions. Correctness and accountability are anchored in off-chain 2PC, on-chain commitments, deadline transitions, and selective dispute predicates.
+
+\subsection{Auctions on Blockchains}
+Privacy-preserving auctions on public ledgers remain an active design area. FAST studies fair auction mechanics with secret-transaction techniques~\cite{David2021FAST}. More generally, auction behavior on transparent chains must be analyzed jointly with adversarial execution dynamics, including ordering manipulation and MEV exposure~\cite{Daian2019FlashBoys,Qin2022MEV}.
+
+This perspective aligns with broader cryptocurrency-systems analyses, where security arguments are evaluated together with incentive compatibility and deployment constraints rather than in cryptographic isolation~\cite{Bonneau2015SoK}. For auction mechanisms, this means mechanism quality depends not only on privacy guarantees, but also on liveness behavior, enforceability under deadlines, and cost-bounded dispute handling.
+
+Relative to this landscape, the contribution of this thesis is an implementation-coupled economic-security profile for Ethereum sealed-bid workflows: private bid computation off-chain, enforceable settlement binding on-chain, and deterrence calibration through collateral, slashing, and deadlines under realistic execution constraints.
 
 \chapter{Model and Requirements}
 \section{System Model and Roles}
