@@ -835,7 +835,7 @@ and validates that the chosen output name belongs to that offered set. This is
 an engineering simplification of the broader application vision and does not
 change the protocol-level enforcement structure.
 
-\section{Specification Conformance}
+\section{Protocol-to-Implementation Alignment}
 For reproducibility, the protocol notation and ordering in this chapter follow
 the implemented state machine.
 Output validity is specified via the structured anchor
@@ -865,7 +865,7 @@ enforces deadlines, commitments, disputes, and settlement transitions.
 
   \draw[<->, thick] (alice) -- node[left, align=center] {off-chain protocol exchange\\(seeds, artefacts, proofs)} (bobs);
   \draw[->, thick] (alice) -- node[above, align=center] {on-chain actions\\(commit/reveal/dispute)} (contract);
-  \draw[->, thick] (bobs.east) -- node[below, align=center] {on-chain actions\\(ready/challenge/settle/abort)} (contract.south west);
+  \draw[->, thick] (bobs.east) -- node[pos=0.78, below, yshift=-3.5mm, align=center, text width=33mm] {on-chain actions\\(ready/challenge/settle/abort)} (contract.west);
 \end{tikzpicture}
 }
 \caption{Prototype protocol architecture with one garbler role, $n$ evaluator roles, and Ethereum L1 contract enforcement.}
