@@ -331,7 +331,7 @@ primitives:
 \item deposits,
 \item evaluator-seed commit and reveal,
 \item core commitments and evaluator-scoped OT-root commitments,
-\item evaluator liveness/input finalization,
+\item evaluator liveness and OT-readiness confirmation (no on-chain bid reveal),
 \item cut-and-choose opening,
 \item dispute window,
 \item label reveal and settlement submission,
@@ -718,9 +718,23 @@ reimburses evaluator collateral and transfers garbler collateral according to
 the contract rules.
 
 \subsection{Phase 4: Evaluator Liveness and Input Readiness}
-Each evaluator must confirm readiness before deadline. Evaluators that remain
-unresolved are defaulted to semantic input $0$ and slashed. This guarantees
-progress to the opening phase even when some participants do not cooperate.
+Phase~4 records evaluator readiness after the off-chain OT/input-label exchange
+has completed. By confirming readiness, an evaluator signals that it has
+obtained the evaluator-side input labels through OT and remains available for
+the subsequent opening, dispute, and settlement stages. The confirmation is
+therefore a liveness and availability signal used by the contract to determine
+the active evaluator set.
+
+If an evaluator does not confirm readiness before the deadline, the contract
+resolves that evaluator through the default path: the evaluator is treated as
+non-cooperative, assigned the semantic default input $0$ for protocol progress,
+and penalized according to the slashing rules. This prevents a missing
+evaluator from blocking the transition to the opening phase.
+
+The evaluator's bid itself is not published on-chain in this phase. Garbler-side
+labels for the selected evaluation instance are revealed later in Phase~7,
+while evaluator-side labels remain off-chain OT outputs and are only relevant
+to local evaluation and dispute evidence.
 
 \subsection{Phase 5: Cut-and-Choose Openings}
 The garbler reveals $N-1$ seeds for indices in $S_{\mathrm{open}}$ and proves
@@ -756,6 +770,8 @@ The garbler reveals garbler labels for the evaluation instance $m$. In the same
 transition, the contract checks that \texttt{blobhash(0)} equals committed
 $\mathrm{blobHashGC}_m$. This binds settlement to one concrete EIP-4844 payload
 reference in that transaction (specific blob index and versioned hash).
+This is not evaluator-input reveal: evaluator bids and evaluator-side input
+labels are not published on-chain in Phase~7.
 Payload semantics are verified through off-chain reconstruction and dispute
 checks, while on-chain logic enforces hash binding and phase integrity.
 Because blob data is ephemeral, this implementation assumes payload
@@ -1130,7 +1146,7 @@ blob-fee assumptions.
 \hline
 Honest success flow & No deviations by garbler or evaluators & Protocol reaches Closed; settlement is accepted; ENS assignment completes; no unresolved evaluators remain. \\
 \hline
-Evaluator defaulted flow & One evaluator does not complete evaluator input readiness before deadline & Default-to-zero and slashing are applied; protocol still reaches settlement, then assignment. \\
+Evaluator defaulted flow & One evaluator does not complete evaluator OT/readiness confirmation before deadline & Default-to-zero and slashing are applied; protocol still reaches settlement, then assignment. \\
 \hline
 Garbler-cheat flow & Garbler commits tampered rootGC for an opened instance & GC-leaf dispute succeeds; garbler is slashed; contract closes without settlement or assignment. \\
 \hline

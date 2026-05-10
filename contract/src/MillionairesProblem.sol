@@ -32,7 +32,7 @@ contract MillionairesProblem {
         uint256 deposit;          // Phase 1: Alice + buyers must lock funds
         uint256 verifierSeed;    // Phase 2: buyer seed commit/reveal windows
         uint256 commit;          // Phase 3: Alice submit core commitments, then OT roots
-        uint256 buyerInputOt;    // Phase 4: Buyers finalize input/OT state or get defaulted
+        uint256 buyerInputOt;    // Phase 4: Buyers confirm OT/readiness state or get defaulted
         uint256 open;            // Phase 5: Alice must reveal n-1 seeds
         uint256 dispute;         // Phase 6: Off-chain verification + Dispute window
         uint256 labels;          // Phase 7: Alice must reveal garbler input labels
