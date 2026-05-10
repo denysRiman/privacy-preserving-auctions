@@ -286,8 +286,8 @@ Relative to this landscape, the contribution of this thesis is an implementation
 
 \chapter{Model and Requirements}
 \section{System Model and Roles}
-To keep protocol and application semantics clearly separated, this chapter uses
-an explicit layer vocabulary:
+The system is composed of three layers, each with a distinct role and
+assumption boundary:
 \begin{enumerate}
 \item \textbf{Protocol (2PC core):} pairwise GC/OT execution between one
 garbler $G$ (private input $x$) and one evaluator $E$ (private input $y$), with
