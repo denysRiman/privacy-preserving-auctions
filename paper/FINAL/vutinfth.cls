@@ -414,8 +414,8 @@
   listed all generative AI tools that were used in the creation of this
   work, and indicated where in the work they were used. If whole passages
   of text were used without substantial changes, I have indicated the
-  input (prompts) I formulated and the IT application used with its
-  product name and version number/date.},
+  input (prompts) I formulated, including the product name of the IT
+  application, its version (where available), and the date of use.},
   naustrian={Ich erkl\"are weiters, dass ich mich generativer KI-Tools lediglich als
   Hilfsmittel bedient habe und in der vorliegenden Arbeit mein
   gestalterischer Einfluss \"uberwiegt. Im Anhang \glqq\"Ubersicht verwendeter
